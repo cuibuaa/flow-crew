@@ -20,7 +20,7 @@ import type { Adapter } from '../src/adapters/base.js';
 import { cmdDaemon } from '../src/cli-daemon.js';
 import { writeStageStatus } from '../src/store.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { execFileSync } from 'node:child_process';
+import { daemonCommand } from './test-support/daemon-events.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import * as deployment from '../src/deployment-hold.js';
 import * as store from '../src/store.js';
@@ -474,9 +474,10 @@ it('continues an attemptless legacy preparation without inventing completed hist
 
 it('retains completed uncommitted project work across a deployment hold and scheduler replacement', async () => {
   writeFileSync(join(project, 'product.txt'), 'Original tracked product.\n');
-  execFileSync(process.execPath, ['--input-type=module', '-e', "import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q']); execFileSync('git', ['add', 'product.txt']);"], {
-    cwd: project, env: { ...process.env, HOME: project, FC_HOME: project }, timeout: 10_000,
+  const setup = await daemonCommand(process.execPath, ['--input-type=module', '-e', "import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q']); execFileSync('git', ['add', 'product.txt']);"], {
+    cwd: project, env: { ...process.env, HOME: project, FC_HOME: project },
   });
+  expect(setup.status, setup.stderr).toBe(0);
   const config = workflow();
   config.defaults.max_iterations = 1;
   config.stages = [config.stages[0], { ...config.stages[3], depends_on: ['producer'] }, config.stages[4], config.stages[5]];

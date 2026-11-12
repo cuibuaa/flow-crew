@@ -1,5 +1,5 @@
 import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, statSync, lstatSync, copyFileSync, symlinkSync, realpathSync, chmodSync } from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { assertBuildArtifactInventory, assertDistFresh, collectBuildArtifacts, createBuildManifest, publishBuildOutputs, pinBuildRuntime, readBuildManifest, buildProjectRoot, computeBuildInputDigest, isBuildManifest, BUILD_MANIFEST_FILENAME, type BuildFileRecord, type BuildManifest } from '../src/build-manifest.js';
 import { computeBuildFingerprint } from '../src/daemon-identity.js';
+import { daemonCommand } from './test-support/daemon-events.js';
 import { validationEnvironment } from '../src/validation-environment.js';
 
 const roots: string[] = [];
@@ -174,40 +175,45 @@ describe('one backend and UI build identity', () => {
     roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`));
     writeFileSync(join(root, 'src/late.ts'), 'export const value = 1;');
     writeFileSync(join(root, 'src/daemon-probe.ts'), [
-      "import { existsSync } from 'node:fs';",
       "process.stdout.write('ready\\n');",
-      "while (!existsSync(process.argv[2])) await new Promise(r => setTimeout(r, 5));",
+      "await new Promise(r => process.once('message', r));",
+      "process.disconnect?.();",
       "process.stdout.write(String((await import('./late.js')).value));",
     ].join('\n'));
     const { env } = validationEnvironment(scratch, process.env);
-    const build = () => {
-      const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
-        cwd: root, encoding: 'utf8', timeout: 60_000,
+    const build = async () => {
+      const result = await daemonCommand(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
+        cwd: root,
         env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME },
       });
-      expect(result.status, `${result.error ?? ''}\n${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       return assertDistFresh(root);
     };
-    const first = build();
+    const first = await build();
     const runtimeRoot = join(scratch, 'daemon/runtime');
     const runtime = pinBuildRuntime(join(root, 'dist'), runtimeRoot);
     expect(runtime).toBe(join(runtimeRoot, '.cache/build-generations', first.generation, 'dist'));
-    const release = join(scratch, 'release');
-    const child = spawn(process.execPath, [join(runtime, 'daemon-probe.js'), release], {
-      cwd: root, env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME }, stdio: ['ignore', 'pipe', 'pipe'],
+    const child = spawn(process.execPath, [join(runtime, 'daemon-probe.js')], {
+      cwd: root, env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     let output = '';
+    let announced!: () => void;
+    const ready = new Promise<void>(resolve => { announced = resolve; });
     const finished = new Promise<number | null>((resolveChild, reject) => {
-      child.stdout.on('data', chunk => output += String(chunk));
+      child.stdout.on('data', chunk => {
+        output += String(chunk);
+        if (output === 'ready\n') announced();
+      });
       child.stderr.on('data', chunk => output += String(chunk));
       child.once('error', reject); child.once('close', resolveChild);
     });
     try {
-      await vi.waitFor(() => expect(output).toBe('ready\n'), { timeout: 10_000 });
+      await Promise.race([ready, finished.then(code => { throw new Error(`Pinned child closed before readiness (${code}): ${output}`); })]);
+      expect(output).toBe('ready\n');
       let second = first;
       for (const value of [2, 3, 4]) {
         writeFileSync(join(root, 'src/late.ts'), `export const value = ${value};`);
-        second = build();
+        second = await build();
         expect(second.inputs.hash).not.toBe(first.inputs.hash);
         expect(second.generation).not.toBe(first.generation);
         expect(assertBuildArtifactInventory(runtime, first)).toEqual(first.artifacts);
@@ -219,7 +225,7 @@ describe('one backend and UI build identity', () => {
       expect(assertBuildArtifactInventory(nextRuntime, second)).toEqual(second.artifacts);
       expect(buildProjectRoot(runtime)).toBe(root);
       expect(existsSync(join(root, '.cache/build-generations'))).toBe(false);
-      writeFileSync(release, 'release');
+      child.send('release');
       expect(await finished).toBe(0);
       expect(output).toBe('ready\n1');
       expect((await import(pathToFileURL(join(nextRuntime, 'late.js')).href)).value).toBe(4);
@@ -384,7 +390,7 @@ describe('one backend and UI build identity', () => {
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('without a combined build manifest');
   });
 
-  it('publishes the production UI when invoked from a test or development parent', () => {
+  it('publishes the production UI when invoked from a test or development parent', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'flowcrew-build-production-'))); roots.push(root);
     roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`));
     const repository = resolve(import.meta.dirname, '..');
@@ -413,8 +419,8 @@ describe('one backend and UI build identity', () => {
     roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(outputRoot).digest('hex').slice(0, 16)}`));
     for (const mode of ['test', 'development', 'private']) {
       const destination = mode === 'private' ? outputRoot : root;
-      const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts', ...(mode === 'private' ? [destination] : [])], {
-        cwd: root, encoding: 'utf8', timeout: 60_000,
+      const result = await daemonCommand(process.execPath, ['--import', 'tsx', 'scripts/build.ts', ...(mode === 'private' ? [destination] : [])], {
+        cwd: root,
         env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'home/.fc'), NODE_ENV: mode },
       });
       expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -423,7 +429,7 @@ describe('one backend and UI build identity', () => {
     }
   }, 120_000);
 
-  it('builds source during installation and leaves packaged installations ready to run', () => {
+  it('builds source during installation and leaves packaged installations ready to run', async () => {
     const repository = resolve(import.meta.dirname, '..');
     const scripts = JSON.parse(readFileSync(join(repository, 'package.json'), 'utf8')).scripts as Record<string, string>;
     expect(scripts.prepare).toBeUndefined();
@@ -439,7 +445,7 @@ describe('one backend and UI build identity', () => {
       chmodSync(npm, 0o755);
       if (shape !== 'package') { mkdirSync(join(root, 'scripts')); writeFileSync(join(root, 'scripts/build.ts'), 'source'); }
       if (shape === 'source-ui') { mkdirSync(join(root, 'ui')); writeFileSync(join(root, 'ui/package.json'), '{}'); }
-      const result = spawnSync(process.execPath, ['-e', hook!], { cwd: root, encoding: 'utf8', timeout: 10_000,
+      const result = await daemonCommand(process.execPath, ['-e', hook!], { cwd: root,
         env: { ...process.env, PATH: bin, HOME: join(root, 'home'), FC_HOME: join(root, 'home/.fc') } });
       expect(result.status, result.stderr).toBe(0);
       const calls = readdirSync(root).includes('calls.jsonl') ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];

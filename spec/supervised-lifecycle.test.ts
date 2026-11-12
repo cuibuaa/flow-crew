@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -15,7 +15,8 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { sendRpc, type RpcResponse } from '../src/orchestrator-rpc.js';
+import type { RpcResponse } from '../src/orchestrator-rpc.js';
+import { daemonClosed, daemonCommand, daemonFile, daemonPublication, daemonRpc } from './test-support/daemon-events.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { TERMINAL_STATUSES } from '../src/store.js';
 import { TASK_STATUS, TaskRegistry, type TaskEntry } from '../src/task-registry.js';
@@ -37,6 +38,7 @@ interface Harness {
   preloadPath: string;
   defaultProject: string;
   daemon: ChildProcess;
+  closed: Promise<void>;
   daemonOutput: string;
   ownedShimPids: Set<number>;
   ownedAgentPids: Set<number>;
@@ -67,11 +69,11 @@ afterEach(async () => {
 describe('portable supervised lifecycle through the real CLI', () => {
   it('[1] launches, cancels and restarts a task without legacy mirror files', { timeout: 60_000 }, async ({ signal }) => {
     const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'cancel-cli'), HOLD_MARKER);
+    const task = await registerBackgroundTask(harness, createProject(harness, 'cancel-cli'), HOLD_MARKER);
     const pid = await waitForRecordedAgentPid(harness, task.unit);
     await waitForHeldAgent(harness, pid, signal);
 
-    const cancelled = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
+    const cancelled = await runCli(harness, task.project, ['task', 'cancel', String(task.id)]);
     const output = `${cancelled.stdout}${cancelled.stderr}`;
     const controlDir = join(harness.fcHome, 'supervise', safeUnit(task.unit));
     const runningPath = join(controlDir, 'running.json');
@@ -88,17 +90,17 @@ describe('portable supervised lifecycle through the real CLI', () => {
     ).toMatchObject({ status: 0, output: expect.stringContaining(`Task #${task.id} cancelled`) });
     expect(pidProbe(pid), `cancel returned before agent ${pid} exited`).toBe('esrch');
 
-    const retried = runCliSync(harness, task.project, ['task', 'resume', String(task.id)]);
+    const retried = await runCli(harness, task.project, ['task', 'resume', String(task.id)]);
     expect(retried.status, `${retried.stdout}${retried.stderr}`).toBe(0);
     let restarted: TaskEntry | undefined;
-    expect(await waitUntil(async () => {
-      restarted = await showTask(harness, task.id);
-      return restarted.systemd_unit !== task.unit && restarted.status === TASK_STATUS.RUNNING;
-    }, 35_000)).toBe(true); // The daemon drains its queue every 30 s.
+    expect(await daemonPublication(harness.fcHome, () => {
+      restarted = new TaskRegistry({ baseDir: harness.fcHome }).get(task.id);
+      return restarted && restarted.systemd_unit !== task.unit && restarted.status === TASK_STATUS.RUNNING ? true : undefined;
+    })).toBe(true);
     const restartedPid = await waitForRecordedAgentPid(harness, restarted!.systemd_unit);
     await waitForHeldAgent(harness, restartedPid, signal);
     expect(restartedPid).not.toBe(pid);
-    const stopped = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
+    const stopped = await runCli(harness, task.project, ['task', 'cancel', String(task.id)]);
     expect(stopped.status, `${stopped.stdout}${stopped.stderr}`).toBe(0);
     expect(pidProbe(restartedPid)).toBe('esrch');
     for (const unit of [task.unit, restarted!.systemd_unit]) {
@@ -111,15 +113,11 @@ describe('portable supervised lifecycle through the real CLI', () => {
 
   it('[3] shows a natural exit code 3 and a terminal status', async () => {
     const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'exit-three'), EXIT_THREE_MARKER);
-    const pid = await waitForRecordedAgentPid(harness, task.unit);
-    await waitUntil(() => pidProbe(pid) === 'esrch' || exitRecordExists(harness, task.unit), 5_000);
-
-    const shown = await waitForCliResult(
-      () => runCliSync(harness, task.project, ['task', 'show', String(task.id)]),
-      (result) => result.stdout.includes('Exit code: 3'),
-      5_000,
-    );
+    const task = await registerBackgroundTask(harness, createProject(harness, 'exit-three'), EXIT_THREE_MARKER);
+    await waitForRecordedAgentPid(harness, task.unit);
+    const exitPath = join(harness.fcHome, 'supervise', safeUnit(task.unit), 'exit.json');
+    await daemonFile(exitPath, () => exitRecordExists(harness, task.unit) ? true : undefined);
+    const shown = await runCli(harness, task.project, ['task', 'show', String(task.id)]);
     const output = `${shown.stdout}${shown.stderr}`;
 
     expect(output).toContain('Exit code: 3');
@@ -136,7 +134,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     let response: CancellationResult | undefined;
     let error: string | undefined;
     try {
-      response = await sendRpc<CancellationResult>(harness.socketPath, { cmd: 'cancel', id: task.id });
+      response = await daemonRpc<CancellationResult>(harness.socketPath, { cmd: 'cancel', id: task.id });
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     }
@@ -150,7 +148,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
 
   it('[6] merges terminal run.json state over a stale running registry status and preserves portable tail output', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
-    const task = registerBackgroundTask(harness, createProject(harness, 'show-terminal'), 'show fixture');
+    const task = await registerBackgroundTask(harness, createProject(harness, 'show-terminal'), 'show fixture');
     const terminal = await waitForTerminalRun(harness, task.id);
     const registry = new TaskRegistry({ baseDir: harness.fcHome });
     registry.update(task.id, { status: TASK_STATUS.RUNNING });
@@ -158,13 +156,13 @@ describe('portable supervised lifecycle through the real CLI', () => {
       throw new Error(`failed to establish stale running registry fixture for task #${task.id}`);
     }
 
-    const shown = runCliSync(harness, task.project, ['task', 'show', String(task.id)]);
+    const shown = await runCli(harness, task.project, ['task', 'show', String(task.id)]);
     const output = `${shown.stdout}${shown.stderr}`;
 
     expect(shown.status, output).toBe(0);
     expect(output).toContain(`Status: ${terminal.state.status}`);
     expect(output).not.toContain('Status: running');
-    const tailed = runCliSync(harness, task.project, ['task', 'tail', String(task.id), '--tail', '1000']);
+    const tailed = await runCli(harness, task.project, ['task', 'tail', String(task.id), '--tail', '1000']);
     expect(tailed.status, tailed.stderr).toBe(0);
     expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
   });
@@ -236,6 +234,7 @@ async function createHarness(): Promise<Harness> {
     preloadPath,
     defaultProject,
     daemon,
+    closed: daemonClosed(daemon),
     daemonOutput,
     ownedShimPids: new Set(),
     ownedAgentPids: new Set(),
@@ -253,17 +252,11 @@ async function createHarness(): Promise<Harness> {
     harness.daemonOutput += `daemon spawn error: ${error.message}\n`;
   });
 
-  const ready = await waitUntil(async () => {
-    if (daemon.exitCode !== null) return false;
-    if (!existsSync(socketPath)) return false;
-    try {
-      const response = await sendRpc<RpcResponse>(socketPath, { cmd: 'status' }, 300);
-      return typeof response === 'object' && response !== null;
-    } catch {
-      return false;
-    }
-  }, 5_000);
-  if (!ready) throw new Error(`real daemon did not become ready: ${harness.daemonOutput}`);
+  await Promise.race([
+    daemonPublication(root, () => existsSync(join(root, 'daemon.json')) ? true : undefined),
+    harness.closed.then(() => { throw new Error(`real daemon exited before readiness: ${harness.daemonOutput}`); }),
+  ]);
+  await daemonRpc<RpcResponse>(socketPath, { cmd: 'status' });
   return harness;
 }
 
@@ -273,7 +266,7 @@ function createProject(harness: Harness, label: string): string {
   return project;
 }
 
-function registerBackgroundTask(harness: Harness, project: string, marker: string): RegisteredTask {
+async function registerBackgroundTask(harness: Harness, project: string, marker: string): Promise<RegisteredTask> {
   const brief = [
     '---', `criteria: ${JSON.stringify([{ id: 'lifecycle', text: LIFECYCLE_CRITERION }])}`, '---',
     '# Goal',
@@ -284,7 +277,7 @@ function registerBackgroundTask(harness: Harness, project: string, marker: strin
     '',
   ].join('\n');
   writeReadySetupRecord(project, brief, harness.fcHome);
-  const result = runCliSync(harness, project, [
+  const result = await runCli(harness, project, [
     'quick',
     '--background',
     '--acknowledge-brief-warnings',
@@ -300,8 +293,8 @@ function registerBackgroundTask(harness: Harness, project: string, marker: strin
   return { id: Number.parseInt(match[1], 10), unit: match[2], project };
 }
 
-function runCliSync(harness: Harness, project: string, cliArgs: string[]) {
-  return spawnSync(
+function runCli(harness: Harness, project: string, cliArgs: string[]) {
+  return daemonCommand(
     process.execPath,
     [distCli, ...cliArgs],
     {
@@ -317,15 +310,12 @@ function runCliSync(harness: Harness, project: string, cliArgs: string[]) {
         NODE_OPTIONS: `--require=${harness.preloadPath}`,
         NO_COLOR: '1',
       },
-      encoding: 'utf-8',
-      timeout: 20_000,
-      maxBuffer: 4 * 1024 * 1024,
     },
   );
 }
 
 async function showTask(harness: Harness, id: number): Promise<TaskEntry> {
-  const response = await sendRpc<{ task: TaskEntry; recent_ticks: string[] }>(
+  const response = await daemonRpc<{ task: TaskEntry; recent_ticks: string[] }>(
     harness.socketPath,
     { cmd: 'show', id },
   );
@@ -333,23 +323,20 @@ async function showTask(harness: Harness, id: number): Promise<TaskEntry> {
 }
 
 async function waitForTerminalRun(harness: Harness, id: number): Promise<RunSnapshot> {
-  let snapshot: RunSnapshot | undefined;
-  const found = await waitUntil(async () => {
-    const task = await showTask(harness, id);
-    if (!task.run_id) return false;
-    const runId = basename(task.run_id);
-    const runPath = join(harness.fcHome, 'runs', runId);
+  const task = await daemonPublication(harness.fcHome, () => {
+    const entry = new TaskRegistry({ baseDir: harness.fcHome }).get(id);
+    return entry?.run_id ? entry : undefined;
+  });
+  const runId = basename(task.run_id!);
+  const runPath = join(harness.fcHome, 'runs', runId);
+  const path = runRecordPath(runPath, 'run.json');
+  const state = await daemonFile(path, () => {
     try {
-      const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as RunSnapshot['state'];
-      if (!(TERMINAL_STATUSES as readonly string[]).includes(state.status)) return false;
-      snapshot = { task, runId, runPath, state };
-      return true;
-    } catch {
-      return false;
-    }
-  }, 30_000);
-  if (!found || !snapshot) throw new Error(`run for task #${id} did not reach a terminal record`);
-  return snapshot;
+      const state = JSON.parse(readFileSync(path, 'utf-8')) as RunSnapshot['state'];
+      return (TERMINAL_STATUSES as readonly string[]).includes(state.status) ? state : undefined;
+    } catch { return undefined; }
+  });
+  return { task, runId, runPath, state };
 }
 
 function waitForHeldAgent(harness: Harness, pid: number, signal: AbortSignal): Promise<void> {
@@ -373,8 +360,8 @@ function waitForHeldAgent(harness: Harness, pid: number, signal: AbortSignal): P
 
 async function waitForRecordedAgentPid(harness: Harness, unit: string): Promise<number> {
   let recorded: number | undefined;
-  const found = await waitUntil(() => {
-    const runningPath = join(harness.fcHome, 'supervise', safeUnit(unit), 'running.json');
+  const runningPath = join(harness.fcHome, 'supervise', safeUnit(unit), 'running.json');
+  await daemonFile(runningPath, () => {
     try {
       const running = JSON.parse(readFileSync(runningPath, 'utf-8')) as {
         shimPid?: number;
@@ -389,9 +376,9 @@ async function waitForRecordedAgentPid(harness: Harness, unit: string): Promise<
         return true;
       }
     } catch { /* launcher has not recorded the pid yet */ }
-    return false;
-  }, 5_000);
-  if (!found || recorded === undefined) throw new Error(`no recorded agent pid for ${unit}`);
+    return undefined;
+  });
+  if (recorded === undefined) throw new Error(`no recorded agent pid for ${unit}`);
   return recorded;
 }
 
@@ -415,46 +402,14 @@ function pidProbe(pid: number): 'alive' | 'esrch' | 'other-error' {
   }
 }
 
-async function waitForCliResult<T>(
-  read: () => T,
-  accept: (result: T) => boolean,
-  timeoutMs: number,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last = read();
-  while (!accept(last) && Date.now() < deadline) {
-    await delay(50);
-    last = read();
-  }
-  return last;
-}
-
-async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return true;
-    await delay(50);
-  }
-  return check();
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-}
-
 async function cleanupHarness(harness: Harness): Promise<void> {
   collectRecordedPids(harness);
-  try {
-    await sendRpc(harness.socketPath, { cmd: 'stop' }, 500);
-  } catch { /* a failed assertion may race daemon startup/exit */ }
-  await waitUntil(() => harness.daemon.exitCode !== null, 1_000);
-  if (harness.daemon.exitCode === null) harness.daemon.kill('SIGTERM');
-
-  for (const pid of harness.ownedShimPids) signalOwnedPid(pid, 'SIGTERM', false);
-  for (const pid of harness.ownedAgentPids) signalOwnedPid(pid, 'SIGTERM', true);
-  await delay(100);
-  for (const pid of harness.ownedShimPids) signalOwnedPid(pid, 'SIGKILL', false);
+  // Cleanup is not a grace-period test. Retire the owned daemon and agents,
+  // and await the child close before removing its private state.
+  harness.daemon.kill('SIGKILL');
   for (const pid of harness.ownedAgentPids) signalOwnedPid(pid, 'SIGKILL', true);
+  await harness.closed;
+  for (const pid of harness.ownedShimPids) signalOwnedPid(pid, 'SIGKILL', false);
 
   if (harness.root.startsWith(join(tmpdir(), 'fc-sl-'))) {
     rmSync(harness.root, { recursive: true, force: true });
@@ -503,6 +458,10 @@ function preloadSource(): string {
     'const originalReadFileSync = fs.readFileSync;',
     'const originalExecFileSync = childProcess.execFileSync;',
     'const daemonServe = process.argv.includes(\'daemon\') && process.argv.includes(\'serve\');',
+    // This fixture asserts retirement before acknowledgement, independently of
+    // the production cancellation/portable-exit observation budgets. Real
+    // signals, shim escalation and child-close events continue to progress.
+    'if (daemonServe) { const now = Date.now(); Date.now = () => now; }',
     "const briefIndex = process.argv.indexOf('--brief-input-base64');",
     "const brief = briefIndex >= 0 && process.argv[briefIndex + 1]",
     "  ? Buffer.from(process.argv[briefIndex + 1], 'base64url').toString('utf8')",

@@ -8,7 +8,8 @@ import { handleDaemonRegistrationRequest } from '../src/cli-daemon.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { Orchestrator, type SupervisorBackend, type GitAdapter } from '../src/orchestrator.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
-import { sendRpc, startRpcServer, type RegisterRpcResponse } from '../src/orchestrator-rpc.js';
+import { startRpcServer, type RegisterRpcResponse } from '../src/orchestrator-rpc.js';
+import { daemonRpc } from './test-support/daemon-events.js';
 import { createRun } from './test-support/create-run.js';
 import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import { fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
@@ -85,7 +86,7 @@ describe('durable registration queue', () => {
       return handleDaemonRegistrationRequest(orchestrator, req, { pid: process.pid, build: { algorithm: 'sha256', hash: 'fixture', files: 1, newestMtimeMs: 0 } });
     }, { onResponse: () => { drain = orchestrator.tickOnce(); } });
     try {
-      const response = await sendRpc<RegisterRpcResponse>(socket, { cmd: 'register', task: input(), acknowledgement: 'persisted' });
+      const response = await daemonRpc<RegisterRpcResponse>(socket, { cmd: 'register', task: input(), acknowledgement: 'persisted' });
       expect(response.acknowledgement).toBe('persisted');
       expect(registry.get(response.id)?.status).toBe('running');
       expect(readFileSync(registry.registryPath, 'utf8')).toContain('"brief_admission"');

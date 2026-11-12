@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,7 @@ import { afterEach, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { assertContinuationCompatible } from '../src/engine-continuation.js';
-import { sendRpc } from '../src/orchestrator-rpc.js';
+import { daemonClosed, daemonCommand, daemonFile, daemonPublication, daemonRpc } from './test-support/daemon-events.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { normalizeStageContracts, WorkflowConfigSchema } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
@@ -27,6 +27,7 @@ interface Harness {
   socket: string;
   env: NodeJS.ProcessEnv;
   daemon: ChildProcess;
+  closed: Promise<void>;
   output: string;
   previousStore: string;
 }
@@ -45,20 +46,12 @@ afterEach(async () => {
       for (const pid of [record.shimPid, record.agentPid]) if (Number.isInteger(pid) && pid > 1) owned.add(pid);
     } catch { /* a completed unit may have removed its running record */ }
   }
-  try { await sendRpc(fixture.socket, { cmd: 'stop' }, 500); } catch { /* fixture daemon already stopped */ }
-  await waitUntil(() => fixture.daemon.exitCode !== null, 1_000);
-  if (fixture.daemon.exitCode === null) fixture.daemon.kill('SIGTERM');
-  for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
-    for (const pid of owned) {
-      try { process.kill(-pid, signal); } catch { /* not a live fixture process group */ }
-      try { process.kill(pid, signal); } catch { /* already exited */ }
-    }
-    await new Promise(resolve => setTimeout(resolve, 100));
+  fixture.daemon.kill('SIGKILL');
+  for (const pid of owned) {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* already stopped */ }
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already stopped */ }
   }
-  await waitUntil(() => fixture.daemon.exitCode !== null, 1_000);
-  await waitUntil(() => [...owned].every(pid => {
-    try { process.kill(pid, 0); return false; } catch { return true; }
-  }), 2_000);
+  await fixture.closed;
   setFcGlobalDir(fixture.previousStore);
   rmSync(fixture.root, { recursive: true, force: true });
 });
@@ -115,7 +108,7 @@ it.each([true, false])(
     });
     registry.update(task.id, { not_before: '2099-01-01T00:00:00.000Z', defer_kind: 'wait' });
 
-    const cancelled = cli(fixture, ['task', 'cancel', String(task.id)]);
+    const cancelled = await cli(fixture, ['task', 'cancel', String(task.id)]);
     expect(cancelled.status, cancelled.stdout + cancelled.stderr).toBe(0);
     expect(cancelled.stdout).toContain(`Task #${task.id} cancelled`);
     expect(() => assertContinuationCompatible(fixture.project, run.runId)).not.toThrow();
@@ -123,12 +116,12 @@ it.each([true, false])(
       stages: { done, done2, work: { status: 'pending', attempts: priorWork.attempts } } });
     expect(readFileSync(ledgerPath, 'utf8')).toBe(ledgerBeforeCancel);
 
-    const resumed = cli(fixture, ['task', 'resume', String(task.id)]);
+    const resumed = await cli(fixture, ['task', 'resume', String(task.id)]);
     expect(resumed.status, resumed.stdout + resumed.stderr).toBe(0);
     expect(resumed.stdout).toContain(`Task #${task.id}`);
-    const complete = await waitUntil(() => readRunState(fixture.project, run.runId).status === 'complete', 45_000);
+    const complete = await daemonFile(runRecordPath(run.runDirPath, 'run.json'), () => readRunState(fixture.project, run.runId).status === 'complete' ? true : undefined);
     const current = registry.get(task.id)!;
-    const tail = cli(fixture, ['task', 'tail', String(task.id)]);
+    const tail = await cli(fixture, ['task', 'tail', String(task.id)]);
     expect(complete, `${JSON.stringify(readRunState(fixture.project, run.runId))}\n${tail.stdout}${tail.stderr}\n${fixture.output}`).toBe(true);
     expect(readRunState(fixture.project, run.runId).stages.done).toEqual(done);
     expect(readStageStatus(fixture.project, run.runId, 'done')).toEqual(done);
@@ -138,7 +131,7 @@ it.each([true, false])(
     expect(readStageStatus(fixture.project, run.runId, 'work').attempts?.[0]).toMatchObject(priorWork.attempts![0]);
     expect(readStageStatus(fixture.project, run.runId, 'work').attempts?.[1]).toMatchObject({ ...priorWork.attempts?.[1], disposition: 'superseded' });
     const exitPath = join(fixture.root, 'supervise', current.systemd_unit.replace(/[^a-zA-Z0-9_.-]/g, '_'), 'exit.json');
-    expect(await waitUntil(() => existsSync(exitPath), 3_000)).toBe(true);
+    expect(await daemonFile(exitPath, () => existsSync(exitPath) ? true : undefined)).toBe(true);
     expect(JSON.parse(readFileSync(exitPath, 'utf8'))).toMatchObject({ exitCode: 0 });
   },
 );
@@ -167,28 +160,20 @@ async function createHarness(): Promise<Harness> {
   const daemon = spawn(process.execPath, [distCli, 'daemon', 'serve', '--socket', socket], {
     cwd: repositoryRoot, env: { ...env, HOME: home, FC_HOME: root }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const fixture: Harness = { root, project, socket, env, daemon, output: '', previousStore };
+  const fixture: Harness = { root, project, socket, env, daemon, closed: daemonClosed(daemon), output: '', previousStore };
   harness = fixture;
   daemon.stdout?.on('data', chunk => { fixture.output += String(chunk); });
   daemon.stderr?.on('data', chunk => { fixture.output += String(chunk); });
-  const ready = await waitUntil(async () => {
-    if (!existsSync(socket) || daemon.exitCode !== null) return false;
-    try { await sendRpc(socket, { cmd: 'status' }, 300); return true; } catch { return false; }
-  }, 5_000);
-  if (!ready) throw new Error(`private daemon failed to start: ${fixture.output}`);
+  await Promise.race([
+    daemonPublication(root, () => existsSync(join(root, 'daemon.json')) ? true : undefined),
+    fixture.closed.then(() => { throw new Error(`private daemon exited before readiness: ${fixture.output}`); }),
+  ]);
+  await daemonRpc(socket, { cmd: 'status' });
   return fixture;
 }
 
 function cli(fixture: Harness, args: string[]) {
-  return spawnSync(process.execPath, [distCli, ...args], { cwd: repositoryRoot, env: { ...fixture.env, HOME: join(fixture.root, 'home'), FC_HOME: fixture.root },
-    encoding: 'utf8', timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
-}
-
-async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return true;
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  return check();
+  return daemonCommand(process.execPath, [distCli, ...args], {
+    cwd: repositoryRoot, env: { ...fixture.env, HOME: join(fixture.root, 'home'), FC_HOME: fixture.root },
+  });
 }
