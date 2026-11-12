@@ -2,42 +2,38 @@
 
 For a task author: how do I express the outcome, evidence and limits the run must satisfy?
 
-Write a self-contained outcome, explicit input paths, real constraints and numbered acceptance
-criteria. Name a report and its evidence only when the task requires them. Separate a required property from
-an illustrative implementation.
+Write a self-contained outcome, explicit input paths and real constraints. Declare machine
+criterion identities in frontmatter `criteria: [{id, text}]` when planning or coverage needs
+them. Prose, headings, numbering, bold labels, examples and languages have no criterion or
+admission meaning. Stages still read and judge the complete brief.
 
 ## From a raw task
 
-`flowcrew quick "<plain task>"` writes missing criteria using the configured, read-only
-`brief_writer` role before the existing admission path. `flowcrew brief "<plain task>"`
-prints composed bytes and digest for review without launching; each preview makes a fresh
-call. Both commands check source facts and static declarations before authorship. An existing
-extractable contract skips the model. See [CLI](cli.md#write-a-brief-before-running)
-for saving, setup, retry evidence and exit codes.
+`flowcrew quick "<plain task>"` uses the configured, read-only `brief_writer` role when no
+criteria are declared. `flowcrew brief "<plain task>"` prints composed bytes and digest for
+review without launching; each preview makes a fresh call. An existing nonempty `criteria`
+declaration skips authorship. See [CLI](cli.md#write-a-brief-before-running).
 
-The model returns five fields in one fixed schema: outcome `criteria` (nonempty),
-`constraints`, existing-path `inputs`, nonblocking `assumptions`, and `blocking_questions`.
-Code preserves the complete original task as an exact prefix and appends those sections;
-JSON string quoting keeps a model's multiline value inside its own list item. The model
-cannot remove or rewrite the request. The existing structural parser determines whether
-a closing fence is needed before the generated sections; unmatched task fences cannot
-hide criteria or consume correction retries. Criteria describe result properties; the role must
-not add reports or evidence duties unless requested. No wording filter judges model prose.
-Any blocking question stops launch with exit 3, without guessing or retrying it away.
+The model returns five string-array fields in one fixed schema: `criteria` (nonempty),
+`constraints`, `inputs`, `assumptions`, and `blocking_questions`. Composition writes explicit
+criterion IDs and text into leading frontmatter, preserving other metadata values and the
+original body bytes. It appends constraints, input references, assumptions and questions as
+stage-readable prose. Multiline criterion text stays a YAML value, including when the
+original task has unclosed Markdown fences. There is no wording filter. A declared blocking
+question stops authorship with exit 3; it is never retried into a guessed answer.
 
 Generated input references must be repository-relative and present in Git's tracked HEAD
 tree, where the prepared target will read them. Absolute, escaping, missing and ignored-only
-paths use the correction path. The references are recorded as prose. Because the
-original bytes stay first, generated sections do not add leading frontmatter or grant
-input-freezing/output-reuse authority. Author such declarations explicitly when needed.
+paths use the correction path. The references are recorded as prose. Generated input references do not grant
+input-freezing/output-reuse authority. The original input/output declarations are preserved. Author such declarations explicitly when needed.
 The model supplies no workflow field. When `quick` generates a brief and the supplied
 project has no exact setup record, it requires a clean Git source and prepares a sibling
 worktree from `HEAD` through `ship-setup`, retaining all its admission checks. Target
 and branch names use the composed digest, never model prose. An authored brief keeps
 its existing exact-record requirement. The entry chooser and independent gates apply; research loops still require their authored research block.
 Static rehearsal and preflight validate generated content, with reasons returned for up
-to two correction retries. Authored briefs passed to inspection/setup/rehearsal keep their
-existing missing-contract diagnostics. Failed provider calls stop with exit 4, are not
+to two correction retries. Authored briefs passed to inspection/setup/rehearsal do not need Markdown criteria;
+invalid declarations are refused with their field names. Failed provider calls stop with exit 4, are not
 replies and consume no correction retry. An exhausted invalid invocation can be rerun
 with fresh attempts; all previous evidence remains. Only valid, unregistered replies
 are replayed after a host stop. Preview evidence follows the composed digest across targets.
@@ -48,6 +44,8 @@ This is an illustrative engineering envelope, not a complete launch-ready task:
 
 ```yaml
 ---
+criteria:
+  - {id: result, text: The requested result is independently verified.}
 inputs:
   - src/
 outputs:
@@ -61,7 +59,7 @@ validation:
 ---
 ```
 
-Follow it with the goal, constraints and extractable acceptance criteria. Engineering enters a
+Follow it with stage-readable goal, constraints and acceptance prose. Engineering enters a
 model chooser, which chooses author/review/repair work or decomposition. A `research.measurement`
 declaration fixes the research shape directly: one producer and independent candidate-property
 review in an engine-owned loop. No model chooses or plans the research workflow. Legacy
@@ -72,7 +70,26 @@ A research block without `measurement` is refused with a migration diagnostic. U
 engineering gates and configured validation for a known pass/fail task.
 
 Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
-[criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
+[criterion declarations](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
+
+## Criterion identities and admitted records
+
+`criteria` is optional. When present it must be a nonempty array of strict `{id, text}`
+objects with unique nonempty IDs and nonempty text. IDs are authored and stable across
+wording changes; the brief hash still binds exact bytes. Planning, gate coverage and discharge
+use only these IDs. Without a declaration there is no machine criterion inventory; stages
+and independent review still judge the complete brief. Headings and lists create no IDs.
+Existing run records and stored criterion artifacts retain their admitted identities,
+including historical slug IDs and illustrative-exclusion metadata. Status, watch, listing
+and UI readers do not run the active brief schema over archives. Continuations retain the
+admitted workflow, metadata and criterion artifact; they do not reinterpret old prose.
+Legacy input paths come from the exact setup verification receipt when available, with a
+read-only decoder that preserves the exact historical path aliases, normalization and
+freezing semantics in older records. Unrelated metadata does not create input authority.
+New runs commit all admitted metadata with a configuration-complete marker; preparation
+interrupted before that commit finishes from the original stored brief bytes, including
+publication of a missing declaration snapshot. Legacy archives without that marker retain
+their admitted interpretation.
 
 ## Execution and assumptions
 
@@ -90,17 +107,38 @@ reported by parse/preflight before execution.
 
 ## Inputs, outputs and validation
 
-Declare inputs in leading YAML frontmatter. Project-relative directory names are accepted
-without a trailing slash there; unsafe declarations are reported unresolved. Paths mentioned
-in prose are references and do not declare inputs or authorize reuse of existing outputs.
-To freeze a file or tree, use a structured input such as `{path: notes.md, frozen: true}`.
-Inputs are not frozen by default; `frozen: false` also leaves them mutable. Only the boolean
-frontmatter field grants this protection: notes, roles, headings and prose are not enforced.
-Nonboolean `frozen` values are unresolved input declarations, not coercions to true.
+One strict schema reads only the leading top-level `inputs`, `outputs` and `criteria`
+fields. Other frontmatter contracts have their own readers; arbitrary nested metadata is
+never searched for paths. Inputs are an array of path strings or `{path, frozen?, type?, sha256?}` entries.
+The opening delimiter must start at the first byte (after an optional BOM); a leading blank
+line or other whitespace makes the block body prose in admission and configuration alike.
+`type` is `file|directory`; `sha256` is a lowercase 64-digit digest checked against file bytes.
+A supplied hash on a directory is refused. Copy verification also compares source/target hashes.
+Outputs are an array of path strings or `{path, type?, on_existing?}` entries. No field
+aliases, nested path collections or guessed metadata keys are accepted inside these entries;
+unknown fields are schema errors naming the key. For example:
+
+```yaml
+---
+inputs: [src, {path: evidence.csv, frozen: true}]
+outputs: [result.md, {path: reports, type: directory, on_existing: update}]
+criteria:
+  - {id: evidence, text: The result includes independently checked evidence.}
+---
+```
+
+Paths are literal filesystem names. Project-relative directories may have a trailing slash.
+Traversal, surrounding path whitespace and absolute inputs are refused. Relative paths must
+retain their spelling under the engine project-path normalizer; unsupported root spellings
+are schema errors. Punctuation and numeric path components are literal; the engine does not guess whether a string looks like prose or a fraction.
+Paths mentioned in prose are references and grant no input or output authority.
+Only `frozen: true` freezes an input; omission or `false` leaves it mutable. Nonboolean
+values and unknown annotations are schema errors. Input/output identity and admitted frozen
+bytes are checked by hashes and physical paths, not by preservation wording.
 Settlement rejects and restores changed frozen bytes, and accepts identical bytes.
 
 Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
-and `on_existing: update|append|replace`. They are create-only by default. Declaring an existing
+and `on_existing: create|update|append|replace`. They are create-only by default. Declaring an existing
 output as an input records intentional reuse. Nonempty create-only files, create-only symlinks
 and unsupported entry types block the output inventory. Explicit existing-content authority
 admits project symlinks. Archival preserves symlink objects without traversing their targets.
@@ -309,21 +347,18 @@ Sources: [loop and report owner](../src/scheduler/sched_policy/research.ts),
 
 ## Evidence authoring policy
 
-When leading brief frontmatter selects `planner_policies: [evidence_statistics]`, the planner receives
-these authoring requirements: a requested headline or quoted statistic needs its mean, median
-and position in its own distribution; a rule frozen before outcomes needs a structurally
-computed qualifying-member count, numeric feasibility floor and revision below that floor
-before outcomes are seen. An operator numeric expectation requires exact result fields
-`within_expected_range` and `method_was_not_adjusted_to_match_expectation`. These are injected
-planning instructions, not an automatic statistic calculator or guarantee of model obedience.
+Statistical rigor and anti-anchoring requirements belong in the authored brief and project
+checks. The engine does not inspect numeric expectations, negation, example labels, or
+English/Chinese phrases, and injects no statistical planning obligations. The retired
+`planner_policies` and `supplied_numbers` metadata have no engine meaning. State any required
+result fields and independent-computation evidence explicitly for stages and reviewers.
+There are no retained prose advisories in P1; authoring preflight/rehearse show declared
+contracts, hashes and bounded inspection results. A warning never grants stage authority.
 
-Declare supplied numeric expectations in leading frontmatter as `supplied_numbers: [0, -112.89]`.
-The value must be an array of finite YAML numbers; `[]` declares none, and any other shape
-is refused. A nonempty array requires both exact anti-anchoring fields above as positive
-result requirements; missing either makes preflight and rehearse fail.
-This declaration works without operator wording in the body. Prose-only expectations produce
-warnings; ordinary counts and the planning-policy selection do not
-by themselves declare supplied numbers.
+When the project needs a quoted statistic, the author can require its mean, median and
+position in its own distribution. For a rule frozen before outcomes, the author can require
+a qualifying-member count and numeric feasibility floor before outcomes are seen. These
+are optional project authoring requirements; the engine neither infers nor injects them.
 
 For other evidence, state the user-visible consequence, boundaries, counter-examples and
 unacceptable outcomes. Preserve an authoritative exact mechanism when it is required; label
@@ -333,7 +368,7 @@ Do not replace an outcome with a line-count check; if a count itself is a suppli
 it remains binding. Explain concentrated contributions with per-item, largest-share and
 leave-one-out evidence when those properties are part of the task.
 
-Sources: [selected planning policy](../src/planner-policies.ts),
+Sources: [declaration schema](../src/brief-declarations.ts),
 [gate contract](../src/scheduler/sched_settlement/gate-contract.ts).
 
 ## Authoring and verification principles
@@ -359,7 +394,7 @@ promises that a model will obey. Keep the detailed contract above authoritative.
   rather than relying on an unmentioned option remaining available.
   Reason: a seemingly complete constraint list can close useful work unintentionally.
 - Give original evidence paths and require reading them; a supplied figure is a cross-check,
-  accompanied by the anti-anchoring fields, rather than a settled premise.
+  accompanied by any project-required anti-anchoring evidence, rather than a settled premise.
   Reason: a summary preserves its author's confidence while losing the evidence they omitted.
 - State the property to establish in the target, rather than a manually derived answer from
   the operator's environment; label an operator measurement as a cross-check.
@@ -520,7 +555,10 @@ Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts
 
 ## Deterministic checks
 
-Only one `## Reality checks` section with a `checks` list is parsed. Each check supplies
+Declare `reality_checks` as an array in leading frontmatter. Markdown headings and body
+examples create no executable checks, even when headed `## Reality checks`. Existing
+admitted legacy runs retain their original checks. The scheduler also consumes its admitted
+planner check snapshot. Each check supplies
 `name`, `type`, `reads` (explicitly empty if it has no file inputs), `params`, and optional
 `advisory: true`. Rooted reads follow [agent protocol](agent-protocol.md#artifact-locations).
 Typed handler file parameters must agree with declared reads; shell text is not parsed to
@@ -548,7 +586,8 @@ check. Provide the declared `docs/output.md` and `result.json` inputs before run
 finite-number script adds a check beyond the JSON field's type; no measurement is claimed.
 
 ```yaml
-checks:
+---
+reality_checks:
   - name: docs-generated
     type: file-exists-nonempty
     reads:
@@ -585,4 +624,7 @@ checks:
           process.exit(1);
         }
         NODE
+---
 ```
+
+Legacy archives without a setup receipt retain mutable and frozen input identities through a read-only compatibility decoder. That decoder does not admit new briefs or confer new output authority.

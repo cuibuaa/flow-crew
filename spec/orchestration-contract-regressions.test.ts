@@ -115,19 +115,11 @@ describe('addressed guidance envelopes', () => {
 });
 
 describe('canonical criteria and atomic dispatch admission', () => {
-  it('extracts numbered report obligations with stable IDs', () => {
-    const artifact = extractBriefCriteria([
-      '# Goal',
-      'Change the engine.',
-      '## What the report must show',
-      '1. Reproduce the guidance leak before and after.',
-      '2. Report direct validation exit codes.',
-      '',
-      'Parenthetical examples are illustrative, not criteria.',
-    ].join('\n'));
+  it('reads authored criterion identities independently of report headings', () => {
+    const artifact = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Reproduce the guidance leak before and after.\"},{\"id\":\"fixture_2\",\"text\":\"Report direct validation exit codes.\"}]\n---\n# Goal\nChange the engine.\n## What the report must show\n1. Reproduce the guidance leak before and after.\n2. Report direct validation exit codes.\n\nParenthetical examples are illustrative, not criteria.");
     expect(artifact.criteria).toHaveLength(2);
-    expect(artifact.criteria[0]).toMatchObject({ line: 4, text: 'Reproduce the guidance leak before and after.' });
-    expect(artifact.criteria[0].id).toMatch(/^criterion_what_the_report_must_/);
+    expect(artifact.criteria[0]).toMatchObject({ line: 1, text: 'Reproduce the guidance leak before and after.' });
+    expect(artifact.criteria[0].id).toBe('fixture_1');
   });
 
   it('preserves terminal outcome identity while allowing ordered authors and repairs', () => {
@@ -359,6 +351,7 @@ describe('output inventory, reachability, and stage prose', () => {
       '---',
       'outputs:',
       '  - path: docs/old.json',
+      '  - path: docs/terminal.md',
       '  - path: docs/update.json',
       '    on_existing: update',
       'terminal_states:',
@@ -380,9 +373,9 @@ describe('output inventory, reachability, and stage prose', () => {
     mkdirSync(join(projectDir, 'docs', 'reports'), { recursive: true });
     const brief = [
       '---',
-      'research:',
-      '  result_file: docs/result.json',
-      '  report_dir: docs/reports',
+      'outputs:',
+      '  - path: docs/result.json',
+      '  - {path: docs/reports, type: directory}',
       '---',
       '# Goal',
     ].join('\n');

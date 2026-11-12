@@ -38,7 +38,7 @@ const titleCases = [
 ] as const;
 
 async function runBackgroundSubmit(brief: string): Promise<{ code: number | null; output: string }> {
-  const admittedBrief = `${brief}\n## What the report must show\n1. Preserve the extracted task title at registration.\n`;
+  const admittedBrief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the extracted task title at registration.\"}]\n---\n${brief}\n## What the report must show\n1. Preserve the extracted task title at registration.\n`;
   writeReadySetupRecord(projectDir, admittedBrief, fcHome);
   const child = spawn(
     process.execPath,

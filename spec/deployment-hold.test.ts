@@ -29,7 +29,7 @@ let root: string, project: string, previous: string, roles: string;
 let registry: TaskRegistry, orchestrator: Orchestrator;
 let units: SupervisorBackend;
 let launches: string[];
-const brief = '# Deployment fixture\n\n## Requirements\n1. Retain completed producer work and complete later work under independent verification.\n';
+const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Retain completed producer work and complete later work under independent verification.\"}]\n---\n# Deployment fixture\n\n## Requirements\n1. Retain completed producer work and complete later work under independent verification.\n";
 const criterion = extractBriefCriteria(brief).criteria[0].id;
 function admitted() {
   return { brief_text: brief, brief_admission: createBriefAdmission(inspectBrief(brief), {

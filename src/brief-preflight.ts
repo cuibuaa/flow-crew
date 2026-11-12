@@ -1,10 +1,7 @@
-import { parseBriefFrontmatterDocument, splitBriefFrontmatter } from './brief-frontmatter.js';
+import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
 import { entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
-import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
-import { isNegatedRequirementLine, isNegatedRequirementMention } from './brief-negation.js';
-import { extractBriefCriteria } from './brief-criteria.js';
 
 export interface BriefPreflightFinding {
   code: string;
@@ -21,6 +18,7 @@ export interface BriefPreflightFinding {
 export interface BriefPreflightReport {
   version: 1;
   digest: string;
+  /** Retained wire enum; active inspection no longer classifies prose. */
   inputKind: 'brief' | 'plain_text';
   frontmatter: {
     status: 'absent' | 'valid' | 'invalid';
@@ -49,101 +47,8 @@ export interface BriefAdmissionVerification {
   status: 'valid' | 'missing' | 'digest_mismatch';
 }
 
-const STRUCTURAL_LINE = /^(?:---(?:\s|$)|#{1,6}(?:\s|$)|>|[-*+]\s|\d+[.)]\s|```|~~~|\*\*|__)/;
-
-type LogicalProseKind = 'prose' | 'heading' | 'list' | 'quote' | 'table' | 'boundary';
-
-interface LogicalProseUnit {
-  line: number;
-  text: string;
-  kind: LogicalProseKind;
-}
-
-/**
- * Fold Markdown soft wraps while retaining source lines and semantic
- * boundaries. Distinct paragraphs, headings, list items, quotes, tables, and
- * fenced/indented code never become one requirement merely because they are
- * adjacent in the source.
- */
-function logicalProseUnits(lines: readonly string[]): LogicalProseUnit[] {
-  const units: LogicalProseUnit[] = [];
-  let current: LogicalProseUnit | undefined;
-  let fence: { marker: '`' | '~'; length: number } | undefined;
-  const flush = () => {
-    if (current) units.push(current);
-    current = undefined;
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const trimmed = lines[index].trim();
-    const fenceRun = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
-    if (!fence && fenceRun) {
-      flush();
-      fence = { marker: fenceRun[1][0] as '`' | '~', length: fenceRun[1].length };
-      continue;
-    }
-    if (fence) {
-      if (fenceRun
-          && fenceRun[1][0] === fence.marker
-          && fenceRun[1].length >= fence.length
-          && fenceRun[2].trim().length === 0) {
-        fence = undefined;
-      }
-      continue;
-    }
-    if (!trimmed) {
-      flush();
-      continue;
-    }
-
-    const kind: LogicalProseKind = /^#{1,6}(?:\s|$)/.test(trimmed)
-      ? 'heading'
-      : /^(?:[-*+]\s+|\d+[.)]\s+)/.test(trimmed)
-        ? 'list'
-        : /^>/.test(trimmed)
-          ? 'quote'
-          : /^\|.*\|$/.test(trimmed)
-            ? 'table'
-            : /^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed) || /^(?: {4}|\t)/.test(lines[index])
-              ? 'boundary'
-              : 'prose';
-
-    if (kind === 'heading' || kind === 'table' || kind === 'boundary') {
-      flush();
-      units.push({ line: index + 1, text: trimmed, kind });
-      continue;
-    }
-    if (kind === 'list') {
-      flush();
-      current = { line: index + 1, text: trimmed, kind };
-      continue;
-    }
-    if (kind === 'quote') {
-      if (current?.kind !== 'quote') flush();
-      if (current) current.text += ` ${trimmed}`;
-      else current = { line: index + 1, text: trimmed, kind };
-      continue;
-    }
-    if (current && (current.kind === 'prose' || current.kind === 'list')) {
-      current.text += ` ${trimmed}`;
-    } else {
-      flush();
-      current = { line: index + 1, text: trimmed, kind: 'prose' };
-    }
-  }
-  flush();
-  return units;
-}
-
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function classifyInput(text: string): BriefPreflightReport['inputKind'] {
-  const withoutBom = text.startsWith('\uFEFF') ? text.slice(1) : text;
-  const nonEmpty = withoutBom.split(/\r\n|\n|\r/).map((line) => line.trim()).filter(Boolean);
-  if (nonEmpty.length !== 1) return 'brief';
-  return STRUCTURAL_LINE.test(nonEmpty[0]) ? 'brief' : 'plain_text';
 }
 
 function findingFingerprint(input: Pick<BriefPreflightFinding, 'code' | 'level' | 'line' | 'excerpt'>): string {
@@ -161,59 +66,15 @@ function makeFinding(
   return { ...finding, fingerprint: findingFingerprint(finding) };
 }
 
-const NUMERIC_LITERAL = /(?:^|[^A-Za-z0-9_])[-+−]?\d[\d,.]*(?:\s*(?:%|bps?|basis\s+points?))?(?=$|[^A-Za-z0-9_])/i;
-const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|handed|hands\s+(?:us|me|you)|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
-const DECISION_ILLUSTRATIVE = /\b(?:for example|illustrative(?:ly)?|e\.g\.)\b|(?:例如|比如|举例|只是例子|并非判据|不是判据)/i;
-
-function decisionLintLines(brief: string): string[] {
-  const lines = (splitBriefFrontmatter(brief)?.body ?? brief).split(/\r\n|\n|\r/);
-  let illustrativeList = false;
-  return lines.map((line) => {
-    const trimmed = line.trim();
-    if (DECISION_ILLUSTRATIVE.test(trimmed)) {
-      illustrativeList = /[:：]\s*$/.test(trimmed);
-      return '';
-    }
-    if (illustrativeList) {
-      if (!trimmed || /^[-*+]\s|^\d+[.)]\s/.test(trimmed)) return '';
-      illustrativeList = false;
-    }
-    return line;
-  });
-}
-
-function hasPositiveDecisionFieldRequirement(brief: string, field: string): boolean {
-  const pattern = new RegExp(`\\b${field}\\b`, 'g');
-  return logicalProseUnits(decisionLintLines(brief)).some((unit) => {
-    for (const match of unit.text.matchAll(pattern)) {
-      const start = match.index ?? 0;
-      if (!isNegatedRequirementMention(unit.text, start, start + match[0].length)) return true;
-    }
-    return false;
-  });
-}
-
-function operatorFigureEvidence(brief: string): { line: number; excerpt: string } | undefined {
-  const offset = splitBriefFrontmatter(brief)?.bodyLineOffset ?? 0;
-  const lines = decisionLintLines(brief).map((line) => isNegatedRequirementLine(line) ? '' : line);
-  for (let index = 0; index < lines.length; index += 1) {
-    const window = lines.slice(index, index + 2).join(' ');
-    if (OPERATOR_EXPECTATION.test(window) && NUMERIC_LITERAL.test(window)) {
-      return { line: offset + index + 1, excerpt: lines[index].trim() };
-    }
-  }
-  return undefined;
-}
-
 /** Inspect one exact brief string without reading or changing project state. */
 export function inspectBrief(
   brief: string,
 ): BriefPreflightReport {
   const digest = sha256(brief);
-  const inputKind = classifyInput(brief);
+  const inputKind = 'brief';
   const parsed = parseBriefFrontmatter(brief);
   const document = parseBriefFrontmatterDocument(brief);
-  const hasFrontmatterFence = document && (brief.startsWith('---\n') || brief.startsWith('---\r\n'));
+  const hasFrontmatterFence = document !== undefined;
   const frontmatter: BriefPreflightReport['frontmatter'] = document && parsed.frontmatterError
     ? { status: 'invalid', error: parsed.frontmatterError }
     : hasFrontmatterFence
@@ -227,43 +88,6 @@ export function inspectBrief(
     message: `Entry workflow: ${route.workflow} (${route.reason})${route.error ? `; refused: ${route.error}` : ''}`,
     consequential: false,
   });
-
-  if (inputKind === 'plain_text') {
-    add({
-      code: 'plain_text_input',
-      level: 'warn',
-      message: 'This is a single-line plain-text request, so no structured brief contract was available to validate. Use `/ship` to author a guarded brief or run `flowcrew rehearse <brief.md>` before launch.',
-      consequential: true,
-      risk: 'An ad-hoc request can omit boundaries, success criteria, or a safe terminal contract.',
-      suggestion: 'Author a structured brief with headings or YAML frontmatter, then rehearse it.',
-    });
-  } else {
-    add({
-      code: 'structured_input',
-      level: 'ok',
-      message: 'Structured brief shape detected',
-      consequential: false,
-    });
-  }
-
-  const extractedCriteria = extractBriefCriteria(brief);
-  if (extractedCriteria.criteria.length === 0) {
-    add({
-      code: 'brief_criteria_missing',
-      level: 'fail',
-      message: 'No structurally extractable criterion was found under an explicit criteria/requirements/report contract heading.',
-      consequential: false,
-      risk: 'Planning and dispatch would otherwise iterate over an empty proof obligation and report readiness.',
-      suggestion: 'Add at least one numbered criterion under an explicit contract heading.',
-    });
-  } else {
-    add({
-      code: 'brief_criteria_extracted',
-      level: 'ok',
-      message: `${extractedCriteria.criteria.length} structurally extractable criterion/criteria found`,
-      consequential: false,
-    });
-  }
 
   if (frontmatter.status === 'invalid') {
     add({
@@ -286,49 +110,6 @@ export function inspectBrief(
   const rc = parsed.research;
   if (parsed.researchPolicyError) add({ code: 'research_policy_invalid', level: 'fail', consequential: true,
     message: parsed.researchPolicyError, suggestion: 'Declare research.measurement; move numeric protections into structured guards.' });
-
-  const suppliedNumbers = (document?.value as Record<string, unknown> | undefined)?.supplied_numbers;
-  if (suppliedNumbers !== undefined && (!Array.isArray(suppliedNumbers)
-      || !suppliedNumbers.every((value) => typeof value === 'number' && Number.isFinite(value)))) {
-    add({
-      code: 'supplied_numbers_invalid',
-      level: 'fail',
-      message: '`supplied_numbers` must be an array of finite YAML numbers (for example, [0, -112.89]); [] declares none.',
-      consequential: true,
-      suggestion: 'Use only finite YAML numbers in `supplied_numbers`, or remove the declaration if no numbers were supplied.',
-    });
-  }
-  const hasSuppliedNumbers = Array.isArray(suppliedNumbers)
-    && suppliedNumbers.length > 0;
-  const operatorFigure = operatorFigureEvidence(brief);
-  if ((hasSuppliedNumbers || operatorFigure)
-      && (!hasPositiveDecisionFieldRequirement(brief, 'within_expected_range')
-        || !hasPositiveDecisionFieldRequirement(brief, 'method_was_not_adjusted_to_match_expectation'))) {
-    add({
-      code: 'operator_figure_anti_anchoring_missing',
-      level: hasSuppliedNumbers ? 'fail' : 'warn',
-      message: 'A supplied operator expectation must require both `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.',
-      consequential: true,
-      ...operatorFigure,
-      risk: 'Agreement with a supplied number is indistinguishable from a method adjusted to reproduce that number.',
-      suggestion: 'Add both exact anti-anchoring fields to the result contract and require independent computation before comparison.',
-    });
-  }
-
-  if (hasRealityChecksHeading(brief)) {
-    const declarations = parseChecksFromMarkdown(brief);
-    if (!declarations.some((declaration) => declaration.kind !== 'invalid')) {
-      const parserDiagnostic = declarations.find((declaration) => declaration.kind === 'invalid')?.diagnostic;
-      add({
-        code: 'reality_checks_empty_or_invalid',
-        level: 'fail',
-        message: `A \`## Reality checks\` section was declared but produced no valid checks${parserDiagnostic ? `: ${parserDiagnostic}` : '. Declare at least one valid check under `checks:`.'}`,
-        consequential: true,
-        risk: 'A declared but empty or malformed check block provides no deterministic evidence at the terminal gate.',
-        suggestion: 'Fix the reported YAML declaration and add at least one valid item under `checks:`, or remove the section if no deterministic check is warranted.',
-      });
-    }
-  }
 
   if (rc) add({ code: 'research_measurement_valid', level: 'ok', consequential: false,
     message: `Engine-owned instrument: ${rc.measurement.replicates} baseline replicates, ${rc.measurement.guards.length} guards, held-out allowance ${rc.measurement.held_out?.allowance ?? 'undeclared'}` });
@@ -424,7 +205,7 @@ export function formatBriefPreflightReport(report: BriefPreflightReport): string
   const lines = [
     'Brief preflight',
     `Digest: ${report.digest}`,
-    `Input: ${report.inputKind === 'plain_text' ? 'single-line plain text' : 'structured brief'}`,
+    `Input: ${report.inputKind === 'plain_text' ? 'single-line plain text' : 'brief text'}`,
     `Frontmatter: ${report.frontmatter.status}${report.frontmatter.error ? ` — ${report.frontmatter.error}` : ''}`,
     `Contract: ${report.contractReady ? 'ready' : 'problems found'}`,
     '',
@@ -434,14 +215,12 @@ export function formatBriefPreflightReport(report: BriefPreflightReport): string
     if (finding.risk) lines.push(`  Risk: ${finding.risk}`);
     if (finding.suggestion) lines.push(`  Suggestion: ${finding.suggestion}`);
   }
-  lines.push('', 'Preflight findings are advisory; launch binds this exact brief digest.');
+  lines.push('', 'Warnings are advisory; malformed declarations refuse launch. Launch binds this exact brief digest.');
   return lines.join('\n');
 }
 
-/** Hard declaration refusals shared by launch and preparation commands. Other
- * report findings retain their existing acknowledgement/semantic-reader policy. */
-export function briefDeclarationFailures(brief: string, report = inspectBrief(brief)): BriefPreflightFinding[] {
-  const malformed = parseBriefFrontmatterDocument(brief)?.errorKind === 'yaml';
+/** Only malformed declarations can refuse; prose is opaque to admission. */
+export function briefDeclarationFailures(_brief: string, report = inspectBrief(_brief)): BriefPreflightFinding[] {
   return report.findings.filter(finding => finding.level === 'fail'
-    && (finding.code === 'brief_criteria_missing' || (malformed && finding.code === 'frontmatter_invalid')));
+    && finding.code === 'frontmatter_invalid');
 }

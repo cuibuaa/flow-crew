@@ -17,7 +17,7 @@ import { inspectBrief, createBriefAdmission } from '../src/brief-preflight.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
 let root: string, project: string, previous: string;
-const brief = '# Update the greeting\n\nChoose a sensible greeting convention.\n\n## Acceptance criteria\n1. Produce the greeting and report any unavailable resource.\n';
+const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce the greeting and report any unavailable resource.\"}]\n---\n# Update the greeting\n\nChoose a sensible greeting convention.\n\n## Acceptance criteria\n1. Produce the greeting and report any unavailable resource.\n";
 const gap = 'Offline: the desired download from example.invalid is unavailable; completed the local greeting.';
 const assumptions = ['Use the existing greeting convention for new content.'];
 const choose = { successor: 'implement', reason: 'One coherent greeting change.', assumptions };
@@ -136,7 +136,7 @@ describe('nothing waits for a person after launch', () => {
   it('keeps a metric-oriented brief engineering by declaration without demanding research fields', async () => {
     const fixture = adapter();
     const state = await execute(fixture.implementation,
-      '---\ninputs: []\noutputs: []\n---\n# Improve a measured metric\nSearch for lower output-token cost.\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n');
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce the greeting and report unavailable resources.\"}]\ninputs: []\noutputs: []\n---\n# Improve a measured metric\nSearch for lower output-token cost.\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n");
     expect(state.status, state.failureReason).toBe('complete');
     expect(state.research).toBeUndefined();
     expect(fixture.calls).toEqual(['choose', 'implement', 'assess', 'review']);
@@ -153,7 +153,7 @@ describe('nothing waits for a person after launch', () => {
       if (opts.stageId === 'choose' && ++choices === 1) return { output: JSON.stringify({ ...choose,
         metric_search: true, missing_author_facts: missing }), exitCode: 0, duration_ms: 1 };
       return fixture.implementation.run(prompt, role, opts);
-    } }, '---\ninputs: []\noutputs: []\n---\n# Improve a measured metric\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n');
+    } }, "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce the greeting and report unavailable resources.\"}]\ninputs: []\noutputs: []\n---\n# Improve a measured metric\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n");
     expect(state.status, state.failureReason).toBe('complete'); expect(state.research).toBeUndefined();
     expect(choices).toBe(2); expect(state.stages.choose.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
     expect(state.decisionGraph?.records.some(record => record.reason.includes('Author must add missing facts'))).toBe(false);

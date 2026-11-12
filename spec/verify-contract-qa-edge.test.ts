@@ -55,11 +55,7 @@ afterEach(() => {
 
 describe('verification-owned orchestration edge probes', () => {
   it('preserves the enforceable property when a numbered criterion contains an illustrative example', () => {
-    const artifact = extractBriefCriteria([
-      '# Task',
-      '## Acceptance criteria',
-      '1. Preserve every declared output property; for example, reject a symlink at a create-only path.',
-    ].join('\n'));
+    const artifact = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve every declared output property; for example, reject a symlink at a create-only path.\"}]\n---\n# Task\n## Acceptance criteria\n1. Preserve every declared output property; for example, reject a symlink at a create-only path.");
 
     expect(artifact.criteria.map((criterion) => criterion.text)).toEqual([
       'Preserve every declared output property; for example, reject a symlink at a create-only path.',
@@ -67,11 +63,7 @@ describe('verification-owned orchestration edge probes', () => {
   });
 
   it('recognizes an ordinary Requirements section as an explicit criteria section', () => {
-    const artifact = extractBriefCriteria([
-      '# Task',
-      '## Requirements',
-      '1. Every repair-required rejection must execute its admitted repair.',
-    ].join('\n'));
+    const artifact = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Every repair-required rejection must execute its admitted repair.\"}]\n---\n# Task\n## Requirements\n1. Every repair-required rejection must execute its admitted repair.");
 
     expect(artifact.criteria.map((criterion) => criterion.text)).toEqual([
       'Every repair-required rejection must execute its admitted repair.',

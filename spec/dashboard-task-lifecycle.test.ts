@@ -657,10 +657,10 @@ it('serves positive live stage output through the mounted run-page stream', asyn
   });
 });
 
-it('reports missing criteria as a contract problem for dashboard consumers', async () => {
+it('leaves prose criteria opaque for dashboard consumers', async () => {
   const response = await app!.inject({ method: 'POST', url: '/api/brief-preflight',
     payload: { brief: '# Goal\nProduce a deliverable.\n' } });
   expect(response.statusCode).toBe(200);
-  expect(response.json().report).toMatchObject({ contractReady: false,
-    findings: expect.arrayContaining([expect.objectContaining({ code: 'brief_criteria_missing', level: 'fail' })]) });
+  expect(response.json().report).toMatchObject({ contractReady: true });
+  expect(response.json().report.findings.some((finding: {code: string}) => finding.code === 'brief_criteria_missing')).toBe(false);
 });

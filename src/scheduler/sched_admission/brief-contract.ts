@@ -7,12 +7,9 @@ import { join } from 'node:path';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { type BriefOutputDeclaration, extractBriefOutputDeclarations } from '../../ship-inputs.js';
 import { log } from './shared.js';
-import { parsePlannerPolicySelection, type PlannerPolicyName } from '../../planner-policies.js';
 
 export interface ParsedBriefFrontmatter {
   maxContinuations?: number;
-  /** Task authoring requirements; independent of engine admission. */
-  plannerPolicies?: PlannerPolicyName[];
   workflowError?: string;
   terminalStates?: TerminalStatesConfig;
   /** The only active research contract is an engine-owned measurement declaration. */
@@ -38,9 +35,9 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
     ? { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' }
     : { stripped: brief };
   if (frontmatter.error) return { stripped: brief, frontmatterError: frontmatter.error, frontmatterErrorKind: frontmatter.errorKind };
-  const parsed = frontmatter.value;
+  const parsed = frontmatter.value ?? {};
   const stripped = frontmatter.body;
-  if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
   const out: ParsedBriefFrontmatter = { stripped };
   const continuations = (parsed as Record<string, unknown>).max_continuations;
   if (continuations !== undefined) {
@@ -48,16 +45,11 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
       frontmatterError: 'max_continuations must be a finite nonnegative integer', workflowError: 'max_continuations must be a finite nonnegative integer' };
     out.maxContinuations = Number(continuations);
   }
-  try { out.plannerPolicies = parsePlannerPolicySelection((parsed as Record<string, unknown>).planner_policies); }
+  try { out.outputs = extractBriefOutputDeclarations(brief); }
   catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = String(error);
     return { stripped, frontmatterError: reason, workflowError: reason };
   }
-  // Only explicit products belong to output archival.
-  const outputs = extractBriefOutputDeclarations(brief).filter((entry) => (
-    /^(?:outputs?|deliverables?|artifacts?)(?:\.|$)/.test(entry.source)
-  ));
-  if (outputs.length > 0) out.outputs = outputs;
 
   // Active inputs have one strict contract. Historical run JSON is read separately.
   const resRaw = Object.hasOwn(parsed, 'research') ? (parsed as Record<string, unknown>).research : (parsed as Record<string, unknown>).objective;

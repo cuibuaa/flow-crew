@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { entryWorkflow, parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { inspectBrief } from '../src/brief-preflight.js';
 import { parseCommandArgs } from '../src/cli-args.js';
-const body = '# Task\n\n## Acceptance criteria\n1. Deliver the coherent change.\n';
+const body = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver the coherent change.\"}]\n---\n# Task\n\n## Acceptance criteria\n1. Deliver the coherent change.\n";
 
 describe('one entry, with model-owned shape selection', () => {
   it.each(['', 'inputs: [docs/notes.md]\noutputs: [docs/a.md, docs/b.md]', 'research:\n  baseline: 0.5\n  policy: greedy_stack\n  stop:\n    max_rounds: 2'])('admits the same entry independently of declarations: %s', declaration => {

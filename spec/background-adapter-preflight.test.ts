@@ -56,14 +56,7 @@ afterEach(() => {
 });
 
 function runBackgroundSubmit(extraArgs: readonly string[]): { code: number | null; out: string } {
-  const brief = [
-    '# Goal',
-    'Probe the background adapter preflight.',
-    '',
-    '## What the report must show',
-    '1. Report whether adapter availability was checked before registration.',
-    '',
-  ].join('\n');
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report whether adapter availability was checked before registration.\"}]\n---\n# Goal\nProbe the background adapter preflight.\n\n## What the report must show\n1. Report whether adapter availability was checked before registration.\n";
   writeReadySetupRecord(join(root, 'project'), brief, join(root, 'fc'));
   const result = spawnSync(
     process.execPath,

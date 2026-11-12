@@ -69,7 +69,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
   }
   git('add', '.'); if (options.input === 'mixed') git('add', '-f', 'data/readme.txt'); git('commit', '-qm', 'base');
   const validationDeclaration = options.noValidation ? '' : `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n${!options.verbose && !options.noValidation ? '      report: {format: vitest-json}\n' : ''}`;
-  const brief = `---\n${options.input ? 'inputs: [{path: data}]\n' : ''}${validationDeclaration}outputs: [{path: value.txt, on_existing: update}]\n---\n# Goal\nWrite a value.\n\n## Acceptance criteria\n1. Deliver the independently reviewed value.\n`;
+  const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver the independently reviewed value.\"}]\n${options.input ? 'inputs: [{path: data}]\n' : ''}${validationDeclaration}outputs: [{path: value.txt, on_existing: update}]\n---\n# Goal\nWrite a value.\n\n## Acceptance criteria\n1. Deliver the independently reviewed value.\n`;
   const briefPath = join(root, 'brief.md'); writeFileSync(briefPath, brief);
   const setup = await runShipSetup(['--project', source, '--target', target, '--base', 'HEAD', '--branch', 'trial', '--brief', briefPath], { globalDir: fcGlobalDir });
   expect(setup.state, JSON.stringify(setup)).toBe('ready');

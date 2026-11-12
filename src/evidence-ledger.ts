@@ -9,7 +9,7 @@ import { fcGlobalDir } from './store.js';
 import { appendFileSync, mkdirSync, writeFileSync } from './engine-fs.js';
 import { readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
-import { extractBriefOutputDeclarations, parseBriefInputs } from './ship-inputs.js';
+import { extractBriefOutputDeclarations, parseBriefInputs, readAdmittedBriefContract } from './ship-inputs.js';
 import { evaluateValidationDelta, projectValidationResult, type ValidationCommandResult, type ValidationDeltaResult } from './project-validation.js';
 import type { CommandContext } from './adapters/base.js';
 
@@ -154,7 +154,7 @@ export function validationForTree(entries: EvidenceEntry[], treeHash: string | n
 
 /** Identity covers Git's source inventory, plus explicitly declared ignored
  * inputs. Generated ignored outputs are not source. Unreadable members fail closed. */
-export function captureProjectTree(projectDir: string, brief = ''): ProjectTree {
+export function captureProjectTree(projectDir: string, brief = '', runDir?: string): ProjectTree {
   try {
     const stateRoot = resolve(fcGlobalDir());
     const ordinary = (path: string) => {
@@ -162,8 +162,10 @@ export function captureProjectTree(projectDir: string, brief = ''): ProjectTree 
       return member !== '' && (isAbsolute(member) || member === '..' || member.startsWith('../') || member.startsWith('..\\'));
     };
     const paths = new Set(listProjectFiles(projectDir, { skipDirectory: path => !ordinary(path) || !safeEvidencePath(path) }).filter(path => ordinary(path) && safeEvidencePath(path)));
-    const declaredInputs = new Set(parseBriefInputs(brief).references.map(input => input.path));
-    for (const path of [...declaredInputs, ...extractBriefOutputDeclarations(brief).map(output => output.path)]) {
+    const contract = runDir ? readAdmittedBriefContract(runDir, brief)
+      : { inputs: parseBriefInputs(brief).references, outputs: extractBriefOutputDeclarations(brief) };
+    const declaredInputs = new Set(contract.inputs.map(input => input.path));
+    for (const path of [...declaredInputs, ...contract.outputs.map(output => output.path)]) {
       if (!ordinary(path) || !safeEvidencePath(path)) continue;
       for (const member of listProjectFilesAt(projectDir, path, declaredInputs.has(path), { complete: true, skipDirectory: path => !safeEvidencePath(path) })) {
         if (safeEvidencePath(member) && !lstatSync(join(projectDir, member)).isDirectory()) paths.add(member);
@@ -206,7 +208,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   if (!existsSync(runRecordPath(runDir, EVIDENCE_LEDGER))) writeFileSync(runRecordPath(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
   let brief = ''; try { brief = readFileSync(runRecordPath(runDir, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
-  const validation = validationForTree(entries, captureProjectTree(projectDir, brief).hash);
+  const validation = validationForTree(entries, captureProjectTree(projectDir, brief, runDir).hash);
   const baselinePath = runRecordPath(runDir, 'validation_baseline.json');
   let commit: string | undefined;
   let selection: unknown;

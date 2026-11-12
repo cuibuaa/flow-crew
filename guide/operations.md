@@ -70,61 +70,16 @@ Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setu
 
 Setup's independent input copies protect the source even when a subprocess writes its local
 input. A read-only declaration or a later hash check cannot provide that protection through a
-hardlink. Before creating a worktree or copying declared inputs, setup estimates the additional
-input bytes, deduplicated by destination, and calls `disk-guard need <bytes>` once for a nonempty
-copy budget. The executable is resolved from `~/bin/disk-guard`, then `PATH`; a missing tool,
-failed estimate or refused admission blocks setup before copying. Capacity policy belongs to
-disk-guard, with no FlowCrew threshold or bypass flag. Existing target files need no additional
-copy budget. Sparse files and reflinks count their full logical size.
+hardlink. Before creating a worktree or copying declared inputs, setup estimates additional
+logical input bytes, deduplicated by destination, and records `estimatedCopyBytes`. Existing
+target files need no additional copy bytes. Sparse files and reflinks count their full
+logical size. Invalid estimates, cycles and source escapes refuse before copying.
 
-This admission covers setup's declared input copies. Git checkout growth and ordinary engine
-copies, archives and restores do not invoke disk-guard. Admission is a check, not a reservation;
-concurrent materializers must coordinate their budgets. An input-copy failure still refuses
-setup without publishing READY; inspect available space and the reported target before retrying.
-Failures after admission can leave partial copies.
-
-Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures.
-Invocation scratch survives within an active run, then is retired at terminal publication,
-including failed, incomplete and cancelled outcomes. Resume uses retained unfinished stage
-work and allocates fresh invocation scratch. Daemon startup removes temporary aliases of
-deleted run folders without entering retained runs. It does not compact historical runs or
-recursively retire scratch. Use explicit `prune --apply` for interrupted retirement in
-recorded runs; `clean` also retires scratch of runs with missing `run.json`, while preserving
-their other files and leaving malformed records untouched. `clean` deletes old run history.
-
-Compiler output and caches belong in invocation `$TMPDIR`. Copy declared final products
-and evidence to their declared run-relative paths before the command ends. Historical
-`stages/<stage>/build/` and `stages/<stage>/scratch/` trees are durable history: the engine
-no longer scans citations or compacts these directories. Declared products remain readable
-after terminal settlement. Undeclared scratch content retires with the run.
-
-Interrupted scratch retirement does not require a surviving temporary alias: `prune --apply`
-uses the recorded run's physical scratch root, and `clean` retires it when deleting old
-history. This also handles a reboot that wipes temporary aliases. Retained runs can be
-pruned individually without deleting their history; daemon startup never walks the runs root.
-Park/deployment holds and uncertain process ownership still prevent pruning. Retention
-sends no signals and never reverts project changes.
-
-For existing runs, inspect the same policy before applying it:
-
-```bash
-flowcrew prune --dry-run
-flowcrew prune --run <run-id> --dry-run --json
-flowcrew prune --run <run-id> --apply
-```
-
-The default is a read-only dry-run: no lock, index, manifest, alias or store file is written.
-It reports per-run bytes and kept paths/reasons; JSON includes the candidate file list,
-refusals and total bytes. Counts are logical file lengths, not filesystem free-space
-promises (hardlinks, compression and metadata can differ). Bulk operation skips refused
-runs and uninitialized store entries; an explicitly selected refused run exits nonzero.
-Apply replans under the run-state lock shared with launch, resume and cancellation.
-Repeated application is safe. `clean` separately deletes old run history; `prune` keeps it.
-Retained artifacts intentionally continue to consume space; pruning only retires invocation scratch.
-
-Sources: [input materialization](../src/cli-ship-setup.ts),
-[retention policy and CLI](../src/run-retention.ts),
-[scratch owner](../src/invocation-scratch.ts), [terminal publisher](../src/store.ts).
+The engine invokes no operator-specific capacity executable and defines no capacity threshold
+or bypass flag. Operators coordinate capacity for concurrent materializers. Copy failures
+refuse setup without publishing READY. Native file-copy and owned-worktree failure cleanup
+remain in place; earlier completed copies can remain. Inspect the reported target and
+available space before retrying.
 
 ## Inspect, guide and stop
 

@@ -30,12 +30,12 @@ afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks(); closeRollbackBaseline(project, run);
   setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
-it('preflight accepts domain hands while retaining supplied-number anti-anchoring', () => {
+it('preflight leaves domain wording and supplied-number expectations opaque', () => {
   const findings = (body: string) => inspectBrief('# Goal\n' + body).findings.filter(x => x.code === 'operator_figure_anti_anchoring_missing');
   expect(findings('Implement operator cutover (run deploy.sh between hands) and satisfy criteria 1–4.')).toEqual([]);
   expect(findings('The operator has a hand in release 2.')).toEqual([]);
   for (const text of ['The operator supplied an expected value of 42.', 'The operator handed us 42.', 'The operator hands us 42.', 'Our expected value is 42.']) {
-    expect(findings(text), text).toHaveLength(1);
+    expect(findings(text), text).toEqual([]);
   }
 });
 

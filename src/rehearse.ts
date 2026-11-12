@@ -176,7 +176,8 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')
       + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : '') });
   }
-  const outputInventory = inspectBriefOutputs(brief, projectDir, undefined,
+  const outputInventory = preflight.findings.some(f => f.code === 'frontmatter_invalid')
+    ? { declarations: [], entries: [], blocking: [] } : inspectBriefOutputs(brief, projectDir, undefined,
     { launchProject: targetDir ?? explicitProject ?? null });
   for (const entry of outputInventory.blocking) {
     add('fail', `Declared output ${entry.path} is already occupied (${entry.entryType}${entry.size === undefined ? '' : `, ${entry.size} bytes`}): ${entry.reason}`

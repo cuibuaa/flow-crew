@@ -20,6 +20,7 @@ research:
       pass: {field: pass, equals: true}
     timeout_seconds: 10
   stop: {max_rounds: 6, halt_after_no_improvement: 3}
+outputs: [docs/research-instrument/ceiling_report.md]
 terminal_states:
   ceiling_hit:
     paths: [docs/research-instrument/ceiling_report.md]

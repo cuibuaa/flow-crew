@@ -13,7 +13,7 @@ import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
 const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
 const tsxLoader = import.meta.resolve('tsx');
-const brief = '# Ledger registration\n\n## What the report must show\n1. Registration retains its wrap-up obligation.\n';
+const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Registration retains its wrap-up obligation.\"}]\n---\n# Ledger registration\n\n## What the report must show\n1. Registration retains its wrap-up obligation.\n";
 let root: string;
 let project: string;
 let engine: string;

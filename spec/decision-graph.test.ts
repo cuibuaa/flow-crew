@@ -31,7 +31,7 @@ const agents = join(import.meta.dirname, '../config/agents');
 const contract = { version: 1, produces: [], reads: [] };
 const delivered = JSON.stringify({ status: 'delivered', summary: 'Verified.', checks: [], caveats: [], remaining_work: [] });
 const choice = (successor: string, reason = 'Selected from the declared set.') => JSON.stringify({ successor, reason });
-const task = '# Coherent change\n\n## Acceptance criteria\n1. Produce docs/report.md with a greeting.\n';
+const task = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce docs/report.md with a greeting.\"}]\n---\n# Coherent change\n\n## Acceptance criteria\n1. Produce docs/report.md with a greeting.\n";
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'decision-graph-')); project = join(root, 'project'); mkdirSync(project);
   old = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
@@ -393,7 +393,7 @@ describe('in-iteration replanning through the revision authority', () => {
       return { output, exitCode: 0, duration_ms: 1, tokens_in: 2, tokens_out: 3,
         ...(opts.stageId === 'plan' ? { writes: ['run:work/dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
     } };
-    const state = await execute(workflow, adapter, '# Replan progress\n\n## Acceptance criteria\n1. Retain and independently verify the plan revision.\n');
+    const state = await execute(workflow, adapter, "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Retain and independently verify the plan revision.\"}]\n---\n# Replan progress\n\n## Acceptance criteria\n1. Retain and independently verify the plan revision.\n");
     if (legacyGap) expect(requests[1]).toEqual(requests[0]);
     expect(state.status, state.failureReason).toBe('complete');
     expect(plans).toBe(2); expect(state.currentIteration).toBe(1); expect(state.maxIterations).toBe(1);

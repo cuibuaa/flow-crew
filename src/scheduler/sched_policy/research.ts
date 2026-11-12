@@ -2,7 +2,7 @@
  * verdict validation use the ordinary scheduler primitives. */
 import { atomicWrite } from '../../engine-fs.js';
 import { runRecordPath } from '../../run-layout.js';
-import { extractBriefCriteria } from '../../brief-criteria.js';
+import { readBriefCriteriaArtifact, extractBriefCriteria } from '../../brief-criteria.js';
 import { recordAdmittedPlan } from '../../plan-revisions.js';
 import { type ProducerNotes, type ResearchRound } from '../../research-history.js';
 import { captureMeasuredCandidate, initializeResearchMeasurements, measureResearchCandidate, researchMeasurementState, restoreResearchBest } from '../../research-measurement.js';
@@ -19,7 +19,7 @@ import { concludeRun } from './run-completion.js';
 import { literalProjectScope } from '../sched_admission/scope-services.js';
 import { rependContinuingStages } from '../sched_loop/iteration-setup.js';
 
-export const RESEARCH_REVIEW_CONTRACT = `# Candidate review\n\n## Acceptance criteria\n1. Scope: the candidate respects every stated scope and generality constraint in the brief.\n2. Instrument: frozen instrument roots and their dependencies are untouched.\n3. Checks: all stated checks retain their power; no weakening, bypass or task-specific shortcut.\n\nJudge the submitted candidate's properties using the full brief and the diff. Do not judge measured numbers, improvement, report prose, or missing terminal reports. The engine measures only accepted submissions and writes the terminal report. A rejection settles this submission; it is not an instruction to repair within the same round.\n`;
+export const RESEARCH_REVIEW_CONTRACT = `---\ncriteria:\n  - {id: scope, text: 'The candidate respects the brief scope and generality constraints.'}\n  - {id: instrument, text: 'Frozen instrument roots and dependencies are untouched.'}\n  - {id: checks, text: 'All stated checks retain their power.'}\n---\n# Candidate review\n\n## Acceptance criteria\n1. Scope: the candidate respects every stated scope and generality constraint in the brief.\n2. Instrument: frozen instrument roots and their dependencies are untouched.\n3. Checks: all stated checks retain their power; no weakening, bypass or task-specific shortcut.\n\nJudge the submitted candidate's properties using the full brief and the diff. Do not judge measured numbers, improvement, report prose, or missing terminal reports. The engine measures only accepted submissions and writes the terminal report. A rejection settles this submission; it is not an instruction to repair within the same round.\n`;
 
 /** Same construction and admission boundary for launch and rehearsal. */
 export function researchStages(research: ResearchConfig): StageConfig[] {
@@ -33,9 +33,9 @@ export function researchStages(research: ResearchConfig): StageConfig[] {
       criterion_refs: refs, artifact_contract: contract, prompt_template: RESEARCH_REVIEW_CONTRACT }),
   ];
 }
-export function admitResearchStages(research: ResearchConfig, stages: StageConfig[], projectDir: string, directory: string) {
+export function admitResearchStages(research: ResearchConfig, stages: StageConfig[], projectDir: string, directory: string, criteria = extractBriefCriteria(RESEARCH_REVIEW_CONTRACT)) {
   return createDispatchAdmission()({ dispatched: stages, baseStages: [], dispatchStageId: '', research,
-    criteria: extractBriefCriteria(RESEARCH_REVIEW_CONTRACT), projectDir, runDir: directory });
+    criteria, projectDir, runDir: directory });
 }
 const save = (path: string, value: unknown) => atomicWrite(path, JSON.stringify(value, null, 2) + '\n');
 
@@ -60,10 +60,13 @@ export async function runResearchLoop(project: string, run: string, directory: s
   const research = state.research!;
   if (!research.measurement) throw new Error('Legacy research is retired; declare research.measurement.');
   const stages = workflow.stages;
-  const admission = admitResearchStages(research, stages, project, directory);
+  const recorded = readBriefCriteriaArtifact(directory);
+  const continuing = Boolean(state.queryState?.planRevision && recorded);
+  const criteria = continuing ? recorded! : { ...recorded, ...extractBriefCriteria(RESEARCH_REVIEW_CONTRACT) };
+  const admission = admitResearchStages(research, stages, project, directory, criteria);
   save(runRecordPath(directory, 'dispatch_admission.json'), admission);
   if (!admission.pass) throw new Error(`Research construction is not dispatchable: ${admission.errors.map(e => e.message).join('; ')}`);
-  save(runRecordPath(directory, 'brief_criteria.json'), extractBriefCriteria(RESEARCH_REVIEW_CONTRACT));
+  if (!continuing) save(runRecordPath(directory, 'brief_criteria.json'), criteria);
   recordAdmittedPlan(state, stages, directory, 'Measurement declaration fixes producer and independent property review', true, admission);
   state.stages = Object.fromEntries(stages.map(stage => [stage.id, state.stages[stage.id] ?? { status: STAGE_STATUS.PENDING, retries: 0 }]));
   state.maxIterations = Math.max(state.maxIterations ?? 1, research.stop.maxRounds);

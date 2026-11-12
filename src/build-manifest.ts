@@ -289,6 +289,13 @@ export function isBuildManifest(value: unknown): value is BuildManifest {
       && Array.isArray(manifest.artifacts.ui) && manifest.artifacts.ui.every(isFileRecord)));
 }
 
+// Replaces preflight's reason-text classification; details are opaque diagnostics.
+export class BuildInspectionError extends Error {
+  constructor(readonly code: 'missing_manifest' | 'unreadable_manifest' | 'invalid_manifest' | 'missing_ui' | 'hash_mismatch' | 'output_mismatch', message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
 export function readBuildManifest(distDir: string): BuildManifest | undefined {
   const path = join(resolve(distDir), BUILD_MANIFEST_FILENAME);
   if (!existsSync(path)) return undefined;
@@ -296,25 +303,25 @@ export function readBuildManifest(distDir: string): BuildManifest | undefined {
   try {
     value = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
   } catch (error) {
-    throw new Error(
+    throw new BuildInspectionError('unreadable_manifest',
       `Build manifest is unreadable at ${path}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
-  if (!isBuildManifest(value)) throw new Error(`Build manifest is invalid at ${path}`);
+  if (!isBuildManifest(value)) throw new BuildInspectionError('invalid_manifest', `Build manifest is invalid at ${path}`);
   return value;
 }
 
 export function assertDistFresh(projectRoot: string, distDir = join(projectRoot, 'dist')): BuildManifest {
   const manifest = readBuildManifest(distDir);
   const remedy = 'Run `npm run build` and retry the tests.';
-  if (!manifest) throw new Error(`dist freshness cannot be proven: ${BUILD_MANIFEST_FILENAME} is missing. ${remedy}`);
+  if (!manifest) throw new BuildInspectionError('missing_manifest', `dist freshness cannot be proven: ${BUILD_MANIFEST_FILENAME} is missing. ${remedy}`);
   if (existsSync(join(projectRoot, 'ui', 'package.json')) && !manifest.ui) {
-    throw new Error(`UI freshness cannot be proven: the build manifest has no UI outputs. ${remedy}`);
+    throw new BuildInspectionError('missing_ui', `UI freshness cannot be proven: the build manifest has no UI outputs. ${remedy}`);
   }
   const currentInputs = computeBuildInputDigest(projectRoot);
   if (manifest.inputs.hash !== currentInputs.hash) {
-    throw new Error(
+    throw new BuildInspectionError('hash_mismatch',
       `dist is stale: source/config digest ${currentInputs.hash.slice(0, 12)} does not match `
       + `deployed generation ${manifest.inputs.hash.slice(0, 12)}. ${remedy}`,
     );
@@ -322,9 +329,10 @@ export function assertDistFresh(projectRoot: string, distDir = join(projectRoot,
   const expected = expectedBuildOutputs(projectRoot);
   const declared = manifest.outputs.map(({ path }) => path).sort((left, right) => left.localeCompare(right));
   if (JSON.stringify(declared) !== JSON.stringify(expected)) {
-    throw new Error(`dist manifest does not cover the current compiler output set. ${remedy}`);
+    throw new BuildInspectionError('output_mismatch', `dist manifest does not cover the current compiler output set. ${remedy}`);
   }
-  assertBuildArtifactInventory(distDir, manifest);
+  try { assertBuildArtifactInventory(distDir, manifest); }
+  catch (error) { throw new BuildInspectionError('output_mismatch', String(error), { cause: error }); }
   return manifest;
 }
 

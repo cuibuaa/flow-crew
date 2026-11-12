@@ -25,7 +25,7 @@ let root: string, project: string, prior: string;
 const engine = join(import.meta.dirname, '..');
 const uuid = '11111111-1111-4111-8111-111111111111';
 const delivered = (summary: string, remaining_work: string[] = []) => JSON.stringify({ status: 'delivered', summary, caveats: [], remaining_work });
-const task = '# Unique admitted request\n\n## Acceptance criteria\n1. UNIQUE_CRITERION_TEXT: deliver the required greeting.\n';
+const task = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"UNIQUE_CRITERION_TEXT: deliver the required greeting.\"}]\n---\n# Unique admitted request\n\n";
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'ledger-handoff-'));
   project = join(root, 'project'); mkdirSync(project);

@@ -33,7 +33,7 @@ vi.mock('../src/ship-inputs.js', async importOriginal => {
 
 let root: string, project: string, output: string, stateRoot: string, previousStore: string;
 const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
-const brief = (path: string, type = 'directory') => `---\noutputs:\n  - path: ${JSON.stringify(path)}\n    type: ${type}\n---\n# Goal\nWrite per-item results.\n\n## Acceptance criteria\n1. Retain the per-item results in the declared directory.\n`;
+const brief = (path: string, type = 'directory') => `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Retain the per-item results in the declared directory.\"}]\noutputs:\n  - path: ${JSON.stringify(path)}\n    type: ${type}\n---\n# Goal\nWrite per-item results.\n\n## Acceptance criteria\n1. Retain the per-item results in the declared directory.\n`;
 beforeEach(() => {
   installation.install();
   root = mkdtempSync(join(tmpdir(), 'fc-external-output-'));
@@ -59,7 +59,7 @@ describe('absolute directories in the declared output contract', () => {
       readDirectory: vi.fn(() => { throw new Error('must not walk outputs'); }),
       readBytes: vi.fn(() => { throw new Error('must not hash outputs'); }),
     };
-    expect(extractBriefOutputDeclarations(brief(output))).toMatchObject([{ path: output, expectedType: 'directory', source: 'outputs.path' }]);
+    expect(extractBriefOutputDeclarations(brief(output))).toMatchObject([{ path: output, expectedType: 'directory', source: 'outputs' }]);
     const inventory = inspectBriefOutputs(brief(output), project, noContents);
     expect(inventory.blocking).toEqual([]);
     expect(inventory.entries[0]).toMatchObject({ exists: true, entryType: 'directory', reason: expect.stringContaining('not inventoried or archived') });
@@ -134,10 +134,10 @@ describe('absolute directories in the declared output contract', () => {
     expect(inspectBriefOutputs(source, project).blocking[0].reason).toMatch(/overlaps (project protected path|declared input)/);
   });
 
-  it('refuses an occupied file and keeps unsupported absolute research slots visible', () => {
+  it('refuses an occupied file and grants no output authority to retired research slots', () => {
     mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, 'existing data');
     expect(inspectBriefOutputs(brief(output), project).blocking[0].reason).toContain('not a directory');
-    expect(inspectBriefOutputs(`---\nresearch:\n  report_dir: ${output}\n---\n`, project).blocking[0].reason).toContain('in outputs');
+    expect(inspectBriefOutputs(`---\nresearch:\n  report_dir: ${output}\n---\n`, project).declarations).toEqual([]);
   });
 
   it('resolves dangling protected links using the same metadata adapter as preflight', () => {
@@ -226,7 +226,7 @@ describe('external output execution', () => {
       return fixtureResult({ ...result, output: 'Results retained.', writes: [written], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(config, 'name: external-output\nstages: []\n', project, adapter, new Map(), undefined,
-      join(project, 'config', 'agents'), undefined, brief(output).split('\n## Acceptance criteria')[0], false);
+      join(project, 'config', 'agents'), undefined, `---\noutputs: [{path: ${JSON.stringify(output)}, type: directory}]\n---\nRetain results.`, false);
     expect(final.status, final.failureReason).toBe('complete'); expect(calls).toBe(1);
     expect(readStageStatus(project, final.runId!, 'work').attempts).toHaveLength(1);
     expect(readFileSync(written, 'utf8')).toBe('durable result');

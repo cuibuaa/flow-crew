@@ -18,7 +18,7 @@ import {
   type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationDeltaResult, type ValidationCommand,
 } from '../../project-validation.js';
 import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, safeEvidencePath, validationForTree, VALIDATION_FACT_VERSION, type ValidationExecution, type ValidationFact } from '../../evidence-ledger.js';
-import { parseBriefInputs } from '../../ship-inputs.js';
+import { readAdmittedBriefContract } from '../../ship-inputs.js';
 import { RollbackContentStore } from '../../rollback-content-store.js';
 import { readRepairFileImage, type RepairFileImage } from '../sched_scope/file-images.js';
 import { listProjectFilesAt } from '../sched_scope/path-capabilities.js';
@@ -39,7 +39,7 @@ export interface RunValidationBaselineArtifact {
 function captureBaseInputs(projectDir: string, brief: string, base: string, commit?: string): NonNullable<RunValidationBaselineArtifact['baseInputs']> {
   const started = Date.now(), files: NonNullable<RunValidationBaselineArtifact['baseInputs']>['files'] = [];
   try {
-    const inputs = parseBriefInputs(brief).references;
+    const inputs = readAdmittedBriefContract(base, brief).inputs;
     if (!inputs.length) return { files, durationMs: Date.now() - started };
     if (!commit) throw new Error('No base commit for materialized input inventory');
     const inventory = spawnSync('git', ['ls-tree', '-r', '--name-only', '-z', commit], {
@@ -176,7 +176,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   const attempt = readStageStatus(projectDir, runId, stageId).attempts?.at(-1);
   if (!attempt || !plan) throw new Error('ATTEMPT_VALIDATION_PLAN_MISSING');
-  const treeHash = captureProjectTree(projectDir, briefAt(base)).hash;
+  const treeHash = captureProjectTree(projectDir, briefAt(base), base).hash;
   const ledger = readEvidence(base);
   const previous = validationForTree(ledger, treeHash) ?? ledger.find((entry): entry is typeof entry & ValidationFact => entry.kind === 'validation'
     && entry.stageId === stageId && entry.attemptIndex === attempt.index && entry.attemptStartedAt === attempt.startedAt && treeHash === null);
@@ -193,7 +193,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     abortSignal = AbortSignal.any([AbortSignal.timeout(Math.max(1, Math.ceil(budgetMs))), ...(dependencies.abortSignal ? [dependencies.abortSignal] : [])]);
   };
   const execute = async (cwd: string, target: 'attempt' | 'base', commands: readonly ValidationCommand[], rerun?: true, commit?: string): Promise<ProjectValidationBaseline> => {
-    const tree = target === 'attempt' && !rerun ? { hash: treeHash } : captureProjectTree(cwd, brief);
+    const tree = target === 'attempt' && !rerun ? { hash: treeHash } : captureProjectTree(cwd, brief, base);
     const measured = await runProjectValidationBaseline(cwd, {
       ...dependencies, remainingMs, abortSignal, ...(rerun ? { timeoutMs: budgetMs } : {}), commands: commands.map(command => {
         // A declared absolute project path follows the isolated base tree.
@@ -221,7 +221,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       writeFileSync(runRecordPath(base, outputPath), result.output);
       return [{ ...result, outputPath, command: command.command, args: command.args, ...(command.env ? { env: command.env } : {}) }];
     });
-    executions.push({ target, ...(rerun ? { rerun } : {}), cwd, commit, treeHash: tree.hash, treeAfterHash: captureProjectTree(cwd, brief).hash, commands: recordedCommands });
+    executions.push({ target, ...(rerun ? { rerun } : {}), cwd, commit, treeHash: tree.hash, treeAfterHash: captureProjectTree(cwd, brief, base).hash, commands: recordedCommands });
     return measured;
   };
   let baseError: string | undefined;
@@ -237,7 +237,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       if (result.status !== 0) throw new Error(`Base worktree exited ${result.status}: ${result.stderr}`);
       added = true;
       if (plan.baseInputs?.error) throw new Error(plan.baseInputs.error);
-      if (!plan.baseInputs && parseBriefInputs(brief).references.length) throw new Error('Pre-author materialized input snapshot missing');
+      if (!plan.baseInputs && readAdmittedBriefContract(base, brief).inputs.length) throw new Error('Pre-author materialized input snapshot missing');
       for (const { path, image } of plan.baseInputs?.files ?? []) {
         const restored = restoreProjectPath(checkout, path, image.type === 'directory' ? { ...image, mode: 0o700 } : image);
         if (!restored.restored) throw new Error(restored.failure ?? `Base input restoration failed: ${path}`);
@@ -318,7 +318,7 @@ export async function recordRequestedBaseValidation(projectDir: string, runId: s
   dependencies: ProjectValidationDependencies = {}): Promise<ValidationFact | undefined> {
   const review = ValidationReviewSchema.safeParse(value);
   if (!review.success || !review.data.request_base.length) return undefined;
-  const base = runDir(projectDir, runId), fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base)).hash);
+  const base = runDir(projectDir, runId), fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash);
   if (!fact) return undefined;
   const current = fact.executions.find(execution => execution.target === 'attempt')?.commands ?? [];
   const requested = review.data.request_base.filter(request => current.some(result => result.role === request.role && result.display === request.display
@@ -341,7 +341,7 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
   if (!plan || !plan.baseline.discovery.commands.length) return undefined;
   const execution = closedGateValidationExecution(projectDir, runId, stageId) ?? gateExecution(projectDir, runId, stageId, ['running']);
   if (!execution) return undefined;
-  const tree = captureProjectTree(projectDir, briefAt(base));
+  const tree = captureProjectTree(projectDir, briefAt(base), base);
   const fact = validationForTree(readEvidence(base), tree.hash);
   const valid = fact?.kind === 'validation' && fact.validationVersion === VALIDATION_FACT_VERSION && tree.hash !== null && fact.treeHash === tree.hash
     && readStageStatus(projectDir, runId, fact.stageId).attempts?.some(attempt => attempt.index === fact.attemptIndex && attempt.startedAt === fact.attemptStartedAt && attempt.status === STAGE_STATUS.COMPLETE);
@@ -360,7 +360,7 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
 export function bindReviewedGateValidation(projectDir: string, runId: string, stageId: string, _waveStageIds?: string[]): boolean {
   const base = runDir(projectDir, runId), prior = readValidationDelta(runRecordPath(base, `validation_delta_${stageId}.json`));
   const execution = closedGateValidationExecution(projectDir, runId, stageId);
-  if (!prior || !execution || prior.baselineSha256 !== createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex') || !prior.treeHash || prior.treeHash !== captureProjectTree(projectDir, briefAt(base)).hash
+  if (!prior || !execution || prior.baselineSha256 !== createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex') || !prior.treeHash || prior.treeHash !== captureProjectTree(projectDir, briefAt(base), base).hash
     || prior.attemptIndex !== execution.attemptIndex || prior.attemptStartedAt !== execution.attemptStartedAt) return false;
   const { current: _current, ...bound } = { ...prior, ...execution };
   bound.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(bound)).digest('hex').slice(0, 16)}.json`;
@@ -373,7 +373,7 @@ export function bindReviewedGateValidation(projectDir: string, runId: string, st
  * prevent independent review or independently decide acceptance. */
 export function currentValidationResults(projectDir: string, runId: string): ProjectValidationBaseline['results'] {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
-  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base)).hash);
+  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash);
   const commands = fact ? projectValidationFact(fact).executions.find(execution => execution.target === 'attempt')?.commands ?? [] : [];
   return (plan?.baseline.discovery.commands ?? commands).map(command => {
     const result = commands.find(result => result.role === command.role && result.display === command.display);
@@ -387,7 +387,7 @@ export function currentValidationResults(projectDir: string, runId: string): Pro
 /** Only current-tree code-owned confirmations can veto a gate. */
 export function currentValidationRegressions(projectDir: string, runId: string): NonNullable<ValidationFact['regressions']> {
   const base = runDir(projectDir, runId);
-  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base)).hash);
+  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash);
   return fact?.validationVersion === VALIDATION_FACT_VERSION ? fact.regressions ?? [] : [];
 }
 

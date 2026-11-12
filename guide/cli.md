@@ -89,7 +89,7 @@ Authorship returns exactly `criteria`, `constraints`, `inputs`, `assumptions`, a
 repository-relative input paths against Git's tracked HEAD tree (the target contents), `inspectBrief`, and static rehearsal. Correction calls receive the
 validation reasons. Questions stop immediately with exit 3; exhausted invalid output exits 1.
 `ship-preflight`, `ship-setup`, and `rehearse` continue to check authored briefs and report
-missing criteria themselves.
+malformed declarations by field name; Markdown criteria are opaque prose.
 
 Before a task is registered, durable evidence lives under `FC_HOME/brief-writing/`:
 original bytes, each invocation, complete adapter reply and usage, native per-request input/cached/output counters
@@ -128,9 +128,9 @@ requirement and cost no brief-writing model call. No confirmation prompt is adde
 `quick <task-text|->` accepts joined positional text, `--task <text>` or stdin `-`.
 Positionals are task text, not a path, on earlier versions as well. A single positional
 that names an existing file refuses before any model call; use `quick - < file` to send
-its exact bytes. When `extractBriefCriteria` finds no criteria, the read-only `brief_writer`
-authors structured fields in one model call (at most two correction retries). Code appends
-sections to the unchanged original bytes. Existing criteria skip authorship entirely.
+its exact bytes. When no `criteria: [{id, text}]` declaration exists, the read-only `brief_writer`
+authors structured fields in one model call (at most two correction retries). Code emits the criterion declaration, preserves other metadata values and the exact original body,
+and appends the other fields as prose. Declared criteria skip authorship entirely.
 Other preflight findings are advisory and printed before project/run mutation.
 Quick writes the submitted brief to `docs/task_brief.md`
 in the selected project and warns before replacing different content.

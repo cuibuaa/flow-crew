@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type ResearchConfig } from '../../store.js';
-import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
+import { readBriefCriteriaArtifact, type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
@@ -161,12 +161,8 @@ export interface DispatchAdmissionReport {
 }
 
 export function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
-  const path = runRecordPath(runDirPath, 'brief_criteria.json');
-  if (!existsSync(path)) return undefined;
-  const parsed = JSON.parse(readFileSync(path, 'utf-8')) as BriefCriteriaArtifact;
-  if (parsed.version !== 1 || typeof parsed.briefDigest !== 'string' || !Array.isArray(parsed.criteria)) {
-    throw new Error('brief_criteria.json has an invalid shape');
-  }
+  const parsed = readBriefCriteriaArtifact(runDirPath);
+  if (!parsed) return;
   const briefPath = runRecordPath(runDirPath, 'task_brief.md');
   if (existsSync(briefPath)) {
     const currentDigest = createHash('sha256').update(readFileSync(briefPath, 'utf-8'), 'utf8').digest('hex');
@@ -277,9 +273,6 @@ export function createDispatchAdmission() {
     }
 
     const criteria = input.criteria?.criteria ?? [];
-    if (input.criteria && criteria.length === 0) {
-      errors.push(admissionError('criteria_missing', 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage', 'criteria'));
-    }
     const discharged = new Map(
       (input.criterionDischarges ?? [])
         .filter((record) => record.briefDigest === input.criteria?.briefDigest)

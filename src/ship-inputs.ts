@@ -1,4 +1,8 @@
-import { parseBriefFrontmatterDocument, type BriefFrontmatterDocument } from './brief-frontmatter.js';
+import { readBriefCriteriaArtifact } from './brief-criteria.js';
+import { inspectShipSetupRecord } from './ship-setup-record.js';
+import { runRecordPath } from './run-layout.js';
+import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
+import { parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import {
   accessSync,
@@ -13,8 +17,8 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { fcGlobalDir } from './store.js';
-import { containsEngineOwnedGlobalPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { fcGlobalDir, type StoreState } from './store.js';
+import { containsEngineOwnedGlobalPath, prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
 import { gitCommonDirectory } from './project-identity.js';
 
 export interface BriefInputReference {
@@ -22,6 +26,8 @@ export interface BriefInputReference {
   line: number;
   /** Only a structured input object with frozen: true grants task freezing. */
   frozen?: boolean;
+  type?: 'file' | 'directory';
+  sha256?: string;
 }
 
 export interface UnresolvedBriefInputDeclaration {
@@ -102,7 +108,7 @@ export interface BriefOutputDeclaration {
   source: string;
   disposition: BriefOutputDisposition;
   /** The declared filesystem shape. File is the fail-closed default; only an
-   * explicit directory declaration (for example `report_dir`) admits a
+   * explicit `type: directory` declaration admits a
    * pre-existing directory. */
   expectedType: 'file' | 'directory';
 }
@@ -125,317 +131,34 @@ export interface BriefOutputInventory {
   blocking: BriefOutputInventoryEntry[];
 }
 
-const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_manifest|source|sources|dataset|datasets|fixture|fixtures|consume|consumes|read|reads)(?:_|$)/i;
-const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
-const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter|frozen)$/i;
-
-
-/** Classify metadata without interpreting it as another input path. */
-export function briefInputFieldKind(key: string): 'path' | 'annotation' | 'output' {
-  if (OUTPUT_KEY.test(key) && !INPUT_KEY.test(key)) return 'output';
-  return ASSERTION_KEY.test(key) ? 'annotation' : 'path';
-}
-
-interface NormalizedBriefInputPath {
-  path?: string;
-  reason?: string;
-}
-
-function normalizedBriefInputPath(authored: string): NormalizedBriefInputPath {
-  if (authored !== authored.trim()) {
-    return { reason: 'Explicit input must not contain leading or trailing whitespace' };
-  }
-  if (/[<>]/.test(authored)) {
-    return { reason: 'Explicit input must be one literal project-relative path, not a template' };
-  }
-  if (/^[`'"([]/.test(authored)
-    || /[`'">)\],;:]$/.test(authored)
-    || /:\d+(?::\d+)?$/.test(authored)) {
-    return { reason: 'Explicit input contains wrapper or trailing punctuation and cannot be rewritten as another path' };
-  }
-  if (authored.includes('\\')) {
-    return { reason: 'Explicit input must use project-relative forward-slash separators' };
-  }
-  let candidate = authored.replace(/^\.\//, '');
-  if (!candidate) return { reason: 'Explicit input is empty' };
-  if (candidate.includes('::') || /\s/.test(candidate)) {
-    return { reason: 'Explicit input must name one project-relative path without whitespace' };
-  }
-  if (candidate.startsWith('~') || isAbsolute(candidate) || /^[A-Za-z]:[\\/]/.test(candidate)) {
-    return { reason: 'Explicit input must be a project-relative path' };
-  }
-  if (/^(?:https?|file):\/\//i.test(candidate) || candidate.includes('://')) {
-    return { reason: 'Explicit input must be a project-relative path, not a URL' };
-  }
-  if (/[?*{}[\]]/.test(candidate) || /[$<>]/.test(candidate)) {
-    return { reason: 'Explicit input must be one literal project-relative path, not a glob or template' };
-  }
-  const pathSegments = candidate.split('/');
-  if (candidate === '.'
-    || pathSegments.some((segment) => segment === '..')
-    || pathSegments.slice(1).some((segment) => segment === '.')) {
-    return { reason: 'Explicit input must be project-relative and stay within the project root' };
-  }
-  if (candidate.endsWith('.')) {
-    return { reason: 'Explicit input contains trailing punctuation and cannot be rewritten as another path' };
-  }
-  candidate = candidate.replace(/\/$/, '');
-  // Fractions and progress counters are not paths, even though they contain a slash.
-  if (candidate.split('/').every((segment) => /^\d+$/.test(segment))) {
-    return { reason: 'Explicit input is a numeric fraction or counter, not a path' };
-  }
-  return { path: candidate };
-}
-
-
 function lineForPath(brief: string, path: string): number {
   const index = brief.split(/\r?\n/).findIndex((line) => line.includes(path));
   return index < 0 ? 1 : index + 1;
 }
 
-function yamlInputKeyLine(line: string): { indent: number; value: string } | undefined {
-  const match = /^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
-  if (!match || !INPUT_KEY.test(match[2])) return undefined;
-  return { indent: match[1].length, value: match[3].trim() };
-}
-
-function malformedYamlInputDeclarations(
-  yamlText: string,
-  error: unknown,
-): UnresolvedBriefInputDeclaration[] {
-  const lines = yamlText.split(/\r?\n/);
-  const declarations: UnresolvedBriefInputDeclaration[] = [];
-  const reason = `Explicit input declaration could not be parsed because frontmatter YAML is malformed: ${error instanceof Error ? error.message : String(error)}`;
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const key = yamlInputKeyLine(lines[index]);
-    if (!key) continue;
-    let foundValue = false;
-    if (key.value) {
-      declarations.push({ value: key.value, line: index + 2, reason });
-      foundValue = true;
-    }
-    for (let nested = index + 1; nested < lines.length; nested += 1) {
-      const line = lines[nested];
-      if (!line.trim() || /^\s*#/.test(line)) continue;
-      const indent = /^\s*/.exec(line)?.[0].length ?? 0;
-      if (indent <= key.indent) break;
-      const item = /^\s*-\s*(.*)$/.exec(line);
-      if (!item) continue;
-      declarations.push({ value: item[1].trim() || '<empty>', line: nested + 2, reason });
-      foundValue = true;
-    }
-    if (!foundValue) declarations.push({ value: '<unparsed inputs>', line: index + 2, reason });
-  }
-  return declarations;
-}
-
-function explicitNullInputLocations(yamlText: string): Array<{ value: string; line: number }> {
-  const lines = yamlText.split(/\r?\n/);
-  const locations: Array<{ value: string; line: number }> = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const key = yamlInputKeyLine(lines[index]);
-    if (!key) continue;
-    if (/^(?:null|~)$/i.test(key.value)) locations.push({ value: key.value, line: index + 2 });
-    for (let nested = index + 1; nested < lines.length; nested += 1) {
-      const line = lines[nested];
-      if (!line.trim() || /^\s*#/.test(line)) continue;
-      const indent = /^\s*/.exec(line)?.[0].length ?? 0;
-      if (indent <= key.indent) break;
-      const item = /^\s*-\s*(.*?)(?:\s+#.*)?$/.exec(line);
-      if (item && (!item[1].trim() || /^(?:null|~)$/i.test(item[1].trim()))) {
-        locations.push({ value: item[1].trim() || '<empty>', line: nested + 2 });
-      }
-    }
-  }
-  return locations;
-}
-
-function collectYamlInputs(
-  brief: string,
-  frontmatter: BriefFrontmatterDocument,
-  addReference: (path: string, line: number, frozen?: boolean) => void,
-  addUnresolvedInput: (input: UnresolvedBriefInputDeclaration) => void,
-): void {
-  const yamlText = frontmatter.yaml;
-  if (frontmatter.error) {
-    for (const declaration of malformedYamlInputDeclarations(yamlText, frontmatter.error)) addUnresolvedInput(declaration);
-    return;
-  }
-  const root = frontmatter.value;
-  if (!root || typeof root !== 'object' || Array.isArray(root)) return;
-  const nullLocations = explicitNullInputLocations(yamlText);
-  let nullLocationIndex = 0;
-
-  const processItem = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const entry of value) processItem(entry);
-      return;
-    }
-    if (typeof value === 'string') {
-      const normalized = normalizedBriefInputPath(value);
-      if (normalized.path) addReference(normalized.path, lineForPath(brief, value));
-      else addUnresolvedInput({
-        value,
-        line: lineForPath(brief, value),
-        reason: normalized.reason ?? 'Explicit input could not be normalized',
-      });
-      return;
-    }
-    if (value === null) {
-      const location = nullLocations[nullLocationIndex++] ?? { value: 'null', line: 2 };
-      addUnresolvedInput({
-        ...location,
-        reason: 'Explicit input must be a string path, not a null or empty entry',
-      });
-      return;
-    }
-    if (typeof value !== 'object') {
-      const authoredValue = String(value);
-      addUnresolvedInput({
-        value: authoredValue,
-        line: lineForPath(brief, authoredValue),
-        reason: 'Explicit input must be a string path',
-      });
-      return;
-    }
-    const mapping = value as Record<string, unknown>;
-    if ('frozen' in mapping && typeof mapping.frozen !== 'boolean') {
-      addUnresolvedInput({ value: String(mapping.frozen), line: lineForPath(brief, 'frozen'),
-        reason: 'Input frozen must be a YAML boolean (true or false)' });
-    }
-    const paths: string[] = [];
-    for (const [key, entry] of Object.entries(mapping)) {
-      const fieldKind = briefInputFieldKind(key);
-      if (fieldKind === 'output') continue;
-      if (typeof entry === 'string') {
-        if (fieldKind === 'path') {
-          const normalized = normalizedBriefInputPath(entry);
-          if (normalized.path) paths.push(normalized.path);
-          else addUnresolvedInput({
-            value: entry,
-            line: lineForPath(brief, entry),
-            reason: normalized.reason ?? 'Explicit input could not be normalized',
-          });
-        }
-      } else if (Array.isArray(entry) && entry.every((item) => typeof item === 'string')) {
-        if (fieldKind === 'path') {
-          for (const item of entry) {
-            const normalized = normalizedBriefInputPath(item);
-            if (normalized.path) paths.push(normalized.path);
-            else addUnresolvedInput({
-              value: item,
-              line: lineForPath(brief, item),
-              reason: normalized.reason ?? 'Explicit input could not be normalized',
-            });
-          }
-        }
-      }
-    }
-    const uniquePaths = [...new Set(paths)];
-    if (uniquePaths.length === 0) {
-      for (const [key, entry] of Object.entries(mapping)) {
-        if (!OUTPUT_KEY.test(key) && entry && typeof entry === 'object') processItem(entry);
-      }
-      return;
-    }
-    for (const path of uniquePaths) addReference(path, lineForPath(brief, path), mapping.frozen === true);
-  };
-
-  const walk = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const entry of value) walk(entry);
-      return;
-    }
-    if (!value || typeof value !== 'object') return;
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (INPUT_KEY.test(key)) processItem(entry);
-      else if (!OUTPUT_KEY.test(key)) walk(entry);
-    }
-  };
-  walk(root);
-}
-
-/**
- * Return only inputs declared by the leading, top-level `inputs:` block.
- * Body references are not declarations for launch-workspace reachability.
- */
+/** All admission/setup readers consume the same strict declaration. */
 export function extractDeclaredBriefInputPaths(brief: string): string[] {
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (!frontmatter) return [];
-  const root = frontmatter.value;
-  if (!root || typeof root !== 'object' || Array.isArray(root)) return [];
-  const inputs = (root as Record<string, unknown>).inputs;
-  if (inputs === undefined) return [];
-
-  const declared = new Set<string>();
-  const visit = (value: unknown): void => {
-    if (typeof value === 'string') {
-      const path = normalizedBriefInputPath(value).path;
-      if (path) declared.add(path);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const entry of value) visit(entry);
-      return;
-    }
-    if (!value || typeof value !== 'object') return;
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (!OUTPUT_KEY.test(key) && !ASSERTION_KEY.test(key)) visit(entry);
-    }
-  };
-  visit(inputs);
-  return [...declared].sort();
+  return parseDeclaredBriefInputs(brief).references.map(reference => reference.path);
 }
 
-/** Parse input references from frontmatter declarations. */
 export function parseBriefInputs(brief: string): ParsedBriefInputs {
   const references = new Map<string, BriefInputReference>();
   const unresolvedInputs: UnresolvedBriefInputDeclaration[] = [];
-  const seenUnresolvedInputs = new Set<string>();
-  const addReference = (
-    path: string,
-    line: number,
-    frozen = false,
-  ): void => {
-    const existing = references.get(path);
-    if (!existing) {
-      references.set(path, { path, line, ...(frozen ? { frozen: true } : {}) });
-      return;
+  try {
+    for (const entry of parseBriefDeclarations(brief).inputs ?? []) {
+      const value = typeof entry === 'string' ? { path: entry } : entry;
+      const line = lineForPath(brief, value.path);
+      const prior = references.get(value.path);
+      references.set(value.path, { ...prior, ...value, line,
+        ...(value.frozen || prior?.frozen ? { frozen: true } : {}) });
     }
-    if (frozen) existing.frozen = true;
-  };
-  const addUnresolvedInput = (input: UnresolvedBriefInputDeclaration): void => {
-    const key = JSON.stringify([input.value, input.line, input.reason]);
-    if (!seenUnresolvedInputs.has(key)) {
-      seenUnresolvedInputs.add(key);
-      unresolvedInputs.push(input);
-    }
-  };
-
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (frontmatter) collectYamlInputs(
-    brief,
-    frontmatter,
-    addReference,
-    addUnresolvedInput,
-  );
-
-  return {
-    references: [...references.values()].sort((left, right) => left.path.localeCompare(right.path)),
-    unresolvedInputs: unresolvedInputs.sort((left, right) => left.line - right.line || left.value.localeCompare(right.value)),
-  };
+  } catch (error) {
+    unresolvedInputs.push({ value: 'frontmatter', line: 1, reason: String(error) });
+  }
+  return { references: [...references.values()].sort((a, b) => a.path.localeCompare(b.path)), unresolvedInputs };
 }
 
-/** Parse only the leading frontmatter `inputs:` declaration. */
-export function parseDeclaredBriefInputs(brief: string): ParsedBriefInputs {
-  const parsed = parseBriefInputs(brief);
-  const declared = new Set(extractDeclaredBriefInputPaths(brief));
-  return {
-    ...parsed,
-    references: parsed.references.filter((reference) => declared.has(reference.path)),
-  };
-}
+export const parseDeclaredBriefInputs = parseBriefInputs;
 
 function within(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
@@ -449,6 +172,7 @@ function verifyParsedBriefInputs(
   fs: ShipInputFileSystem = nodeShipInputFileSystem,
 ): BriefInputVerification {
   const root = resolve(projectRoot);
+  const unresolvedInputs = [...parsed.unresolvedInputs];
   const inputs = parsed.references.map((reference): VerifiedBriefInput => {
     const lexical = resolve(root, reference.path);
     if (!within(root, lexical)) {
@@ -469,11 +193,26 @@ function verifyParsedBriefInputs(
         // Reachability remains explicit below.
       }
     }
+    if (readable && (reference.type || reference.sha256)) {
+      try {
+        // Reuse the existing evidence boundary before reading declared hash bytes.
+        if (reference.sha256 && (!within(root, resolvedPath) || !safeEvidencePath(reference.path)
+          || !safeEvidencePath(relative(root, resolvedPath)))) throw new Error('inputs.path is outside the evidence boundary');
+        const stat = fs.stat(lexical);
+        if (reference.type && ((reference.type === 'directory') !== stat.isDirectory()
+          || reference.type === 'file' && stat.isFile?.() === false)) {
+          throw new Error('inputs.type does not match the declared input shape');
+        }
+        if (reference.sha256 && (stat.isDirectory() || stat.isFile?.() === false || fs.hashFile(lexical).sha256 !== reference.sha256)) {
+          throw new Error('inputs.sha256 does not match the declared input bytes');
+        }
+      } catch (error) { unresolvedInputs.push({ value: reference.path, line: reference.line, reason: String(error) }); }
+    }
     return { ...reference, resolvedPath, exists, readable };
   });
   return {
     inputs,
-    unresolvedInputs: parsed.unresolvedInputs,
+    unresolvedInputs,
   };
 }
 
@@ -486,99 +225,113 @@ export function verifyDeclaredBriefInputs(
   return verifyParsedBriefInputs(parseDeclaredBriefInputs(brief), projectRoot, fs);
 }
 
-function outputDisposition(value: unknown): BriefOutputDisposition {
-  if (typeof value !== 'string') return 'create';
-  const normalized = value.trim().toLowerCase().replace(/-/g, '_');
-  if (normalized === 'update' || normalized === 'append' || normalized === 'replace') return normalized;
-  return 'create';
+/** Only the top-level outputs declaration grants product authority. */
+export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclaration[] {
+  return outputsFromDeclarations(parseBriefDeclarations(brief), brief);
 }
 
-/** Extract output paths and their disposition from frontmatter declarations. */
-export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclaration[] {
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (!frontmatter) return [];
-  const parsed = frontmatter.value;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-  const declarations: BriefOutputDeclaration[] = [];
-  const add = (
-    raw: unknown,
-    source: string,
-    disposition: BriefOutputDisposition,
-    expectedType: BriefOutputDeclaration['expectedType'] = 'file',
-  ): void => {
-    if (typeof raw !== 'string') return;
-    // Keep absolute declarations, including invalid ones, for explicit refusal.
-    const normalized = isAbsolute(raw) ? { path: raw } : normalizedBriefInputPath(raw);
-    if (!normalized.path) return;
-    declarations.push({
-      path: normalized.path,
-      line: lineForPath(brief, raw),
-      source,
-      disposition,
-      expectedType,
-    });
-  };
-  const collectOutputValue = (
-    value: unknown,
-    source: string,
-    inheritedDisposition: BriefOutputDisposition,
-    inheritedType: BriefOutputDeclaration['expectedType'] = 'file',
-  ): void => {
-    if (typeof value === 'string') {
-      add(value, source, inheritedDisposition, inheritedType);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) collectOutputValue(item, source, inheritedDisposition, inheritedType);
-      return;
-    }
-    if (!value || typeof value !== 'object') return;
-    const record = value as Record<string, unknown>;
-    const disposition = outputDisposition(record.on_existing ?? record.onExisting ?? inheritedDisposition);
-    const declaredType = typeof (record.type ?? record.kind) === 'string'
-      && /^(?:dir|directory)$/i.test(String(record.type ?? record.kind).trim())
-      ? 'directory'
-      : inheritedType;
-    for (const key of ['path', 'file', 'output', 'artifact', 'result_file', 'report_file', 'report_path']) {
-      if (key in record) add(record[key], `${source}.${key}`, disposition, declaredType);
-    }
-    if ('paths' in record) collectOutputValue(record.paths, `${source}.paths`, disposition, declaredType);
-  };
-
-  const root = parsed as Record<string, unknown>;
-  const walk = (record: Record<string, unknown>, prefix: string): void => {
-    const inheritedDisposition = outputDisposition(record.on_existing ?? record.onExisting);
-    for (const [key, value] of Object.entries(record)) {
-      const source = prefix ? `${prefix}.${key}` : key;
-      if (/^(?:result_file|output_file|report_file|report_path|report_dir)$/.test(key)) {
-        add(value, source, inheritedDisposition, key === 'report_dir' ? 'directory' : 'file');
-        continue;
-      }
-      if (/^(?:outputs?|deliverables?|artifacts?)$/.test(key)) {
-        collectOutputValue(value, source, inheritedDisposition);
-        continue;
-      }
-      if (key === 'terminal_states' && value && typeof value === 'object' && !Array.isArray(value)) {
-        for (const [status, terminal] of Object.entries(value as Record<string, unknown>)) {
-          collectOutputValue(terminal, `${source}.${status}`, inheritedDisposition);
-        }
-        continue;
-      }
-      if (value && typeof value === 'object' && !Array.isArray(value)) walk(value as Record<string, unknown>, source);
-    }
-  };
-  walk(root, '');
-
-  const explicitInputs = new Set(extractDeclaredBriefInputPaths(brief));
-  const deduped = new Map<string, BriefOutputDeclaration>();
-  for (const declaration of declarations) {
-    const disposition = explicitInputs.has(declaration.path) ? 'input' : declaration.disposition;
-    const prior = deduped.get(declaration.path);
-    if (!prior || (prior.disposition === 'create' && disposition !== 'create')) {
-      deduped.set(declaration.path, { ...declaration, disposition });
-    }
+function outputsFromDeclarations(declarations: BriefDeclarations, brief: string): BriefOutputDeclaration[] {
+  const inputs = new Set((declarations.inputs ?? []).map(input => typeof input === 'string' ? input : input.path));
+  const outputs: BriefOutputDeclaration[] = (declarations.outputs ?? []).map(entry => {
+    const value = typeof entry === 'string' ? { path: entry } : entry;
+    return { path: value.path, line: lineForPath(brief, value.path), source: 'outputs',
+      disposition: inputs.has(value.path) ? 'input' : value.on_existing ?? 'create',
+      expectedType: value.type ?? 'file' };
+  });
+  const unique = new Map<string, BriefOutputDeclaration>();
+  for (const output of outputs) {
+    const prior = unique.get(output.path);
+    if (!prior || (prior.disposition === 'create' && output.disposition !== 'create')) unique.set(output.path, output);
   }
-  return [...deduped.values()];
+  return [...unique.values()];
+}
+
+/** Archive-only identity decoder: replaces the incomplete frozen-only fallback.
+ * Vocabulary, normalization, traversal and duplicate freezing match 74e8422;
+ * active admission never calls it and unrelated metadata confers no authority. */
+const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_manifest|source|sources|dataset|datasets|fixture|fixtures|consume|consumes|read|reads)(?:_|$)/i;
+const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
+const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter|frozen)$/i;
+
+
+function legacyInputPath(authored: string): string | undefined {
+  let path = authored.replace(/^\.\//, '');
+  if (authored !== authored.trim() || /[<>\\]/.test(authored)
+    || /^[`'"([]/.test(authored) || /[`'">)\],;:]$/.test(authored) || /:\d+(?::\d+)?$/.test(authored)
+    || !path || path.includes('::') || /\s/.test(path)
+    || path.startsWith('~') || isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path)
+    || /^(?:https?|file):\/\//i.test(path) || path.includes('://')
+    || /[?*{}[\]$<>]/.test(path) || path === '.' || path.endsWith('.')
+    || path.split('/').some(segment => segment === '..') || path.split('/').slice(1).includes('.')) return;
+  path = path.replace(/\/$/, '');
+  return path.split('/').every(segment => /^\d+$/.test(segment)) ? undefined : path;
+}
+
+function legacyBriefInputs(value: unknown): BriefInputReference[] {
+  const references = new Map<string, BriefInputReference>();
+  const add = (authored: string, frozen = false): void => {
+    const path = legacyInputPath(authored);
+    if (!path) return;
+    const prior = references.get(path);
+    references.set(path, { path, line: 1, frozen: frozen || prior?.frozen === true });
+  };
+  const process = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(process); return; }
+    if (typeof value === 'string') { add(value); return; }
+    if (!value || typeof value !== 'object') return;
+    const mapping = value as Record<string, unknown>;
+    const paths: string[] = [];
+    for (const [key, entry] of Object.entries(mapping)) {
+      if (OUTPUT_KEY.test(key) && !INPUT_KEY.test(key) || ASSERTION_KEY.test(key)) continue;
+      if (typeof entry === 'string') paths.push(entry);
+      else if (Array.isArray(entry) && entry.every(item => typeof item === 'string')) paths.push(...entry);
+    }
+    const valid = paths.filter(path => legacyInputPath(path));
+    if (valid.length) valid.forEach(path => add(path, mapping.frozen === true));
+    else for (const [key, entry] of Object.entries(mapping)) {
+      if (!OUTPUT_KEY.test(key) && entry && typeof entry === 'object') process(entry);
+    }
+  };
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(walk); return; }
+    if (!value || typeof value !== 'object') return;
+    for (const [key, entry] of Object.entries(value)) {
+      if (INPUT_KEY.test(key)) process(entry);
+      else if (!OUTPUT_KEY.test(key)) walk(entry);
+    }
+  };
+  walk(value);
+  return [...references.values()];
+}
+
+/** Runtime uses the admitted snapshot, not the current authoring schema.
+ * The legacy decoder reads verified input receipts, historical input identities and stored output facts;
+ * retired annotations cannot re-judge an already admitted run. */
+export function readAdmittedBriefContract(runDir: string, brief = ''): {
+  inputs: BriefInputReference[]; outputs: BriefOutputDeclaration[];
+} {
+  const artifact = readBriefCriteriaArtifact(runDir);
+  if (artifact?.declarations) return {
+    inputs: (artifact.declarations.inputs ?? []).map(input => ({ ...(typeof input === 'string' ? { path: input } : input), line: 1 })),
+    outputs: outputsFromDeclarations(artifact.declarations, ''),
+  };
+  const statePath = runRecordPath(runDir, 'run.json');
+  const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) as StoreState : undefined;
+  if (artifact || state?.taskDescription) {
+    const briefPath = runRecordPath(runDir, 'task_brief.md');
+    const admittedBrief = existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : state?.taskDescription ?? brief;
+    const setup = state?.projectDir ? inspectShipSetupRecord(state.projectDir, admittedBrief) : undefined;
+    const verification = setup?.state === 'ready' ? (setup.record.targetVerification ?? setup.record.sourceVerification) as { inputs?: BriefInputReference[] } : undefined;
+    const recordedInputs = verification?.inputs;
+    const document = parseBriefFrontmatterDocument(admittedBrief);
+    return {
+      inputs: Array.isArray(recordedInputs) && recordedInputs.every(input => typeof input.path === 'string')
+        ? recordedInputs.map(input => ({ path: input.path, frozen: input.frozen === true, line: input.line ?? 1 }))
+        : legacyBriefInputs(document?.value),
+      outputs: (state?.declaredOutputs ?? []).map(output => ({ ...output, source: 'outputs' })),
+    };
+  }
+  return { inputs: parseBriefInputs(brief).references, outputs: extractBriefOutputDeclarations(brief) };
 }
 
 /** Absolute output directories are durable capabilities, not project artifacts.
@@ -603,7 +356,7 @@ function validateExternalOutputDirectory(
   const path = declaration.path;
   const refuse = (reason: string): never => { throw new Error(`EXTERNAL_OUTPUT_REFUSED: ${path}: ${reason}`); };
   if (!isAbsolute(path) || declaration.expectedType !== 'directory'
-    || !/^(?:outputs?|deliverables?|artifacts?)(?:\.|$)/.test(declaration.source)) {
+    || declaration.source !== 'outputs') {
     refuse('declare an absolute path with type: directory in outputs');
   }
   const controls = Array.from(path).some(character => {

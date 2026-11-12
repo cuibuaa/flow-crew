@@ -63,6 +63,7 @@ function brief(edit: (raw: any) => void = () => {}) {
   put('src/cost.json', '100');
   put('bench/stage-tokens-fast-cal-1.json', '{}');
   put('bench/instrument/evaluate.cjs', `const fs=require('node:fs'); const cost=Number(fs.readFileSync(process.env.FC_RESEARCH_CANDIDATE+'/src/cost.json'));\nif(process.argv.includes('guard')) console.log(JSON.stringify({passes:true}));\nelse {console.log(JSON.stringify({items:[{id:'a',metrics:{cost:Number(process.env.BASELINE_DRAW || cost)}}]})); if(process.argv.includes('bad-argument')) process.exit(2);}\n`);
+  raw.criteria = [{ id: 'fixture_1', text: 'Show engine baseline, noise, per-round decisions and notes.' }];
   edit(raw);
   return `---\n${stringify(raw)}---\n# Improve ordinary engine cost\n\n## Report criteria\n1. Show engine baseline, noise, per-round decisions and notes.\n`;
 }

@@ -84,8 +84,14 @@ export interface ImmutableEvidenceBinding {
 /** Freeze structured input identities before authors start. Explicit output
  * declarations retain precedence; planner estimates cannot amend evidence. */
 export function resolveImmutableEvidenceBindings(projectDir: string, brief: string): ImmutableEvidenceBinding[] {
-  const frozen = parseBriefInputs(brief).references.filter(input => input.frozen === true).map(input => input.path);
-  const outputs = extractBriefOutputDeclarations(brief).flatMap(output => {
+  return bindImmutableEvidence(projectDir, parseBriefInputs(brief).references, extractBriefOutputDeclarations(brief));
+}
+
+/** Runtime consumes admitted declarations; it never reinterprets task prose. */
+export function bindImmutableEvidence(projectDir: string, inputs: readonly { path: string; frozen?: boolean }[],
+  declaredOutputs: readonly { path: string; expectedType: 'file' | 'directory' }[]): ImmutableEvidenceBinding[] {
+  const frozen = [...new Set(inputs.filter(input => input.frozen === true).map(input => input.path))];
+  const outputs = declaredOutputs.flatMap(output => {
     const path = normalizedProjectPath(output.path);
     return path ? [{ path, resolvedPaths: [canonicalPotentialProjectPath(projectDir, path),
       join(canonicalPotentialProjectPath(projectDir, dirname(path)), basename(path))],

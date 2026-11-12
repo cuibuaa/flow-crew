@@ -99,7 +99,7 @@ describe('one confirmed-regression veto', () => {
       return success({ status: 'delivered', summary: 'Value delivered', caveats: [], remaining_work: [] }, ['docs/value.txt']);
     } };
     const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
-    const brief = '---\noutputs: [docs/value.txt]\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Independently verify the value.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Independently verify the value.\"}]\noutputs: [docs/value.txt]\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Independently verify the value.\n";
     const final = await runWorkflow(config, raw, root, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
     const directory = runDir(root, final.runId), ledger = readEvidence(directory);
     expect(calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);

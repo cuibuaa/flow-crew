@@ -12,7 +12,7 @@ let root: string, project: string, target: string, state: string, brief: string;
 const git = (...args: string[]) => isolatedProjectCommand('git', args, project, root).trim();
 const write = (path: string, bytes: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes); };
 const args = () => ['--project', project, '--target', target, '--brief', brief, '--base', 'base', '--branch', 'trial'];
-const writeBrief = (extraArgs: string[] = []) => write(brief, ['---', 'inputs: [data]', 'validation:', '  commands:',
+const writeBrief = (extraArgs: string[] = []) => write(brief, ["---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the declared input.\"}]", 'inputs: [data]', 'validation:', '  commands:',
   '    test:', '      command: fixture-check', `      args: ${JSON.stringify(extraArgs)}`, '---', '# Goal',
   'Preserve declared input and defer configured validation.', '## Requirements', '1. Preserve the declared input.'].join('\n'));
 beforeEach(() => {

@@ -29,7 +29,7 @@ describe('criterion ownership follows the result duty', () => {
     'Independent replay and audit must return a verdict before results count.',
     'Run make test at repository root; report direct exit and preserve a red baseline.',
   ])('admits gate-owned verification without inventing another author: %s', duty => {
-    const brief = `# Criteria\n1. Produce the measured result.\n2. ${duty}\n`;
+    const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce the measured result.\"},{\"id\":\"fixture_2\",\"text\":${JSON.stringify(duty)}}]\n---\n# Criteria\n1. Produce the measured result.\n2. ${duty}\n`;
     const [product, verification] = extractBriefCriteria(brief).criteria.map(c => c.id);
     const work = stage({ id: 'work', role: 'coder', scope: ['results/value.json'], criterion_refs: [product] });
     const review = stage({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], criterion_refs: [product, verification] });
@@ -40,7 +40,7 @@ describe('criterion ownership follows the result duty', () => {
   });
 
   it('still requires a dedicated audit artifact producer when review consumes authored audit work', () => {
-    const brief = '# Criteria\n1. A dedicated audit work stage writes its own verdict into the round directory.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"A dedicated audit work stage writes its own verdict into the round directory.\"}]\n---\n# Criteria\n1. A dedicated audit work stage writes its own verdict into the round directory.\n";
     const work = stage({ id: 'audit_work', role: 'coder', scope: ['results/round/audit.json'], artifact_contract: artifacts([{ id: 'audit', root: 'project', path: 'results/round/audit.json' }]) });
     const gate = stage({ id: 'round_audit', role: 'qa', is_gate: true, artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: 'verdict_round_audit.json' }], [producedRead('audit_input', 'results/round/audit.json', 'audit_work', 'audit')]) });
     const repair = stage({ id: 'fix_round', role: 'coder', depends_on: ['round_audit'], retry_to: ['round_audit'], scope: work.scope });

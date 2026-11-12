@@ -25,7 +25,6 @@ import {
 import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
-import { requireDiskCapacity } from './disk-admission.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -273,6 +272,7 @@ interface ShipSetupFacts {
   worktreeReused: boolean;
   links: ShipSetupLink[];
   copies: ShipSetupCopy[];
+  estimatedCopyBytes?: number;
   sourceVerification: BriefInputVerification;
   sourceOutputInventory: BriefOutputInventory;
   targetVerification?: BriefInputVerification;
@@ -544,7 +544,9 @@ async function estimateInputCopyBytes(
     const source = resolve(projectDir, input.path);
     add(source, fs.realpath(source), new Set(), true);
   }
-  return [...files.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const bytes = [...files.values()].reduce((sum, bytes) => sum + bytes, 0);
+  if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error(`Cannot estimate disk growth: ${bytes}`);
+  return bytes;
 }
 
 function worktreeFailureReason(response: GitWorktreeResponse): string {
@@ -1055,7 +1057,9 @@ export async function runShipSetup(
     deps.fs,
     deps.runGitCommand,
   );
-  const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs, { stateRoot: deps.globalDir(), launchProject: targetDir });
+  const contractErrors = briefDeclarationFailures(brief);
+  const sourceOutputInventory = contractErrors.length ? { declarations: [], entries: [], blocking: [] }
+    : inspectBriefOutputs(brief, projectDir, deps.fs, { stateRoot: deps.globalDir(), launchProject: targetDir });
   let facts = setupFacts(
     projectDir,
     targetDir,
@@ -1068,7 +1072,6 @@ export async function runShipSetup(
   const refuse = (blockers: ShipSetupBlockerInput[]): ShipSetupRefusedReport => (
     persistRefused(facts, blockers, targetDir, deps)
   );
-  const contractErrors = briefDeclarationFailures(brief);
   if (contractErrors.length) return refuse(contractErrors.map(finding => ({
     phase: finding.code === 'frontmatter_invalid' ? 'validation' : 'source', code: finding.code, reason: finding.message,
   })));
@@ -1092,11 +1095,10 @@ export async function runShipSetup(
     branch: parsed.branch as string,
   };
   try {
-    const bytes = await estimateInputCopyBytes(sourceVerification, projectDir, targetDir, deps);
-    if (bytes > 0) requireDiskCapacity(bytes);
+    facts.estimatedCopyBytes = await estimateInputCopyBytes(sourceVerification, projectDir, targetDir, deps);
   } catch (error) {
     return refuse([{ phase: 'target', reason: errorMessage(error),
-      repair: 'Resolve the disk admission or input estimate refusal, then rerun ship-setup. No worktree or input copy was started.' }]);
+      repair: 'Resolve the input estimate refusal, then rerun ship-setup. No worktree or input copy was started.' }]);
   }
   if (deps.fs.entryExists(targetDir)) {
     const existing = await verifyReusableWorktree(worktreeRequest, deps.runGitCommand, deps.fs);

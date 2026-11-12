@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 41 -->
+<!-- flowcrew-skill-revision: 42 -->
 
 # Ship a conversation to FlowCrew
 
@@ -26,10 +26,11 @@ relevant blocker and durable evidence. Unknown status needs inspection. Use prio
 as inputs, not paraphrased facts or a promise to repeat their outcome.
 
 Write a self-contained brief at `docs/task_brief.md` only after preflight facts are available. The run does not receive this
-conversation. Include outcome, evidence paths, real constraints, extractable numbered
-criteria, required human outputs and allowed stopping outcomes. State required observable
-properties; label example mechanisms explicitly. Declare every source input in a leading
-frontmatter `inputs:` block. A path in prose or a table is only a reference, not a declaration.
+conversation. Include outcome, evidence paths, real constraints, declared `criteria: [{id, text}]` identities and stage-readable acceptance prose, required human outputs and allowed stopping outcomes. State required observable
+properties; label example mechanisms explicitly. Criterion IDs must be unique and stable; headings, numbering and example wording have no engine meaning.
+Declare outputs as `outputs: [path]` or `{path, type?, on_existing?}` entries; unknown entry keys are errors.
+Declare every source input in a leading
+frontmatter `inputs:` array, using path strings or `{path, frozen?, type?, sha256?}` entries. No aliases or recursive path inference are supported. A path in prose or a table is only a reference, not a declaration.
 Declare gitignored inputs in the block and intentional reuse of existing outputs. Freeze a file
 or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
 not enforce freezing. Explain evidence gaps and dependencies of quantities.
@@ -46,8 +47,8 @@ structured guards and stop conditions). Do not invent these author-owned declara
 canonical references.
 
 Require the complete configured validation with direct exits/totals after the last relevant
-write. Separate an operator numeric expectation from measured evidence; use exact fields
-`within_expected_range` and `method_was_not_adjusted_to_match_expectation` where applicable.
+write. For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
+`within_expected_range` and `method_was_not_adjusted_to_match_expectation` explicitly. The engine does not detect expectations or inject these obligations.
 Use the [evidence authoring policy](../guide/brief-contract.md#evidence-authoring-policy) for
 judgments about statistics, recurrence, concentrated contributions and supplied mechanisms. Do not invent measurements
 or apply research-round rules to an ordinary engineering task.
@@ -129,8 +130,8 @@ flowcrew ship-setup --brief <brief-path> --project <source> --target <target> --
 
 Proceed only on exit zero and `Ship setup: READY`; nonzero is a refusal.
 On nonzero, inspect the refusal; do not bypass it with manual links/worktrees.
-Setup admits estimated declared-input copy bytes through `disk-guard need` before creating the worktree
-or copying inputs; resolve a capacity/tool refusal before retrying.
+Setup records estimated declared-input copy bytes before creating the worktree or copying inputs.
+It invokes no operator capacity executable. Resolve estimate/copy refusals before retrying.
 Unsupported population comparison remains unverified; do not claim source-suite parity.
 
 ### Register or run

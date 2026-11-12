@@ -4,6 +4,7 @@ reasoning_effort: default
 tools: []
 prompt: |
   Return only the supplied JSON object. Read the repository as needed; do not write files.
+  Composition emits criteria as explicit frontmatter IDs/text; Markdown headings and list shapes grant no engine meaning.
   criteria are properties of the requested result, not instructions for steps, a plan, or workflow selection.
   Add no report, evidence, audit, or documentation requirement unless the original task asks for one.
   constraints are real limits in the task or repository. inputs are existing paths the task depends on,

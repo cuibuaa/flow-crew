@@ -275,6 +275,7 @@ function createProject(harness: Harness, label: string): string {
 
 function registerBackgroundTask(harness: Harness, project: string, marker: string): RegisteredTask {
   const brief = [
+    '---', `criteria: ${JSON.stringify([{ id: 'lifecycle', text: LIFECYCLE_CRITERION }])}`, '---',
     '# Goal',
     `Exercise portable supervision: ${marker}`,
     '',

@@ -108,12 +108,12 @@ describe('Dashboard admission handshake', () => {
       },
       isProjectBusy: () => null,
     });
-    const brief = '# What the report must show\n\n1. The source must contain `new JSDOM(...)` while fixing the login race.';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The source must contain `new JSDOM(...)` while fixing the login race.\"}]\n---\n# What the report must show\n\n1. The source must contain `new JSDOM(...)` while fixing the login race.";
     const checked = await preflight(app, brief);
     expect(checked.report).toMatchObject({
       inputKind: 'brief',
       contractReady: true,
-      frontmatter: { status: 'absent' },
+      frontmatter: { status: 'valid' },
     });
 
     const unchecked = await app.inject({ method: 'POST', url: '/api/tasks', payload: { brief, workflow: 'default' } });
@@ -177,8 +177,8 @@ describe('Dashboard admission handshake', () => {
   });
 
   it('keeps the captured brief in settled state and the terminal report when a sidecar changes', async () => {
-    const brief = '# Goal\nUse the captured scheduler input marker.\n## What the report must show\n1. Preserve the captured scheduler input.\n';
-    const changed = '# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n## What the report must show\n1. Preserve the captured scheduler input.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the captured scheduler input.\"}]\n---\n# Goal\nUse the captured scheduler input marker.\n## What the report must show\n1. Preserve the captured scheduler input.\n";
+    const changed = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the captured scheduler input.\"}]\n---\n# Goal\nSIDE-CAR-DRIFT-MUST-NOT-RUN\n## What the report must show\n1. Preserve the captured scheduler input.\n";
     const admission = explicitAdmission(brief);
     const scheduler = await import('../src/scheduler.js');
     const { config } = scheduler.loadWorkflow(join(projectDir, 'config', 'workflows', 'default.yaml'));
@@ -345,9 +345,9 @@ describe('quick and operator entry behavior', () => {
     expect(`${plain.stdout}${plain.stderr}`).not.toContain('--acknowledge-brief-warnings=');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
 
-    const digestGuardedBrief = '# Goal\nFix the race.\n\n## What the report must show\n1. Preserve exact brief admission.\n';
+    const digestGuardedBrief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve exact brief admission.\"}]\n---\n# Goal\nFix the race.\n\n## What the report must show\n1. Preserve exact brief admission.\n";
     const wrong = runQuickSync(isolated, [
-      'quick', digestGuardedBrief, '--project', isolated.project,
+      'quick', '--task', digestGuardedBrief, '--project', isolated.project,
       '--acknowledge-brief-warnings=wrong-digest',
     ]);
     expect(wrong.status).toBe(1);
@@ -364,14 +364,7 @@ describe('quick and operator entry behavior', () => {
       return { id: 7, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
     });
     try {
-      const exact = [
-        '# Goal',
-        'Automate the guarded submit.',
-        '',
-        '## What the report must show',
-        '1. Preserve these exact stdin bytes through registration.',
-        '',
-      ].join('\n');
+      const exact = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve these exact stdin bytes through registration.\"}]\n---\n# Goal\nAutomate the guarded submit.\n\n## What the report must show\n1. Preserve these exact stdin bytes through registration.\n";
       writeReadySetupRecord(isolated.project, exact, isolated.fcHome);
       const result = await runQuick(isolated, [
         'quick', '--background', '--project', isolated.project, '-',
@@ -404,14 +397,7 @@ describe('quick and operator entry behavior', () => {
       return { id: 7, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
     });
     try {
-      const exact = [
-        '# Goal',
-        'Automate the guarded submit.',
-        '',
-        '## What the report must show',
-        '1. Preserve these exact stdin bytes through registration.',
-        '',
-      ].join('\n');
+      const exact = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve these exact stdin bytes through registration.\"}]\n---\n# Goal\nAutomate the guarded submit.\n\n## What the report must show\n1. Preserve these exact stdin bytes through registration.\n";
       writeReadySetupRecord(isolated.project, exact, isolated.fcHome);
       const result = await runQuick(isolated, [
         'quick', '--background', '--project', isolated.project, '-',
@@ -441,7 +427,7 @@ describe('quick and operator entry behavior', () => {
 
   it('consumes adverse campaign hygiene as a no-flag skip default while explicit inherit wins', async () => {
     const isolated = cliFixture();
-    const brief = '# Goal\nKeep campaign context bounded.\n\n## What the report must show\n1. Preserve an explicit context override.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve an explicit context override.\"}]\n---\n# Goal\nKeep campaign context bounded.\n\n## What the report must show\n1. Preserve an explicit context override.\n";
     writeReadySetupRecord(isolated.project, brief, isolated.fcHome);
     const campaignDir = join(isolated.project, '.fc', 'campaigns');
     mkdirSync(campaignDir, { recursive: true });
@@ -494,7 +480,7 @@ describe('quick and operator entry behavior', () => {
     const runId = 'existing-fixture';
     const runPath = join(isolated.fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    const brief = '# Goal\nContinue exactly.\n\n## What the report must show\n1. Continue the admitted run snapshot.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Continue the admitted run snapshot.\"}]\n---\n# Goal\nContinue exactly.\n\n## What the report must show\n1. Continue the admitted run snapshot.\n";
     writeFileSync(runRecordPath(runPath, 'task_brief.md'), brief, 'utf-8');
     writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
@@ -527,7 +513,7 @@ describe('quick and operator entry behavior', () => {
     const isolated = cliFixture();
     const runId = 'acknowledgement-precedence';
     const runPath = join(isolated.fcHome, 'runs', runId);
-    const brief = '# Goal\nContinue the admitted run.\n\n## What the report must show\n1. Preserve the transported acknowledgement.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the transported acknowledgement.\"}]\n---\n# Goal\nContinue the admitted run.\n\n## What the report must show\n1. Preserve the transported acknowledgement.\n";
     const stored = explicitAdmission(brief);
     const transported = createBriefAdmission(inspectBrief(brief), {
       kind: 'explicit',
@@ -572,7 +558,7 @@ describe('quick and operator entry behavior', () => {
     const isolated = cliFixture();
     const runId = 'background-existing-run';
     const runPath = join(isolated.fcHome, 'runs', runId);
-    const brief = '# Goal\nContinue the named run.\n\n## What the report must show\n1. Preserve the existing run identity.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve the existing run identity.\"}]\n---\n# Goal\nContinue the named run.\n\n## What the report must show\n1. Preserve the existing run identity.\n";
     mkdirSync(runPath, { recursive: true });
     writeFileSync(runRecordPath(runPath, 'task_brief.md'), brief, 'utf-8');
     writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
@@ -617,7 +603,7 @@ describe('quick and operator entry behavior', () => {
     const runId = 'transported-existing-fixture';
     const runPath = join(isolated.fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    const brief = '# Goal\nConsume the captured continuation.\n\n## What the report must show\n1. Use the transported admitted snapshot.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Use the transported admitted snapshot.\"}]\n---\n# Goal\nConsume the captured continuation.\n\n## What the report must show\n1. Use the transported admitted snapshot.\n";
     const admission = explicitAdmission(brief);
     writeFileSync(runRecordPath(runPath, 'task_brief.md'), `${brief}\n`, 'utf-8');
     writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({

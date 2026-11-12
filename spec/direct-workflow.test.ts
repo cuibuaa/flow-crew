@@ -33,7 +33,7 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive: true, force: true }); });
 
 function brief(frontmatter: string): string {
-  return ['---', frontmatter, '---', '# Add a greeting', '', '## What the report must show',
+  return ["---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The greeting added.\"},{\"id\":\"fixture_2\",\"text\":\"The test command and its direct exit code.\"}]", frontmatter, '---', '# Add a greeting', '', '## What the report must show',
     '1. The greeting added.', '2. The test command and its direct exit code.', ''].join('\n');
 }
 
@@ -197,19 +197,10 @@ describe('direct workflow', () => {
     expect(existsSync(runRecordPath(directory, 'declared_outputs', 'docs', 'report.md'))).toBe(true);
   });
 
-  it('refuses at admission a brief its fixed plan cannot satisfy, before any stage runs', async () => {
-    const refusals: Array<[string, string]> = [
-      ['workflow: direct\nplanner_policies: [not_a_policy]\nresearch:\n  baseline: 0.5', 'PLANNER_POLICY_INVALID'],
-    ];
-    for (const [frontmatter, reason] of refusals) {
-      const calls: string[] = [];
-      const final = await runDirect(brief(frontmatter), calls);
-      expect(['failed', 'escalated']).toContain(final.status);
-      const admissionPath = runRecordPath(runDir(projectDir, final.runId), 'dispatch_admission.json');
-      const errors = existsSync(admissionPath) ? JSON.parse(readFileSync(admissionPath, 'utf8')).errors : [];
-      expect([final.failureReason, ...errors].join('\n')).toContain(reason);
-      expect(calls).toEqual([]);
-    }
+  it('refuses malformed declarations before claiming a run or invoking a stage', async () => {
+    const calls: string[] = [];
+    await expect(runDirect(brief('inputs: [{path: source.txt, typo: true}]'), calls)).rejects.toThrow('typo');
+    expect(calls).toEqual([]);
   });
 
   it('authors and repairs with declared read-only files and trees without a planner call', async () => {

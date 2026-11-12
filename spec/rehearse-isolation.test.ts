@@ -86,7 +86,7 @@ function runRehearsal(
 function writeCriterionBrief(fixture: RehearsalFixture, name = 'brief.md'): { path: string; source: string } {
   const source = readFileSync(helloBrief, 'utf-8').replace(
     '## Round contract',
-    '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+    "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the measured count and the direct command evidence.\"}]\n---\n## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract",
   );
   const path = join(fixture.project, name);
   writeFileSync(path, source, 'utf-8');
@@ -146,7 +146,7 @@ describe('rehearsal Git isolation', () => {
     const sentinel = join(fixture.project, 'sentinel.txt');
     const briefSource = readFileSync(helloBrief, 'utf-8').replace(
       '## Round contract',
-      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the measured count and the direct command evidence.\"}]\n---\n## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract",
     );
     writeFileSync(brief, briefSource, 'utf-8');
     writeFileSync(sentinel, 'unchanged\n', 'utf-8');
@@ -196,7 +196,7 @@ describe('rehearsal Git isolation', () => {
     const brief = join(fixture.project, 'criteria-research.md');
     const source = readFileSync(helloBrief, 'utf-8').replace(
       '## Round contract',
-      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the measured count and the direct command evidence.\"}]\n---\n## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract",
     );
     writeFileSync(brief, source, 'utf-8');
 
@@ -215,7 +215,7 @@ describe('rehearsal Git isolation', () => {
     const fixture = rehearsalFixture();
     const outputPath = join(forbidden ? fixture.fcHome : fixture.root, 'durable-results');
     const authored = writeCriterionBrief(fixture);
-    writeFileSync(authored.path, authored.source.replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
+    writeFileSync(authored.path, authored.source.replace(/^outputs:.*\n/m, '').replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
     const result = runRehearsal(fixture, authored.path, { PROJECT_DIR: fixture.project });
     const output = `${result.stdout}${result.stderr}`;
     expect(result.status, output).toBe(forbidden ? 1 : 0);
@@ -229,7 +229,7 @@ describe('rehearsal Git isolation', () => {
     const outputPath = join(launch === 'target-overlap' ? target : fixture.project, 'runs', 'results');
     writeFileSync(join(fixture.project, '.gitignore'), 'runs/\n');
     const authored = writeCriterionBrief(fixture);
-    writeFileSync(authored.path, authored.source.replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
+    writeFileSync(authored.path, authored.source.replace(/^outputs:.*\n/m, '').replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
     const args = launch === 'unknown' ? [] : launch === 'project' ? ['--project', fixture.project]
       : ['--target', launch === 'in-place' ? fixture.project : target];
     const result = runRehearsal(fixture, authored.path, { PROJECT_DIR: fixture.project }, args);

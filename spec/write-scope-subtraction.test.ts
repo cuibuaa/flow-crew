@@ -139,6 +139,17 @@ describe('legitimate work outside planner estimates', () => {
     expect(readFileSync(join(project, 'reports/test-result.txt'), 'utf8')).toBe('make test passed\n');
   });
 
+  it('retains ordinary test scratch until its consumer removes it', async () => {
+    write('source.txt', 'ordinary source'); commit(); create();
+    const scratch = mkdtempSync(join(project, 'offline-test-'));
+    const relativeScratch = scratch.slice(project.length + 1) + '/state/registry';
+    const result = await execute(() => { write(relativeScratch, 'temporary registry'); return [relativeScratch]; });
+    accepted(result);
+    expect(readFileSync(join(project, relativeScratch), 'utf8')).toBe('temporary registry');
+    rmSync(scratch, { recursive: true, force: true });
+    expect(existsSync(scratch)).toBe(false);
+  });
+
   it('accepts a required new output under an input directory with exact output precedence', async () => {
     write('inputs/original.txt', 'original evidence'); commit();
     create('---\ninputs: [{path: inputs, frozen: true}]\noutputs: [inputs/report.md]\n---\nKeep `inputs` frozen. Produce the required report.');
@@ -493,7 +504,7 @@ describe('the surviving project guarantees', () => {
 
   it('freezes only boolean frontmatter declarations, regardless of annotation prose', () => {
     write('evidence.txt', 'original');
-    for (const metadata of ['note: frozen evidence', 'role: immutable evidence', 'frozen: false']) {
+    for (const metadata of ['frozen: false']) {
       expect(resolveImmutableEvidenceBindings(project,
         `---\ninputs:\n  - path: evidence.txt\n    ${metadata}\n---\nPreserve \`evidence.txt\` bytes.`)).toEqual([]);
     }

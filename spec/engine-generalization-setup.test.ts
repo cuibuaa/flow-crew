@@ -207,11 +207,7 @@ describe('declared-input materialization and live producers', () => {
     }
     const tracked = ['package.json', 'package-lock.json', 'config/validation.json', ...Object.keys(contents)
       .filter(path => path !== 'tools/parity/values.csv')];
-    const brief = [
-      '---', 'inputs: [tools/parity]', 'outputs: [report.md]', '---',
-      '# Goal', 'Report the parity implementation after validation.', '',
-      '## Acceptance criteria', '1. Create report.md from tools/parity/main.py without changing its content.',
-    ].join('\n');
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Create report.md from tools/parity/main.py without changing its content.\"}]\ninputs: [tools/parity]\noutputs: [report.md]\n---\n# Goal\nReport the parity implementation after validation.\n\n## Acceptance criteria\n1. Create report.md from tools/parity/main.py without changing its content.";
     writeFileSync(join(fixture.project, 'brief.md'), brief);
     isolatedProjectCommand('git', ['init', '-q'], fixture.project, fixture.root);
     isolatedProjectCommand('git', ['add', '-f', ...tracked], fixture.project, fixture.root);
@@ -303,7 +299,7 @@ describe('declared-input materialization and live producers', () => {
     writeFileSync(join(fixture.project, 'fixtures', 'source', 'evidence.txt'), 'preserved evidence\n');
     if (existing) writeFileSync(join(fixture.project, 'fixtures', 'source', 'report.md'), 'earlier report\n');
     const brief = [
-      '---',
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Create fixtures/source/report.md using fixtures/source/evidence.txt.\"}]",
       'inputs: [fixtures/source]',
       'outputs:',
       '  - path: fixtures/source/report.md',
@@ -349,11 +345,7 @@ describe('declared-input materialization and live producers', () => {
   it('refuses an existing create-only output inside its declared input at every admission surface', async () => {
     mkdirSync(join(fixture.project, 'fixtures', 'source'), { recursive: true });
     writeFileSync(join(fixture.project, 'fixtures', 'source', 'report.md'), 'existing report\n');
-    const brief = [
-      '---', 'inputs: [fixtures/source]', 'outputs: [fixtures/source/report.md]', '---',
-      '# Goal', 'Produce a fresh report.', '', '## Acceptance criteria',
-      '1. Create fixtures/source/report.md from the input evidence.',
-    ].join('\n');
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Create fixtures/source/report.md from the input evidence.\"}]\ninputs: [fixtures/source]\noutputs: [fixtures/source/report.md]\n---\n# Goal\nProduce a fresh report.\n\n## Acceptance criteria\n1. Create fixtures/source/report.md from the input evidence.";
     writeFileSync(join(fixture.project, 'brief.md'), brief);
     const preflight = await collectShipPreflight(['ship-preflight', '--brief', 'brief.md'],
       preflightDependencies(join(fixture.state, 'runs'), validationRunner()));
@@ -389,20 +381,7 @@ describe('declared-input materialization and live producers', () => {
     const frozenTreeFile = join(fixture.project, 'fixtures', 'frozen', 'record.json');
     writeFileSync(frozenFile, 'id,value\n1,original\n');
     writeFileSync(frozenTreeFile, '{"id":1}\n');
-    writeFileSync(join(fixture.project, 'brief.md'), [
-      '---',
-      'inputs:',
-      '  - data/frozen.csv',
-      '  - fixtures/frozen',
-      'outputs:',
-      '  - path: generated/cache.txt',
-      '    on_existing: replace',
-      '---',
-      '# Goal',
-      'Validate without changing the declared inputs.',
-      '## Acceptance criteria',
-      '1. Keep the prepared input snapshot unchanged when the source producer updates it.',
-    ].join('\n'));
+    writeFileSync(join(fixture.project, 'brief.md'), "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Keep the prepared input snapshot unchanged when the source producer updates it.\"}]\ninputs:\n  - data/frozen.csv\n  - fixtures/frozen\noutputs:\n  - path: generated/cache.txt\n    on_existing: replace\n---\n# Goal\nValidate without changing the declared inputs.\n## Acceptance criteria\n1. Keep the prepared input snapshot unchanged when the source producer updates it.");
 
     const mutatingTarget = join(fixture.root, 'mutating-target');
     const mutatingRunner = validationRunner((role) => {
@@ -453,15 +432,7 @@ describe('declared-input materialization and live producers', () => {
     }));
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'original\n');
-    writeFileSync(join(fixture.project, 'brief.md'), [
-      '---',
-      'inputs: [data/frozen.csv]',
-      '---',
-      '# Goal',
-      'Run validation without changing inputs.',
-      '## Acceptance criteria',
-      '1. Run all baseline validation commands in the prepared target and preserve the source input.',
-    ].join('\n'));
+    writeFileSync(join(fixture.project, 'brief.md'), "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Run all baseline validation commands in the prepared target and preserve the source input.\"}]\ninputs: [data/frozen.csv]\n---\n# Goal\nRun validation without changing inputs.\n## Acceptance criteria\n1. Run all baseline validation commands in the prepared target and preserve the source input.");
     const target = join(fixture.root, 'fallback-target');
     const runner = validationRunner((role, cwd) => {
       if (role === 'test' && cwd === fixture.project) {
@@ -520,7 +491,7 @@ function reuseRunner(
 
 describe('item 18: portable existing-worktree inventory', () => {
   it('reaches safe reuse without the unsupported option and retains every fail-closed identity check', async () => {
-    writeFileSync(join(fixture.project, 'brief.md'), '# Goal\nReuse the exact existing target.\n## Acceptance criteria\n1. Reuse only the registered worktree with the requested base and branch.\n');
+    writeFileSync(join(fixture.project, 'brief.md'), "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Reuse only the registered worktree with the requested base and branch.\"}]\n---\n# Goal\nReuse the exact existing target.\n## Acceptance criteria\n1. Reuse only the registered worktree with the requested base and branch.\n");
     const target = join(fixture.root, 'reusable-target');
     materializeTrackedTarget(target);
     const portableRunner = reuseRunner({ exitCode: 0, stdout: worktreeRecord(target) });

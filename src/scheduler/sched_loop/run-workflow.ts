@@ -86,7 +86,7 @@ export async function runWorkflow(
   log.info({ runId, workflow: workflow.name }, 'Run started');
   log.info({ runId }, SINGLE_AUTHOR_NOTICE);
   recordRunEvent(projectDir, runId, { type: 'execution_notice', runId, timestamp: new Date().toISOString(), detail: SINGLE_AUTHOR_NOTICE, source: 'scheduler' });
-  const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, resumingExistingRun, taskDescription, campaignId, inheritCampaignContext, briefAdmission);
+  const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, { resumingExistingRun, briefWasAdmitted: launch.briefWasAdmitted }, taskDescription, campaignId, inheritCampaignContext, briefAdmission);
   if (configured.kind === 'settled') return settled = configured.state;
   taskDescription = configured.taskDescription;
   const researchState = configured.researchState ?? checkpointState;

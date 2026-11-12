@@ -2,6 +2,8 @@ import { runRecordPath, assertSeparatedRunLayout } from '../../run-layout.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
+import { verifyDeclaredBriefInputs } from '../../ship-inputs.js';
+import { parseBriefDeclarations } from '../../brief-declarations.js';
 import { writeBriefCriteriaArtifact } from '../../brief-criteria.js';
 import { BriefAdmissionRecord, verifyBriefAdmission } from '../../brief-preflight.js';
 import { resolveRunIdentity } from '../../cancellation-policy.js';
@@ -44,8 +46,9 @@ export function prepareWorkflowLaunch(
 ): { kind: 'settled'; state: StoreState } | {
   kind: 'ready'; runId: string; runDirPath: string; launchIntentOwned: boolean;
   maxIterations: number; baseStages: StageConfig[]; workflowYaml: string;
-  resumingExistingRun: boolean; resumeAtIteration: number; schedulerPidPath: string;
+  resumingExistingRun: boolean; briefWasAdmitted: boolean; resumeAtIteration: number; schedulerPidPath: string;
 } {
+  let briefWasAdmitted = false;
   let launchState: StoreState | undefined;
   const launchUnchanged = (state: StoreState): boolean => !launchState
     || (state.status === launchState.status && state.completedAt === launchState.completedAt);
@@ -54,6 +57,10 @@ export function prepareWorkflowLaunch(
     requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
     assertSeparatedRunLayout(runDir(projectDir, existingRunId));
     launchState = archived;
+    const directory = runDir(projectDir, existingRunId);
+    briefWasAdmitted = Boolean(archived.taskDescription || archived.briefAdmission
+      || existsSync(runRecordPath(directory, 'task_brief.md'))
+      || existsSync(runRecordPath(directory, 'brief_criteria.json')));
     if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
@@ -62,6 +69,15 @@ export function prepareWorkflowLaunch(
       for (const key of Object.keys(workflow)) Reflect.deleteProperty(workflow, key);
       Object.assign(workflow, admitted);
     }
+  }
+  // First admission validates declarations before claiming resources; execution
+  // resumption and its recovery/cancellation fences retain their existing path.
+  if (taskDescription !== undefined && !briefWasAdmitted) {
+    parseBriefDeclarations(taskDescription);
+    const verified = verifyDeclaredBriefInputs(taskDescription, projectDir);
+    const missing = verified.inputs.find(input => !input.exists || !input.readable);
+    if (missing) throw new Error(`inputs.path ${missing.path}: declared input is missing or unreadable`);
+    if (verified.unresolvedInputs.length) throw new Error(verified.unresolvedInputs.map(input => input.reason).join('\n'));
   }
   if (workflow.name === 'default') workflow.name = 'planner';
   normalizeStageContracts(workflow.stages);
@@ -143,6 +159,8 @@ export function prepareWorkflowLaunch(
     if (reservation) {
       initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
       const state = readRunState(projectDir, runId);
+      state.briefConfigured = false;
+      writeRunState(projectDir, runId, state);
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
       if (taskDescription) state.taskDescription = taskDescription;
@@ -153,6 +171,9 @@ export function prepareWorkflowLaunch(
       writeRunState(projectDir, runId, state);
       launchState = state;
     }
+    if (!briefWasAdmitted && !reservation && launchState?.status === RUN_STATUS.RUNNING) updateRunState(projectDir, runId, state => {
+      if (launchUnchanged(state) && state.status === RUN_STATUS.RUNNING) state.briefConfigured = false;
+    });
     let preparedForLaunch = false;
     const prepared = updateRunState(projectDir, runId, (state) => {
     if (!launchUnchanged(state)) return;
@@ -205,6 +226,8 @@ export function prepareWorkflowLaunch(
     launchIntentOwned = launchClaim.claimed;
     initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
     const state = readRunState(projectDir, runId);
+    state.briefConfigured = false;
+    writeRunState(projectDir, runId, state);
     if (taskDescription) state.taskDescription = taskDescription;
     if (briefAdmission) state.briefAdmission = briefAdmission;
     if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
@@ -230,7 +253,10 @@ export function prepareWorkflowLaunch(
       : (taskDescription ?? '');
     if (exactBrief) {
       attachBriefWritingEvidence(projectDir, exactBrief, runDirPath);
-      writeBriefCriteriaArtifact(runDirPath, exactBrief);
+      // Stored bytes can precede snapshot publication. Finish new-format
+      // preparation; archives without the marker keep their admitted semantics.
+      if ((!briefWasAdmitted || readRunState(projectDir, runId).briefConfigured === false)
+        && !existsSync(runRecordPath(runDirPath, 'brief_criteria.json'))) writeBriefCriteriaArtifact(runDirPath, exactBrief);
       if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
         snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
       }
@@ -332,5 +358,5 @@ export function prepareWorkflowLaunch(
       invalidateRunLockCache();
     }
   }
-  return {kind: 'ready', runId, runDirPath, launchIntentOwned, maxIterations, baseStages, workflowYaml, resumingExistingRun, resumeAtIteration, schedulerPidPath};
+  return {kind: 'ready', runId, runDirPath, launchIntentOwned, maxIterations, baseStages, workflowYaml, resumingExistingRun, briefWasAdmitted, resumeAtIteration, schedulerPidPath};
 }

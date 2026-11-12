@@ -24,7 +24,7 @@ export function changedPaths(projectDir: string, state: StoreState): string[] {
 /** Complete legacy facts, or bounded counts. Any unreadable piece makes the whole diff unavailable. */
 export function reviewFacts(projectDir: string, directory: string, state: StoreState, room: number) {
   let brief = ''; try { brief = readFileSync(runRecordPath(directory, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
-  const fact = validationForTree(readEvidence(directory), captureProjectTree(projectDir, brief).hash);
+  const fact = validationForTree(readEvidence(directory), captureProjectTree(projectDir, brief, directory).hash);
   const validation = fact ? projectValidationFact(fact) : { status: 'No configured validation fact covers the current tree; validation unmeasured.' };
   let diff = '', files: string[] = [], pathsComplete = false;
   const counts = () => ({ files: pathsComplete ? files.length : null, diffChars: diff.length,

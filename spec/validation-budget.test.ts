@@ -36,7 +36,7 @@ async function workflow(root: string, adapter: Adapter, validation: string) {
   // Keep selection out of this mutation: both trees receive the same explicit commands.
   if (validation) { mkdirSync(join(root, 'config'), { recursive: true }); writeFileSync(join(root, 'config/validation.json'), JSON.stringify(parseYaml(validation).validation)); }
   const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const brief = `---\noutputs: [docs/value.txt]\n${validation}---\n# Deliver a value\n\n## Acceptance criteria\n1. Independently check the value, using available validation evidence and stating its limits.\n`;
+  const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Independently check the value, using available validation evidence and stating its limits.\"}]\noutputs: [docs/value.txt]\n${validation}---\n# Deliver a value\n\n## Acceptance criteria\n1. Independently check the value, using available validation evidence and stating its limits.\n`;
   const final = await runWorkflow(config, raw, root, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
   const rd = runDir(root, final.runId);
   const validations = readEvidence(rd).filter((entry): entry is typeof entry & ValidationFact => entry.kind === 'validation');

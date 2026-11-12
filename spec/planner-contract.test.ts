@@ -11,7 +11,6 @@ import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir, runDir, updateRunState } from '../src/store.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { renderPlannerPolicies } from '../src/planner-policies.js';
 
 const PLANNER_PATH = resolve(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml');
 const BRIEF_CONTRACT_PATH = resolve(import.meta.dirname, '..', 'guide', 'brief-contract.md');
@@ -25,7 +24,7 @@ interface PlannerConfig {
 function readPlannerPrompt(): string {
   const parsed = parse(readFileSync(PLANNER_PATH, 'utf-8')) as PlannerConfig;
   if (typeof parsed.prompt !== 'string') throw new Error('planner.yaml must contain a string prompt');
-  return parsed.prompt + '\n' + renderPlannerPolicies(['evidence_statistics']);
+  return parsed.prompt;
 }
 
 function readShipSkill(): string {
@@ -61,7 +60,7 @@ describe('planner dispatch contract', () => {
     const project = join(root, 'project'); mkdirSync(project);
     const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
     try {
-      const brief = '# Criteria\n1. Independently check existing work.\n';
+      const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Independently check existing work.\"}]\n---\n# Criteria\n1. Independently check existing work.\n";
       const criteria = extractBriefCriteria(brief);
       const audit = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true });
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['audit'], retry_to: ['audit'] });
@@ -106,7 +105,7 @@ describe('public gate and launch-workspace contract', () => {
 
 describe('ship authoring and operator bookkeeping contract', () => {
   it('requires leading input declarations rather than prose or table references', () => {
-    expect(readShipSkill()).toMatch(/Declare every source input in a leading\s+frontmatter `inputs:` block\.[\s\S]*A path in prose or a table is only a reference, not a declaration/);
+    expect(readShipSkill()).toMatch(/Declare every source input in a leading\s+frontmatter `inputs:` array[\s\S]*A path in prose or a table is only a reference, not a declaration/);
   });
 
   it('documents automatic post-launch bookkeeping and keeps lifecycle updates in the skill', () => {

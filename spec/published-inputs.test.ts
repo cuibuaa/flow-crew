@@ -10,7 +10,8 @@ import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 
 import { applyBasePrompt, inspectDispatchAdmission, loadBasePrompt, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { buildStagePrompt } from '../src/handoff.js';
-import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
+import { parseChecksFromMarkdown, parseDeclaredChecksFromBrief, parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
+import { parseBriefFrontmatterDocument } from '../src/brief-frontmatter.js';
 
 const projectRoot = resolve(import.meta.dirname, '..');
 const read = (path: string): string => readFileSync(join(projectRoot, path), 'utf8');
@@ -106,6 +107,12 @@ describe('published declaration inputs', () => {
           expect(parsed.frontmatterError).toBeUndefined();
           expect(parsed.workflowError).toBeUndefined();
           expect(parsed.researchPolicyError).toBeUndefined();
+          const declarations = parseBriefFrontmatterDocument(block)?.value as { reality_checks?: unknown } | undefined;
+          if (declarations?.reality_checks !== undefined) {
+            const checks = parseRealityChecks(declarations.reality_checks);
+            expect(checks.length).toBeGreaterThan(0);
+            expect(checks.filter(check => check.kind === 'invalid')).toEqual([]);
+          }
           continue;
         }
         const value = parse(block);
@@ -124,9 +131,12 @@ describe('published declaration inputs', () => {
   it('runs the published reality checks on their declared inputs and refuses a mismatched result', async () => {
     const owned = fixture();
     try {
-      const block = yamlBlocks(read('guide/brief-contract.md')).filter((text) => !/^---\s*\n/.test(text)).find((text) => parse(text)?.checks);
+      const block = yamlBlocks(read('guide/brief-contract.md')).find(text =>
+        (parseBriefFrontmatterDocument(text)?.value as { reality_checks?: unknown } | undefined)?.reality_checks !== undefined);
       expect(block).toBeDefined();
-      const checks = parseChecksFromMarkdown(`## Reality checks\n\x60\x60\x60yaml\n${block}\x60\x60\x60\n`);
+      const briefPath = join(owned.root, 'brief.md');
+      writeFileSync(briefPath, block!);
+      const checks = parseDeclaredChecksFromBrief(briefPath);
       mkdirSync(join(owned.project, 'docs')); writeFileSync(join(owned.project, 'docs/output.md'), 'Measured output\n');
       const result = join(owned.project, 'result.json');
       writeFileSync(result, JSON.stringify({ metric: 'quality', value: 42, evidence: 'measured fixture' }));

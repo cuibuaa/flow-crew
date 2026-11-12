@@ -13,7 +13,7 @@ const repository = join(import.meta.dirname, '..');
 const allowed = 'If the best measured speed-up is below 4x, end with measurements and a report of what bounds it.';
 const conflicting = 'PASS only if the benchmark shows at least 4x. If speed-up is below 4x but the implementation reports bounds, reject because the headline outcome was not achieved.';
 const brief = (fallback: boolean) => [
-  '---', 'outputs: [docs/report.json]', '---', '# Improve the exact probe',
+  "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Reference and candidate wall-clock times on the same device, load samples during both runs, the ratio, command and direct exit code.\"},{\"id\":\"fixture_2\",\"text\":\"Exact parity after the last code change; measured bounds when below the target.\"}]", 'outputs: [docs/report.json]', '---', '# Improve the exact probe',
   'The preferred outcome is at least 4x faster with exact parity.', fallback ? allowed : 'At least 4x is required.',
   '## What the report must show',
   '1. Reference and candidate wall-clock times on the same device, load samples during both runs, the ratio, command and direct exit code.',

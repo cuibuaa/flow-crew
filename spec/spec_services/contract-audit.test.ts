@@ -8,11 +8,7 @@ import { inspectRealityCheckReachability, parseDispatchedStageConfig } from '../
 
 describe('collected contract audit', () => {
   it('retains a criterion containing an illustrative example', () => {
-    const artifact = extractBriefCriteria([
-      '# Task',
-      '## Acceptance criteria',
-      '1. Preserve every output property; for example, reject occupied create-only paths.',
-    ].join('\n'));
+    const artifact = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve every output property; for example, reject occupied create-only paths.\"}]\n---\n# Task\n## Acceptance criteria\n1. Preserve every output property; for example, reject occupied create-only paths.");
     assert.equal(artifact.criteria.length, 1);
   });
 

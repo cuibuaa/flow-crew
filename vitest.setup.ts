@@ -1,3 +1,5 @@
+// Retain the test environment's PATH transport after removing the fake disk guard.
+process.env.PATH = process.env.PATH ?? '';
 import { afterAll, expect } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,11 +96,6 @@ process.env.HOME = isolation.home;
 process.env.USERPROFILE = isolation.home;
 delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
-// Capacity is a fixture input, never the developer's live root-disk policy.
-const fixtureBin = join(isolation.home, 'bin');
-mkdirSync(fixtureBin);
-writeFileSync(join(fixtureBin, 'disk-guard'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-process.env.PATH = `${fixtureBin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`;
 
 // Capture the setup-owned inputs at the import boundary. Tests examine this
 // construction, rather than requiring any variable from the invoking shell.

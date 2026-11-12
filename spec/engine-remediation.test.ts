@@ -208,7 +208,7 @@ describe('engine behaviour contracts', () => {
     const stateRoot = join(root, 'fc-home');
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
-    const brief = '# Goal\n## What the report must show\n1. Record completion.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Record completion.\"}]\n---\n# Goal\n## What the report must show\n1. Record completion.\n";
     const canonical = realpathSync.native(projectDir);
     const digest = shipSetupBriefDigest(brief);
     const recordPath = shipSetupReadyRecordPath(canonical, digest, stateRoot);
@@ -219,7 +219,7 @@ describe('engine behaviour contracts', () => {
       readyRecordPath: recordPath, blockers: [{ reason: 'target collision' }],
     }));
     const refused = inspectShipSetupRecord(projectDir, brief, stateRoot);
-    const launch = sourceCli(['quick', brief, '--project', projectDir, '--no-campaign', '--acknowledge-brief-warnings'], stateRoot);
+    const launch = sourceCli(['quick', '--task', brief, '--project', projectDir, '--no-campaign', '--acknowledge-brief-warnings'], stateRoot);
     const baseline = validationBaseline(canonical);
     write(recordPath, JSON.stringify({
       version: 1, state: 'ready', ready: true, createdAt: new Date().toISOString(),
@@ -329,10 +329,10 @@ describe('engine behaviour contracts', () => {
     expect(result).toBeInstanceOf(RpcOutcomeUnknownError);
   });
 
-  it('refuses vacuous criteria while preserving substantive negation text', async () => {
+  it('keeps prose criteria opaque while accepting declared identities', async () => {
     const emptyBrief = '# Goal\nDo useful work.\n';
-    const substantiveBrief = '# Goal\n## What the report must show\n1. Prove this is not a criterion parser false negative.\n';
-    const hyphenatedBrief = '# Goal\n## What the report must show\n1. Example-driven proof must include the failing identity.\n';
+    const substantiveBrief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Prove this is not a criterion parser false negative.\"}]\n---\n# Goal\n## What the report must show\n1. Prove this is not a criterion parser false negative.\n";
+    const hyphenatedBrief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Example-driven proof must include the failing identity.\"}]\n---\n# Goal\n## What the report must show\n1. Example-driven proof must include the failing identity.\n";
     const illustrativeBrief = '# Goal\n## What the report must show\n1. Example: an illustrative output shape only.\n';
     const empty = extractBriefCriteria(emptyBrief);
     const substantive = extractBriefCriteria(substantiveBrief);
@@ -349,12 +349,11 @@ describe('engine behaviour contracts', () => {
     expect(substantive.criteria).toHaveLength(1);
     expect(hyphenated.criteria).toHaveLength(1);
     expect(illustrative.criteria).toHaveLength(0);
-    expect(illustrative.excluded).toHaveLength(1);
-    expect(preflight.findings).toContainEqual(expect.objectContaining({ code: 'brief_criteria_missing' }));
-    expect(rehearsal.exitCode).toBe(1);
-    expect(rehearsal.simulated).toBe(false);
-    expect(admission.pass).toBe(false);
-    expect(admission.errors).toContainEqual({ code: 'criteria_missing', field: 'criteria', message: 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage' });
+    expect(illustrative.excluded).toBeUndefined();
+    expect(preflight.contractReady).toBe(true);
+    expect(rehearsal.exitCode).toBe(0);
+    expect(admission.pass).toBe(true);
+    expect(admission.errors).toEqual([]);
     expect(launch.status).toBe(1);
     expect(launch.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
   });

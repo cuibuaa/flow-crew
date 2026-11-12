@@ -30,9 +30,7 @@ import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { recordRequestedBaseValidation, recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
-import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
-import { renderPlannerPolicies } from './planner-policies.js';
-import { extractBriefCriteria } from './brief-criteria.js';
+import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { normalizedProjectPath, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
@@ -84,8 +82,8 @@ import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
 /** Put the canonical IDs beside the planner's first proposal instructions. */
-export function plannerCriterionAssignmentContext(brief: string, runDir: string): string {
-  const criteria = extractBriefCriteria(brief).criteria;
+export function plannerCriterionAssignmentContext(_brief: string, runDir: string): string {
+  const criteria = readBriefCriteriaArtifact(runDir)?.criteria ?? [];
   if (criteria.length === 0) return '';
   return [
     '# First-proposal criterion assignments',
@@ -305,7 +303,7 @@ export async function runStage(
   // artifacts. The rendered task description has already lost frontmatter.
   const evidenceBriefPath = runRecordPath(opts.runDir, 'task_brief.md');
   const evidenceBrief = existsSync(evidenceBriefPath) ? readFileSync(evidenceBriefPath, 'utf8') : opts.taskDescription ?? '';
-  const evidenceTreeBefore = captureProjectTree(opts.projectDir, evidenceBrief);
+  const evidenceTreeBefore = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
 
   const attribution = opts.attribution ?? {
     role: opts.role.name,
@@ -493,10 +491,7 @@ export async function runStage(
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '', opts.runDir);
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
     if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
-    const briefPath = runRecordPath(opts.runDir, 'task_brief.md');
-    const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf-8') : opts.taskDescription ?? '';
-    const policies = renderPlannerPolicies(parseBriefFrontmatter(brief).plannerPolicies ?? []);
-    if (policies) resolvedSystemPrompt += `\n\n${policies}`;
+
   }
 
   if (opts.isolatedInput) {
@@ -941,7 +936,7 @@ export async function runStage(
         },
       async () => {
         const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
-          const before = captureProjectTree(opts.projectDir, evidenceBrief);
+          const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
           const response = await runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
             display: request.command, cwd: request.cwd, runDir: opts.runDir,
             timeoutMs: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())),
@@ -950,7 +945,7 @@ export async function runStage(
             commandId: `recorded-${invocationIndex}-${++recordedCommandIndex}`, command: request.command,
             context: { cwd: request.cwd, shell: request.shell }, exitCode: response.error ? null : response.exitCode,
             outputDigest: createHash('sha256').update(JSON.stringify([response.stdout ?? '', response.stderr ?? ''])).digest('hex'),
-            treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash });
+            treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash });
           return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}) };
         }) : undefined;
         const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment and a maximum 60-second bound, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
@@ -1419,7 +1414,7 @@ export async function runStage(
   }
   if (result.exitCode === 0 && !result.continuation) {
     for (const finding of opts.repairFindings ?? []) {
-      const before = captureProjectTree(opts.projectDir, evidenceBrief);
+      const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
       // Old records without native context cannot authorize an assumed replay.
       if (!finding.record.context) continue;
       const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell, args: ['-c', finding.record.command!],
@@ -1428,10 +1423,10 @@ export async function runStage(
       appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex,
         commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode,
         outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
-        treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash, reproductionOf: finding.record.sequence });
+        treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash, reproductionOf: finding.record.sequence });
     }
   }
-  const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief);
+  const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
   let finalRecord: Record<string, unknown> | undefined;
   try {
     const value: unknown = JSON.parse(result.output);
@@ -1440,7 +1435,7 @@ export async function runStage(
   const settled = final.attempts?.at(-1);
   const gapBlocks = settled?.endingCause === 'environment_gap'
     ? validatedStageRecord!.blocks as { criterion_ids: string[]; paths: string[] } | undefined : undefined;
-  const criterionIds = new Set(gapBlocks ? extractBriefCriteria(evidenceBrief).criteria.map(criterion => criterion.id) : []);
+  const criterionIds = new Set(gapBlocks ? (readBriefCriteriaArtifact(opts.runDir)?.criteria.map(criterion => criterion.id) ?? opts.criterionRefs ?? []) : []);
   const unknownCriterionIds = gapBlocks?.criterion_ids.filter(id => !criterionIds.has(id)) ?? [];
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
     exitCode: settled?.exitCode ?? result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,

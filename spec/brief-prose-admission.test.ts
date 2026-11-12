@@ -35,7 +35,7 @@ describe('brief prose admission', () => {
     '6. **不写 operator 的真实账本，不写任何声明输入。** 可观察的性质是：跑完整个测试套件后，`records/`、`history/` 和 `.cache/` 顶层文件逐字节不变，且这一点不依赖调用方是否导出了 `APP_STATE_DIR`。现有 `tests/app/conftest.py` 的会话级哈希守卫就是检验这一性质的仪器，这个守卫本身属于判据，必须保留。不设该变量时，所有模块使用原生产路径，行为与合并基线一致。',
     'Pre-register the selection rule before measuring outcomes.',
   ])('accepts a declared contract with descriptive wording: %s', prose => {
-    const brief = `---\noutputs: [docs/report.md]\n---\n# Goal\n${prose}\n\n## Criteria\n1. Report the measured result.\n`;
+    const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the measured result.\"}]\noutputs: [docs/report.md]\n---\n# Goal\n${prose}\n\n## Criteria\n1. Report the measured result.\n`;
     const report = inspectBrief(brief);
     expect(staticRehearsal(brief).status).toBe(0);
     expect(report.contractReady).toBe(true);
@@ -48,8 +48,8 @@ describe('brief prose admission', () => {
   it.each([
     'Implement operator cutover: deploy between hands and report criteria 1–4.',
     'The operator supplied an expected result of -112.89 bps.',
-  ])('rehearses undeclared prose expectations with warnings only: %s', prose => {
-    const brief = `---\noutputs: [docs/report.md]\n---\n# Goal\n${prose}\n\n## Criteria\n1. Report the independently measured result.\n`;
+  ])('rehearses prose expectations without semantic findings: %s', prose => {
+    const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the independently measured result.\"}]\noutputs: [docs/report.md]\n---\n# Goal\n${prose}\n\n## Criteria\n1. Report the independently measured result.\n`;
     const report = inspectBrief(brief);
     expect(report.contractReady).toBe(true);
     expect(report.findings.some(finding => finding.level === 'fail')).toBe(false);
@@ -57,48 +57,9 @@ describe('brief prose admission', () => {
     expect(staticRehearsal(brief).status).toBe(0);
   });
 
-  it.each([
-    '',
-    'Require `within_expected_range`.',
-    'Require `method_was_not_adjusted_to_match_expectation`.',
-    'Do not include `within_expected_range` or `method_was_not_adjusted_to_match_expectation`.',
-  ])('refuses declared supplied numbers unless both fields are required: %s', requirement => {
-    const brief = `---\nsupplied_numbers: [0, -112.89, 226.69]\noutputs: [docs/report.md]\n---\n## Criteria\n1. Report the independent calculation. ${requirement}\n`;
-    expect(inspectBrief(brief).findings).toContainEqual(expect.objectContaining({
-      code: 'operator_figure_anti_anchoring_missing', level: 'fail',
-    }));
-    expect(staticRehearsal(brief).status).toBe(1);
-  });
-
-  it.each([
-    '["12"]',
-    '12',
-    '"12"',
-    '{expected: 12}',
-    'null',
-    '',
-    'true',
-    '[12, "13"]',
-    '[null]',
-    '[[12]]',
-    '[.inf]',
-    '[-.inf]',
-    '[.nan]',
-  ])('refuses malformed supplied_numbers: %s', declaration => {
-    const brief = `---\nsupplied_numbers: ${declaration}\noutputs: [docs/report.md]\n---\n## Criteria\n1. Require \`within_expected_range\` and \`method_was_not_adjusted_to_match_expectation\`.\n`;
-    const report = inspectBrief(brief);
-    const finding = report.findings.find(entry => entry.code === 'supplied_numbers_invalid');
-    expect(finding).toMatchObject({ level: 'fail', consequential: true });
-    expect(finding?.message).toContain('`supplied_numbers` must be an array of finite YAML numbers');
-    expect(report.contractReady).toBe(false);
-    const rehearsal = staticRehearsal(brief);
-    expect(rehearsal.status).toBe(1);
-    expect(rehearsal.stdout).toContain(finding?.message);
-  });
-
   it('rejects a research ship target already crossed by its declared baseline', () => {
     // Historical baseline replay; this was not a recorded interception.
-    const brief = '---\nresearch:\n  baseline: 0.1457\n  higher_is_better: true\n  stop:\n    beat: 0.05\n---\n## Criteria\n1. Report measured research evidence.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report measured research evidence.\"}]\nresearch:\n  baseline: 0.1457\n  higher_is_better: true\n  stop:\n    beat: 0.05\n---\n## Criteria\n1. Report measured research evidence.\n";
     const report = inspectBrief(brief);
     expect(staticRehearsal(brief).status).toBe(1);
     expect(report.findings).toContainEqual(expect.objectContaining({ code: 'research_policy_invalid', level: 'fail' }));
@@ -106,7 +67,7 @@ describe('brief prose admission', () => {
   });
 
   it.each(['complete', 'ceiling_hit'])('rejects a %s stage-count floor without an explicit stage_glob', status => {
-    const brief = `---\nterminal_states:\n  ${status}:\n    paths: [docs/task_summary.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Produce a summary.\n`;
+    const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce a summary.\"}]\nterminal_states:\n  ${status}:\n    paths: [docs/task_summary.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Produce a summary.\n`;
     const report = inspectBrief(brief);
     const finding = report.findings.find(entry => entry.code === `terminal_floor_uncountable_${status}`);
     expect(finding).toMatchObject({ level: 'fail', consequential: true });
@@ -119,19 +80,19 @@ describe('brief prose admission', () => {
   });
 
   it('accepts an explicit stage_glob without inferring a writer from prose', () => {
-    const brief = '---\nterminal_states:\n  complete:\n    paths: [docs/task_summary.md]\n    stage_glob: docs/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Produce a summary.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce a summary.\"}]\nterminal_states:\n  complete:\n    paths: [docs/task_summary.md]\n    stage_glob: docs/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Produce a summary.\n";
     expect(inspectBrief(brief).findings.some(entry => entry.code.startsWith('terminal_floor_uncountable_'))).toBe(false);
     expect(staticRehearsal(brief).status).toBe(0);
   });
 
   it('requires migration before interpreting legacy research ceiling floors', () => {
-    const brief = '---\nresearch:\n  baseline: 0\n  higher_is_better: true\n  stop:\n    beat: 1\nterminal_states:\n  ceiling_hit:\n    paths: [docs/ceiling.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Report measured evidence.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report measured evidence.\"}]\nresearch:\n  baseline: 0\n  higher_is_better: true\n  stop:\n    beat: 1\nterminal_states:\n  ceiling_hit:\n    paths: [docs/ceiling.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Report measured evidence.\n";
     expect(inspectBrief(brief).findings.some(entry => entry.code === 'research_policy_invalid')).toBe(true);
     expect(staticRehearsal(brief).status).toBe(1);
   });
 
   it('rejects malformed frontmatter', () => {
-    const brief = '---\nresearch: [\n---\n## Criteria\n1. Report evidence.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report evidence.\"}]\nresearch: [\n---\n## Criteria\n1. Report evidence.\n";
     const report = inspectBrief(brief);
     expect(staticRehearsal(brief).status).toBe(1);
     expect(report.frontmatter.status).toBe('invalid');

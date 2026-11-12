@@ -1,7 +1,6 @@
 import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { requireDiskCapacity } from '../src/disk-admission.js';
 import { copyFileSync, cpSync } from '../src/engine-fs.js';
 import { installDiskGuardFixture } from './test-support/disk-guard-fixture.js';
 
@@ -16,28 +15,6 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('setup disk admission boundary', () => {
-  it('uses the existing need interface and retains the capacity refusal reason', () => {
-    requireDiskCapacity(5);
-    expect(() => requireDiskCapacity(11)).toThrow(/before copying 11 bytes: disk-guard need REFUSED/);
-    expect(readFileSync(log, 'utf8')).toBe('5\n11\n');
-  });
-
-  it('rejects invalid estimates before invoking the tool', () => {
-    for (const bytes of [-1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => requireDiskCapacity(bytes)).toThrow('Cannot estimate disk growth');
-    }
-    expect(existsSync(log)).toBe(false);
-  });
-
-  it('fails closed for a missing or failing admission executable', () => {
-    vi.stubEnv('HOME', join(root, 'empty'));
-    vi.stubEnv('PATH', join(root, 'no-executables'));
-    expect(() => requireDiskCapacity(1)).toThrow('Disk admission refused');
-    vi.stubEnv('HOME', root);
-    writeFileSync(join(root, 'bin', 'disk-guard'), '#!/bin/sh\nexit 7\n', { mode: 0o755 });
-    expect(() => requireDiskCapacity(1)).toThrow('exit 7');
-  });
-
   it('keeps ordinary engine file and tree copies independent of disk-guard', () => {
     // This tool would reject either copy. It must never be invoked here.
     installDiskGuardFixture(root, 0);

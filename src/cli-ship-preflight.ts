@@ -57,7 +57,7 @@ import {
   isRunningRunStatus,
   recordedTerminalArtifactSnapshotNames,
 } from './store.js';
-import { assertDistFresh } from './build-manifest.js';
+import { assertDistFresh, BuildInspectionError } from './build-manifest.js';
 import { briefDeclarationFailures, type BriefPreflightFinding } from './brief-preflight.js';
 import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
 import { assessCampaignHygiene } from './campaign-hygiene.js';
@@ -612,7 +612,8 @@ function sourceDistFreshness(packageRoot: string, deps: ResolvedDependencies): S
     };
   } catch (error) {
     const reason = errorMessage(error);
-    const unknown = /cannot be proven|manifest is (?:missing|unreadable|invalid)/i.test(reason);
+    const unknown = !(error instanceof BuildInspectionError)
+      || ['missing_manifest', 'unreadable_manifest', 'invalid_manifest', 'missing_ui'].includes(error.code);
     return {
       state: unknown ? 'unknown' : 'stale',
       sourceFiles: sources.length,
@@ -669,7 +670,7 @@ function inspectOutputInventory(
   return {
     state: 'checked',
     briefPath,
-    inventory: inspectBriefOutputs(brief, project, {
+    inventory: briefDeclarationFailures(brief).length ? { declarations: [], entries: [], blocking: [] } : inspectBriefOutputs(brief, project, {
       exists: deps.exists,
       readable: deps.readable,
       readText: deps.readText,
@@ -704,9 +705,10 @@ export async function collectShipPreflight(
   const briefCriteria: ShipPreflightReport['briefCriteria'] = parsed.brief
     ? (() => {
         const briefPath = resolve(isAbsolute(parsed.brief!) ? parsed.brief! : join(canonicalProject.path, parsed.brief!));
-        const artifact = extractBriefCriteria(deps.readText(briefPath));
+        const brief = deps.readText(briefPath);
+        const artifact = briefDeclarationFailures(brief).length ? undefined : extractBriefCriteria(brief);
         return {
-          state: artifact.criteria.length === 0 ? 'missing' as const : 'checked' as const,
+          state: artifact?.criteria.length ? 'checked' as const : 'missing' as const,
           briefPath,
           artifact,
         };
@@ -757,7 +759,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     if (finding.level === 'fail' && finding.code !== 'brief_workflow') writer.write(`[${finding.code}] ${finding.message}\n`);
   }
   if (report.briefCriteria.state === 'checked') {
-    writer.write(`Brief criteria: ${report.briefCriteria.artifact?.criteria.length ?? 0} extracted from ${report.briefCriteria.briefPath}\n`);
+    writer.write(`Brief criteria: ${report.briefCriteria.artifact?.criteria.length ?? 0} declared in ${report.briefCriteria.briefPath}\n`);
   }
   if (report.project.usedCanonicalFallback) {
     writer.write(`  Path warning: realpath failed; comparison used resolved path ${report.project.requestedPath}\n`);

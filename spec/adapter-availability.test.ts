@@ -91,14 +91,7 @@ function runCli(
 }
 
 function structuredBrief(): string {
-  return [
-    '# Goal',
-    'Exercise adapter resolution.',
-    '',
-    '## What the report must show',
-    '1. Report which adapter resolution branch was reached.',
-    '',
-  ].join('\n');
+  return "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report which adapter resolution branch was reached.\"}]\n---\n# Goal\nExercise adapter resolution.\n\n## What the report must show\n1. Report which adapter resolution branch was reached.\n";
 }
 
 function quickUntilWorkflowLookup(fixture: CliFixture) {
@@ -421,7 +414,7 @@ describe('CLI adapter behavior', () => {
     expect(readFileSync(runRecordPath(join(fixture.fcHome, 'runs', runs[0]), 'task_brief.md'), 'utf8')).toBe(brief);
   });
 
-  it('makes malformed Reality-check YAML fail rehearsal while no heading remains admissible', () => {
+  it('gives body headings no preflight declaration authority', () => {
     const fixture = cliFixture();
     const malformedPath = join(fixture.root, 'malformed.md');
     const absentPath = join(fixture.root, 'absent.md');
@@ -429,9 +422,8 @@ describe('CLI adapter behavior', () => {
     writeFileSync(absentPath, structuredBrief(), 'utf-8');
 
     const malformed = runCli(fixture, ['rehearse', malformedPath, '--static-only']);
-    expect(malformed.status).toBe(1);
-    expect(malformed.stdout).toContain('YAML parsing failed');
-    expect(malformed.stdout).not.toContain('✅ Contract ready');
+    expect(malformed.status).toBe(0);
+    expect(malformed.stdout).toContain('✅ Contract ready');
 
     const absent = runCli(fixture, ['rehearse', absentPath, '--static-only']);
     expect(absent.status).toBe(0);

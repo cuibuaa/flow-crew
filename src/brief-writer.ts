@@ -7,7 +7,8 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { z } from 'zod';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
-import { parse } from 'yaml';
+import { parse, stringify } from 'yaml';
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { loadAdapterByName } from './adapters/loader.js';
 import { engineConfigDir, loadEngineDefaults } from './config.js';
@@ -25,19 +26,20 @@ export const BRIEF_OUTPUT_SCHEMA = z.toJSONSchema(BriefFieldsSchema) as Schema;
 export type BriefFields = z.infer<typeof BriefFieldsSchema>;
 
 export function composeBrief(original: string, fields: BriefFields): string {
+  const frontmatter = splitBriefFrontmatter(original);
+  // Authorship emits the fixed declaration consumed by admission. The original
+  // body stays byte-for-byte intact; existing authority fields are preserved.
+  const metadata = frontmatter ? parse(frontmatter.yaml) as Record<string, unknown> : {};
+  const criteria = fields.criteria.map((text, index) => ({ id: `criterion_${index + 1}`, text }));
+  const header = `---\n${stringify({ ...metadata, criteria })}---\n`;
   const sections: Array<[string, string[]]> = [
-    ['Acceptance criteria', fields.criteria], ['Constraints', fields.constraints],
-    ['Inputs', fields.inputs], ['Assumptions', fields.assumptions],
-    ['Blocking questions', fields.blocking_questions],
+    ['Constraints', fields.constraints], ['Input references', fields.inputs],
+    ['Assumptions', fields.assumptions], ['Blocking questions', fields.blocking_questions],
   ];
-  // JSON string encoding keeps model strings on one list line; they cannot add headings.
-  const generated = sections.map(([heading, items]) =>
-    `\n\n## ${heading}\n${items.map((item, i) => `${i + 1}. ${JSON.stringify(item)}`).join('\n')}\n`).join('');
-  // Let the existing parser decide whether the task left a fence open. A single
-  // closing fence changes only the suffix; no retry can repair the fixed prefix.
-  const direct = original + generated;
-  return extractBriefCriteria(direct).criteria.length ? direct : original + '\n\n```\n' + generated;
+  return header + (frontmatter?.body ?? original) + sections.map(([heading, items]) =>
+    `\n\n## ${heading}\n${items.map(item => `- ${JSON.stringify(item)}`).join('\n')}\n`).join('');
 }
+
 const hash = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`, { durability: 'durable' });
 

@@ -29,7 +29,7 @@ mkdirSync(join(root, 'runs'));
 
 describe('shared frontmatter contract', () => {
   it.each([
-    '---\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n',
+    "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver a result.\"}]\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n",
   ])('reports one malformed-metadata error through each entrance', async (brief) => {
     const briefPath = join(root, 'brief.md');
     writeFileSync(briefPath, brief);
@@ -69,31 +69,25 @@ describe('shared frontmatter contract', () => {
       const brief = `---\n${yaml}${yaml ? '\n' : ''}---\n## Requirements\n1. Deliver a result.\n`;
       expect(parseBriefFrontmatterDocument(brief)?.error).toBeUndefined();
       expect(parseBriefValidationCommands(brief, 'brief.md')).toEqual({ commands: [] });
-      expect(Boolean(parseBriefFrontmatter(brief).frontmatterError)).toBe(yaml !== '[one, two]');
+      expect(Boolean(parseBriefFrontmatter(brief).frontmatterError)).toBe(yaml !== '');
     }
   });
 
-  it('gives missing criteria one refusal severity in the shared report and entrances', async () => {
-    const finding = inspectBrief('# Goal\nDeliver a result.').findings.find((entry) => entry.code === 'brief_criteria_missing');
-    expect(finding?.level).toBe('fail');
-    const briefPath = join(root, 'without-criteria.md');
-    writeFileSync(briefPath, '# Goal\nDeliver a result.');
-    const { report } = await collectShipPreflight(['ship-preflight', '--brief', briefPath], deps);
-    expect(report.briefCriteria.state).toBe('missing');
-    const rehearsal = await rehearseBrief([briefPath, '--static-only']);
-    expect(rehearsal.exitCode).toBe(1);
-    expect(rehearsal.findings).toContainEqual(expect.objectContaining({ level: 'fail', text: expect.stringContaining(finding!.message) }));
-    expect(inspectBrief('# Goal\nDeliver a result.').contractReady).toBe(false);
-    expect(inspectBrief('## Requirements\n1. Deliver a result.').findings.some((entry) => entry.code === 'brief_criteria_missing')).toBe(false);
+  it('gives prose criteria no admission authority', async () => {
+    for (const brief of ['# Goal\nDeliver a result.', '## Requirements\n1. Deliver a result.']) {
+      expect(extractBriefCriteria(brief).criteria).toEqual([]);
+      expect(inspectBrief(brief).contractReady).toBe(true);
+      expect((await rehearseBrief(['opaque.md', '--static-only'], { briefText: brief })).exitCode).toBe(0);
+    }
   });
 });
 
 describe('brief consumers share the leading metadata boundary', () => {
-  it.each(['\n', '\r\n'])('keeps BOM metadata out of criteria and preserves original criterion lines (%j)', (newline) => {
+  it.each(['\n', '\r\n'])('reads BOM declarations independently of body criteria (%j)', (newline) => {
     const brief = ['\uFEFF---', 'inputs: [input.txt]', '---', '## Acceptance Criteria', '1. Preserve exact evidence.'].join(newline);
     expect(extractDeclaredBriefInputPaths(brief)).toEqual(['input.txt']);
     expect(parseBriefFrontmatter(brief).stripped).toBe(['## Acceptance Criteria', '1. Preserve exact evidence.'].join(newline));
-    expect(extractBriefCriteria(brief).criteria).toMatchObject([{ line: 5, text: 'Preserve exact evidence.' }]);
+    expect(extractBriefCriteria(brief).criteria).toEqual([]);
   });
 
   it('accepts an empty block and refuses a closing delimiter with trailing text', () => {
@@ -105,8 +99,8 @@ describe('brief consumers share the leading metadata boundary', () => {
 
 describe('real brief admission entry points', () => {
   it.each([
-    ['frontmatter_invalid', '---\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n'],
-    ['brief_criteria_missing', '# Goal\nDeliver a result.\n'],
+    ['frontmatter_invalid', "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver a result.\"}]\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n"],
+    ['frontmatter_invalid', '---\ninputs: [{path: input.txt, typo: true}]\n---\nDeliver a result.'],
   ])('keeps authored %s diagnostics while quick writes missing criteria', async (code, brief) => {
     const briefPath = join(root, `${code}.md`);
     writeFileSync(briefPath, brief);

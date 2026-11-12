@@ -37,7 +37,7 @@ describe('skill-consolidation release contract', () => {
       artifact_contract:{version:1,produces:[],reads:[]},...extra,
     });
     const admit = (stages: ReturnType<typeof stage>[], extra = {}) => inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan',...extra});
-    const criteria = extractBriefCriteria('# Task\n## Acceptance Criteria\n1. The report must preserve independently verified evidence.\n');
+    const criteria = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The report must preserve independently verified evidence.\"}]\n---\n# Task\n## Acceptance Criteria\n1. The report must preserve independently verified evidence.\n");
     expect(criteria.criteria.length).toBeGreaterThan(0);
     const work = stage('work',{criterion_refs:criteria.criteria.map((criterion)=>criterion.id)});
     const uncovered = admit([work],{criteria});

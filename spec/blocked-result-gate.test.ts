@@ -10,8 +10,7 @@ import { runDir } from '../src/store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 
 const root = join(import.meta.dirname, '..');
-const BRIEF = ['# Upgrade the parser', '', '## What the report must show',
-  '1. Every configuration accepted today loads as before.', '2. The test command and its direct exit code.', ''].join('\n');
+const BRIEF = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Every configuration accepted today loads as before.\"},{\"id\":\"fixture_2\",\"text\":\"The test command and its direct exit code.\"}]\n---\n# Upgrade the parser\n\n## What the report must show\n1. Every configuration accepted today loads as before.\n2. The test command and its direct exit code.\n";
 const BLOCKED = JSON.stringify({
   status: 'blocked', summary: 'The new parser rejects merge sequences longer than 100 entries.', files_modified: ['docs/report.md'],
   checks: [{ command: 'node docs/experiment.mjs blockers', exit_code: 0, evidence: 'docs/v5-blockers.json' }],

@@ -68,7 +68,7 @@ it.each([true, false])(
   { timeout: 65_000 },
   async matching => {
     const fixture = await createHarness();
-    const brief = '# Goal\nComplete the cancellation continuation fixture.\n\n## What the report must show\n1. Retain completed work and finish the repended stage.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Retain completed work and finish the repended stage.\"}]\n---\n# Goal\nComplete the cancellation continuation fixture.\n\n## What the report must show\n1. Retain completed work and finish the repended stage.\n";
     const admission = createBriefAdmission(inspectBrief(brief), {
       kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
     });

@@ -847,6 +847,8 @@ async function cmdQuick(preview = false) {
   const acknowledgementDigest = value('acknowledge-brief-warnings');
   let transportedAdmission: BriefAdmissionRecord | undefined;
   let storedAdmission: BriefAdmissionRecord | undefined;
+  let recordedBrief: string | undefined;
+  let existingRunInitialized = false;
   let taskSupplied = value('task') !== undefined;
   const launchOptions: import('./task-registry.js').TaskLaunchOptions = {
     ...(adapter ? { adapter } : {}),
@@ -883,15 +885,18 @@ async function cmdQuick(preview = false) {
     let storedTaskDescription: string | undefined;
     try {
       const runJson = JSON.parse(readFileSync(runRecordPath(join(getRunsRoot(), existingRunId), 'run.json'), 'utf-8'));
+      existingRunInitialized = true;
       if (typeof runJson.taskDescription === 'string') storedTaskDescription = runJson.taskDescription;
       storedAdmission = runJson.briefAdmission as BriefAdmissionRecord | undefined;
     } catch { /* an uninitialized reservation has no run state yet */ }
 
     const hasTransportedExactTask = taskSupplied && transportedAdmission !== undefined;
     const briefPath = runRecordPath(join(getRunsRoot(), existingRunId), 'task_brief.md');
-    if (!hasTransportedExactTask && existsSync(briefPath)) {
-      try { task = readFileSync(briefPath, 'utf-8'); } catch { /* ignore */ }
+    if (existsSync(briefPath)) {
+      try { recordedBrief = readFileSync(briefPath, 'utf-8'); } catch { /* ignore */ }
+      if (!hasTransportedExactTask && recordedBrief !== undefined) task = recordedBrief;
     }
+    recordedBrief ??= storedTaskDescription;
     if (!task.trim() && storedTaskDescription !== undefined) task = storedTaskDescription;
   }
 
@@ -920,6 +925,23 @@ async function cmdQuick(preview = false) {
     process.exit(EXIT_CODE.failed);
   }
 
+  const {
+    briefDeclarationFailures,
+    createBriefAdmission,
+    formatBriefPreflightReport,
+    inspectBrief,
+    verifyBriefAdmission,
+  } = await import('./brief-preflight.js');
+  if (!existingRunId) {
+    const errors = briefDeclarationFailures(task);
+    if (errors.length) {
+      const refusal = errors.map(f => `[${f.code}] ${f.message}`).join('\n');
+      recordLaunchRefusal(refusal);
+      console.error(refusal);
+      process.exitCode = EXIT_CODE.failed;
+      return;
+    }
+  }
   // Refuse source facts before buying authorship. Setup still owns every target
   // and baseline check once the composed digest supplies its identity.
   const { extractBriefCriteria } = await import('./brief-criteria.js');
@@ -1000,13 +1022,6 @@ async function cmdQuick(preview = false) {
     return;
   }
 
-  const {
-    briefDeclarationFailures,
-    createBriefAdmission,
-    formatBriefPreflightReport,
-    inspectBrief,
-    verifyBriefAdmission,
-  } = await import('./brief-preflight.js');
   const preflight = inspectBrief(task);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
   const { parseBriefFrontmatter, entryWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
@@ -1028,7 +1043,9 @@ async function cmdQuick(preview = false) {
     }
   }
 
-  const refusalFindings = briefDeclarationFailures(task, preflight);
+  const admittedContinuation = existingRunInitialized && (storedAdmission
+    ? verifyBriefAdmission(task, storedAdmission).status === 'valid' : recordedBrief === task);
+  const refusalFindings = admittedContinuation ? [] : briefDeclarationFailures(task, preflight);
   if (refusalFindings.length) {
     const refusal = refusalFindings.map(finding => `[${finding.code}] ${finding.message}`).join('\n');
     recordLaunchRefusal(refusal);
@@ -1037,7 +1054,7 @@ async function cmdQuick(preview = false) {
     return;
   }
 
-  if (auto.error) {
+  if (auto.error && !admittedContinuation) {
     const refusal = `Launch refused: ${auto.error}.`;
     recordLaunchRefusal(refusal);
     console.error(refusal);

@@ -176,7 +176,7 @@ describe('declared products are part of gate admission', () => {
 
   it('retains declared products and an actual conflicting constraint after frontmatter stripping', () => {
     const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
-    const configured = configureWorkflowBrief({ name: 'fixture', description: '', defaults: {}, stages: [] }, project, id, runDir(project, id), 1, false, '---\noutputs: [report.md]\n---\n# Goal\nChange code and tests only.');
+    const configured = configureWorkflowBrief({ name: 'fixture', description: '', defaults: {}, stages: [] }, project, id, runDir(project, id), 1, { resumingExistingRun: false, briefWasAdmitted: false }, '---\noutputs: [report.md]\n---\n# Goal\nChange code and tests only.');
     expect(configured.kind).toBe('configured');
     if (configured.kind !== 'configured') throw new Error('fixture did not configure');
     expect(configured.taskDescription).toContain('report.md');

@@ -33,7 +33,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true,
 
 function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair = true) {
   setEngineDefaults({ gate_retry_loops: repairs, stage_technical_retries: 0 });
-  const brief = '# Goal\nCheck external readiness.\n\n# Acceptance criteria\n1. External readiness is confirmed.';
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"External readiness is confirmed.\"}]\n---\n# Goal\nCheck external readiness.\n\n# Acceptance criteria\n1. External readiness is confirmed.";
   const criterionRefs = extractBriefCriteria(brief).criteria.map(criterion => criterion.id);
   const stages = [
     { id: 'done', role: 'coder', scope: [], depends_on: [], prompt_template: 'Prepare once.', artifact_contract: fixtureArtifactContract('done') },

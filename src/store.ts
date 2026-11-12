@@ -17,7 +17,8 @@ import { renderRunSummary } from './run-summary.js';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { projectPersistenceIdentity } from './project-identity.js';
 import { cancelledRunPublicationError, canonicalRunDirectory, requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
-import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
+import { parseChecksFromBrief, parseDeclaredChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
+import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { AdapterFailureKind } from './adapters/base.js';
@@ -466,6 +467,8 @@ export interface StoreState {
   plan?: unknown[];
   dispatchedStages?: unknown[];
   taskDescription?: string;
+  /** False until admitted metadata is committed; absent on legacy runs. */
+  briefConfigured?: boolean;
   /** Exact brief identity and recorded preflight findings admitted before launch. */
   briefAdmission?: BriefAdmissionRecord;
   currentIteration?: number;
@@ -694,12 +697,10 @@ export async function evaluateRealityGate(
 ): Promise<Pick<StoreState, 'realityGate' | 'failureReason'>> {
   const dir = runDir(projectDir, runId);
   const briefPath = runRecordPath(dir, 'task_brief.md');
-  // Checks come from two sources, both in the `## Reality checks` block format:
-  //   1. the human-authored brief (task_brief.md), and
-  //   2. PLANNER-authored checks (reality_checks.md) — this is how the planner wires
-  //      deterministic gates for the goal's hard constraints (Atom Architecture P1/P3),
-  //      without having to edit the human brief.
-  const checks = existsSync(briefPath) ? parseChecksFromBrief(briefPath) : [];
+  // New briefs use declarations. Archives without declaration snapshots retain
+  // their admitted checks; the planner snapshot is already an admitted contract.
+  const readChecks = readBriefCriteriaArtifact(dir)?.declarations ? parseDeclaredChecksFromBrief : parseChecksFromBrief;
+  const checks = existsSync(briefPath) ? readChecks(briefPath) : [];
   const plannerChecksPath = runRecordPath(dir, 'reality_checks.md');
   if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
   if (checks.length === 0) return {};

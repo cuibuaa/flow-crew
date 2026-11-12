@@ -83,7 +83,9 @@ describe('ship skill semantic contract', () => {
 
   it('requires explicit input declarations and persistent launch wrap-up bookkeeping', () => {
     const draft = compact(section(ship, '## Gather facts', '## Rehearse'));
-    expect(draft).toContain('leading frontmatter `inputs:` block');
+    expect(draft).toContain('frontmatter `inputs:` array');
+    expect(draft).toContain('{path, frozen?, type?, sha256?}');
+    expect(draft).toContain('unknown entry keys are errors');
     expect(draft).toContain('A path in prose or a table is only a reference, not a declaration');
     expect(draft).toContain('Declare gitignored inputs');
     const quick = compact(section(ship, '### Register or run', '### Observe'));
@@ -135,7 +137,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '41', digest: 'aef35d0fc8cc' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '42', digest: 'fa05f26725d1' });
   });
 
   it('contains no private measured case studies', () => {
@@ -170,8 +172,8 @@ describe('public autonomous launch documentation', () => {
     expect(commands.size).toBeGreaterThan(20);
     for (const command of commands) expect(cliGuide, command).toContain(command);
     for (const command of ['fc_tasks', 'state', 'plan-check']) expect(cliGuide).toContain(command);
-    expect(compact(briefGuide)).toContain('without a trailing slash');
-    expect(compact(briefGuide)).toContain('unsafe declarations are reported unresolved');
+    expect(compact(briefGuide)).toContain('Project-relative directories may have a trailing slash');
+    expect(compact(briefGuide)).toContain('unknown fields are schema errors naming the key');
   });
 
   it('keeps one-off preservation probes out of the collected specification directory', () => {

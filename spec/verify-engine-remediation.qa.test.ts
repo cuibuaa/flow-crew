@@ -140,7 +140,7 @@ describe('independent engine-remediation verification', () => {
     write(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
     for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     write(join(projectDir, 'validation-probe.mjs'), 'process.exit(1);\n');
-    const brief = '# Goal\n## What the report must show\n1. Audit the validation delta.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Audit the validation delta.\"}]\n---\n# Goal\n## What the report must show\n1. Audit the validation delta.\n";
     const readyPath = writeReadySetupRecord(projectDir, brief, globalRoot);
     const ready = JSON.parse(readFileSync(readyPath, 'utf-8')) as {
       validationBaseline: { discovery: { commands: Array<{ args: string[] }> } };
@@ -226,7 +226,7 @@ describe('independent engine-remediation verification', () => {
     setFcGlobalDir(join(root, 'fc-home'));
     const outputPath = 'docs/report.md';
     const brief = [
-      '---',
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce and archive the report.\"}]",
       'outputs:',
       `  - path: ${outputPath}`,
       '---',
@@ -386,12 +386,7 @@ describe('independent engine-remediation verification', () => {
   });
 
   it('retains a substantive hyphenated criterion whose first word is Example', () => {
-    const artifact = extractBriefCriteria([
-      '# Goal',
-      '## What the report must show',
-      '1. Example-driven proof must include the failing identity.',
-      '',
-    ].join('\n'));
+    const artifact = extractBriefCriteria("---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Example-driven proof must include the failing identity.\"}]\n---\n# Goal\n## What the report must show\n1. Example-driven proof must include the failing identity.\n");
     expect(artifact.criteria).toHaveLength(1);
     expect(artifact.excluded).toBeUndefined();
   });

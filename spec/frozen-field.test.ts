@@ -39,8 +39,13 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const proseOnly = '---\ninputs: [notes.md, evidence]\n---\nPreserve `notes.md` and `evidence/source.md` as frozen evidence.\n\n## Acceptance Criteria\n1. Deliver `report.md`.';
-const structured = '---\ninputs: [{path: notes.md, frozen: true}]\n---\nThe frontmatter marks `notes.md` as frozen immutable evidence.\n\n## Acceptance Criteria\n1. Deliver `report.md`.';
+const proseOnly = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver `report.md`.\"}]\ninputs: [notes.md, evidence]\n---\nPreserve `notes.md` and `evidence/source.md` as frozen evidence.\n\n## Acceptance Criteria\n1. Deliver `report.md`.";
+const structured = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver `report.md`.\"}]\ninputs: [{path: notes.md, frozen: true}]\n---\nThe frontmatter marks `notes.md` as frozen immutable evidence.\n\n## Acceptance Criteria\n1. Deliver `report.md`.";
+
+// Scrubbed historical generic-preservation and negative-control shapes. Notes in
+// old input objects migrate to prose or the explicit frozen boolean.
+const genericProse = '---\ninputs: [notes.md, evidence]\noutputs: [report.md]\n---\nChoose ordinary helper and scratch paths. Do not modify existing validation or baseline input bytes. 只读约束由声明决定。';
+const genericStructured = '---\ninputs: [{path: notes.md, frozen: true}]\noutputs: [report.md]\n---\nThe frontmatter marks baseline input as frozen immutable evidence. This negative control deliberately changes it and leaves changed bytes at author settlement. Write the observation report.';
 
 async function author(brief: string, restore = false) {
   const stage = StageConfigSchema.parse({ id: 'author', role: 'coder', scope: ['report.md'] });
@@ -64,14 +69,14 @@ async function author(brief: string, restore = false) {
     audit: JSON.parse(readFileSync(runRecordPath(directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8')) };
 }
 
-it('keeps prose-only preservation unfrozen through preflight, rehearsal and authoring', async () => {
-  expect(resolveImmutableEvidenceBindings(project, proseOnly)).toEqual([]);
-  const report = inspectBrief(proseOnly);
+it.each([['literal', proseOnly], ['generic', genericProse]])('keeps prose-only preservation unfrozen through preflight, rehearsal and authoring (%s)', async (_shape, brief) => {
+  expect(resolveImmutableEvidenceBindings(project, brief)).toEqual([]);
+  const report = inspectBrief(brief);
   expect(report.contractReady).toBe(true);
   expect(createBriefAdmission(report, { kind: 'not_required' }).acknowledgement.kind).toBe('not_required');
-  const rehearsal = await rehearseBriefIsolated(proseOnly, { projectDir: project, staticOnly: true });
+  const rehearsal = await rehearseBriefIsolated(brief, { projectDir: project, staticOnly: true });
   expect(rehearsal.exitCode, JSON.stringify(rehearsal.findings)).toBe(0);
-  writeFileSync(join(project, 'brief.md'), proseOnly);
+  writeFileSync(join(project, 'brief.md'), brief);
   let output = '';
   const code = await cmdShipPreflightWithDeps(['ship-preflight', '--brief', 'brief.md'], {
     projectDir: project, runsRoot: () => join(root, 'store/runs'),
@@ -80,7 +85,7 @@ it('keeps prose-only preservation unfrozen through preflight, rehearsal and auth
     readCampaignEntries: () => [],
   });
   expect(code, output).toBe(0);
-  const result = await author(proseOnly);
+  const result = await author(brief);
   expect(result.calls).toBe(1);
   expect(result.status.status).toBe('complete');
   expect(result.audit.violations).toEqual([]);
@@ -88,11 +93,11 @@ it('keeps prose-only preservation unfrozen through preflight, rehearsal and auth
   expect(readFileSync(join(project, 'notes.md'), 'utf8')).toBe('changed bytes');
 });
 
-it('recheck structured freeze plus explanatory prose launches, catches changed bytes and restores them', async () => {
-  expect(resolveImmutableEvidenceBindings(project, structured).map(input => input.path)).toEqual(['notes.md']);
-  const report = inspectBrief(structured);
+it.each([['literal', structured], ['generic', genericStructured]])('recheck declared freeze plus explanatory prose launches, catches changed bytes and restores them (%s)', async (_shape, brief) => {
+  expect(resolveImmutableEvidenceBindings(project, brief).map(input => input.path)).toEqual(['notes.md']);
+  const report = inspectBrief(brief);
   expect(report.contractReady).toBe(true);
-  const result = await author(structured);
+  const result = await author(brief);
   expect(result.calls).toBe(1);
   expect(result.status.status).toBe('failed');
   expect(result.status.attempts[0].processExitCode).toBe(0);
@@ -114,13 +119,18 @@ it('accepts a structured frozen input restored to identical bytes before settlem
 });
 
 it('freezes only strict structured true, never notes, strings or prose-shaped fields', () => {
-  for (const fields of ['note: frozen', 'frozen: false', 'frozen: "true"', 'frozen: [true]', 'description: preserve']) {
+  for (const fields of ['frozen: false']) {
     const brief = `---\ninputs: [{path: notes.md, ${fields}}]\n---\nKeep all inputs immutable.`;
     expect(resolveImmutableEvidenceBindings(project, brief)).toEqual([]);
   }
+  for (const fields of ['note: frozen', 'description: preserve']) {
+    const brief = `---\ninputs: [{path: notes.md, ${fields}}]\n---`;
+    expect(parseBriefInputs(brief).unresolvedInputs).toHaveLength(1);
+    expect(() => resolveImmutableEvidenceBindings(project, brief)).toThrow(fields.split(':')[0]);
+  }
   for (const value of ['"true"', '[true]', 'null', '1']) {
     const parsed = parseBriefInputs(`---\ninputs: [{path: notes.md, frozen: ${value}}]\n---`);
-    expect(parsed.unresolvedInputs).toContainEqual(expect.objectContaining({ reason: expect.stringContaining('YAML boolean') }));
+    expect(parsed.unresolvedInputs).toContainEqual(expect.objectContaining({ reason: expect.stringContaining('frozen') }));
   }
   const brief = '---\ninputs: [notes.md, {path: notes.md, frozen: true}, {path: evidence, frozen: false}]\n---\nNever freeze `notes.md`.';
   expect(resolveImmutableEvidenceBindings(project, brief).map(input => input.path)).toEqual(['notes.md']);

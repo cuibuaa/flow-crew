@@ -259,7 +259,7 @@ const rehearsalObservations: RehearsalObservation[] = [];
 
 function boundedResearchBrief(target: number, baseline: number): string {
   return [
-    '---',
+    "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Record which declared outcome was exercised and name its durable evidence.\"}]",
     'research:',
     `  baseline: ${baseline}`,
     '  policy: greedy_stack',
@@ -530,15 +530,7 @@ describe('environment refusal precedence', () => {
     );
   }
 
-  const criterionBearingBrief = [
-    '# Goal',
-    'Probe.',
-    '',
-    '## What the report must show',
-    '',
-    '1. Report the directly observed probe result.',
-    '',
-  ].join('\n');
+  const criterionBearingBrief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the directly observed probe result.\"}]\n---\n# Goal\nProbe.\n\n## What the report must show\n\n1. Report the directly observed probe result.\n";
 
   it('names the missing adapter before the non-Git refusal', () => {
     const root = temporaryRoot('adapter-absent');

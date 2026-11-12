@@ -1,3 +1,4 @@
+import { readAdmittedBriefContract } from '../../ship-inputs.js';
 import { runRecordPath } from '../../run-layout.js';
 import { ignoredProjectPaths } from '../../project-identity.js';
 // Boundary: Own one run-scoped lazy Git/disk preimage cache, watcher journal, current-image nomination, committed writes and lifecycle cleanup.
@@ -9,7 +10,7 @@ import { resolve, join, relative, dirname } from "node:path";
 import { existsSync, readFileSync, readlinkSync, lstatSync, realpathSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileIdentity, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
-import { resolveImmutableEvidenceBindings, canonicalPotentialProjectPath, listProjectFiles, listProjectFilesAt, firstImmutableEvidenceConflict, type ImmutableEvidenceBinding } from './path-capabilities.js';
+import { bindImmutableEvidence, canonicalPotentialProjectPath, listProjectFiles, listProjectFilesAt, firstImmutableEvidenceConflict, type ImmutableEvidenceBinding } from './path-capabilities.js';
 
 export interface RunRollbackBaseline {
   frozenInputs: ImmutableEvidenceBinding[];
@@ -195,8 +196,10 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
   const briefPath = runDirPath && runRecordPath(runDirPath, 'task_brief.md');
-  baseline.frozenInputs = briefPath && existsSync(briefPath)
-    ? resolveImmutableEvidenceBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
+  if (briefPath && existsSync(briefPath)) {
+    const contract = readAdmittedBriefContract(runDirPath!, readFileSync(briefPath, 'utf8'));
+    baseline.frozenInputs = bindImmutableEvidence(projectDir, contract.inputs, contract.outputs);
+  }
   // Derive supporting topology only for identities still frozen after exact
   // output precedence. A released input alias is not a separate prohibition.
   const pending = evidenceMemberPaths(baseline).filter(path =>

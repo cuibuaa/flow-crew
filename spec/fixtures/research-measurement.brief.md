@@ -1,4 +1,5 @@
 ---
+criteria: [{"id":"fixture_1","text":"Baseline, noise, instrument fingerprint and each round comparison and guards."},{"id":"fixture_2","text":"Label producer hypotheses and evidence separately from engine numbers."}]
 inputs:
   - src
   - scripts

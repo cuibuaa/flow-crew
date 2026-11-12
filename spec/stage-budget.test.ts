@@ -1110,7 +1110,7 @@ it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
     ['paths','joint','absent','empty'].map(binding => ({mapping:'broad' as const,otherMapping:'broad' as const,binding}))))(
   'SI repair text finding after gap with author=$mapping other=$otherMapping binding=$binding', async ({mapping,otherMapping,binding}) => {
   const {roles,workflow} = workflowFixture(3);
-  const brief='---\noutputs: [work.txt]\n---\n# Produce text with an optional renderer\n\n## Requirements\n1. A missing optional renderer may be accepted using textual evidence.\n2. work.txt contains correct text.';
+  const brief="---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"A missing optional renderer may be accepted using textual evidence.\"},{\"id\":\"fixture_2\",\"text\":\"work.txt contains correct text.\"}]\noutputs: [work.txt]\n---\n# Produce text with an optional renderer\n\n## Requirements\n1. A missing optional renderer may be accepted using textual evidence.\n2. work.txt contains correct text.";
   const {extractBriefCriteria}=await import('../src/brief-criteria.js');
   const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
   workflow.stages.find(s=>s.id==='review')!.criterion_refs=refs;
@@ -1163,7 +1163,7 @@ it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMappin
   ['paths','criteria'].map(binding=>({authorMapping:'mismatched' as const,otherMapping:'broad' as const,binding}))))(
  'SI repair shared ownership cannot reopen the same renderer gap with author=$authorMapping other=$otherMapping binding=$binding',async ({authorMapping,otherMapping,binding})=>{
  const {roles,workflow}=workflowFixture(3);
- const brief='---\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.';
+ const brief="---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The renderer executable supplies visual evidence.\"},{\"id\":\"fixture_2\",\"text\":\"work.txt contains correct text.\"}]\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.";
  const {extractBriefCriteria}=await import('../src/brief-criteria.js');const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
  workflow.stages.find(s=>s.id==='work')!.scope=['renderer','work.txt'];
  if(authorMapping==='absent')delete workflow.stages.find(s=>s.id==='work')!.criterion_refs;
@@ -1235,7 +1235,7 @@ it.each([
 
 it('SI gap path scope reports unknown blocked criterion ids to the gate', async () => {
   const { roles, workflow } = workflowFixture(3);
-  const brief = '# Evidence request\n\n## Requirements\n1. Supply required evidence.';
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Supply required evidence.\"}]\n---\n# Evidence request\n\n## Requirements\n1. Supply required evidence.";
   const { extractBriefCriteria } = await import('../src/brief-criteria.js');
   const refs = extractBriefCriteria(brief).criteria.map(criterion => criterion.id);
   expect(refs).toHaveLength(1);

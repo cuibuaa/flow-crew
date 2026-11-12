@@ -101,7 +101,7 @@ describe('host load is telemetry, never a command judgment', () => {
         writes: ['docs/value.txt'], writeAttribution: 'structured' };
     } };
     const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
-    const brief = '---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: fixture-check\n      args: []\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Value is independently checked.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Value is independently checked.\"}]\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: fixture-check\n      args: []\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Value is independently checked.\n";
     const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
     expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(exitCode === 0 ? 1 : 2);
     expect(final.stages.review.gate).toMatchObject({ pass: true, validation: [{ role: 'test', measurement, exitCode, load: load() }] });

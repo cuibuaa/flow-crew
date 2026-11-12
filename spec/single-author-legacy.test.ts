@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
@@ -88,8 +89,13 @@ describe('single-author admission and historical competition records', () => {
       recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Recorded CLI fixture');
       state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: deadPid, processStart: undefined, processes: [] };
       state.currentIteration = 1; state.maxIterations = 2;
-      state.taskDescription = '# Goal\nComplete the deterministic recovery demonstration.\n\n# Acceptance criteria\n1. Both configured stages return their completed result.';
+      state.taskDescription = "# Goal\nComplete the deterministic recovery demonstration.\n\n# Acceptance criteria\n1. Both configured stages return their completed result.";
     });
+    const legacyBrief = readRunState(project, created.runId).taskDescription!;
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), legacyBrief);
+    const legacyCriteria = { version: 1, briefDigest: createHash('sha256').update(legacyBrief).digest('hex'),
+      criteria: [{ id: 'criterion_acceptance_criteria_1_b3246557', text: 'Both configured stages return their completed result.', line: 5, section: 'Acceptance criteria' }] };
+    writeFileSync(runRecordPath(created.runDirPath, 'brief_criteria.json'), JSON.stringify(legacyCriteria));
     const cancel = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: join(root, 'registry') }), units, timeoutMs: 0, signalGraceMs: 0, runsDir: runRecordPath(created.runDirPath, '..') });
     expect(await cancel.cancelRun(created.runId)).toMatchObject({ ok: true, status: 'cancelled' });
     const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
@@ -102,6 +108,7 @@ describe('single-author admission and historical competition records', () => {
       cwd: project, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures },
     });
     const resumed = readRunState(project, created.runId);
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'brief_criteria.json'), 'utf8'))).toEqual(legacyCriteria);
     expect(resumed.status, resumed.failureReason).toBe('complete');
     expect(resumed.stages.done).toEqual(done);
     expect(resumed.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);

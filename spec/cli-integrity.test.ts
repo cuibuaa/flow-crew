@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
-import { extractBriefCriteria } from '../src/brief-criteria.js';
+import { extractBriefCriteria, writeBriefCriteriaArtifact } from '../src/brief-criteria.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
@@ -61,7 +61,7 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
   const previousStore = fcGlobalDir();
   setFcGlobalDir(isolated.fcHome);
   try {
-    const brief = '# Goal\nContinue the admitted work.\n\n# Acceptance criteria\n1. Both stages complete.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Both stages complete.\"}]\n---\n# Goal\nContinue the admitted work.\n\n# Acceptance criteria\n1. Both stages complete.\n";
     const admission = createBriefAdmission(inspectBrief(brief), {
       kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
     });
@@ -74,6 +74,7 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
         { id: 'repair', role: 'coder', depends_on: ['work'], retry_to: ['work'], scope: [],
           prompt_template: 'Repair the fixture work.', artifact_contract: { version: 1, produces: [], reads: [] } }] });
     const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
+    writeBriefCriteriaArtifact(created.runDirPath, brief);
     beginStageAttempt(project, created.runId, 'done', 0);
     completeStageAttempt(project, created.runId, 'done', 0, { exitCode: 0, duration_ms: 1 });
     beginStageAttempt(project, created.runId, 'work', 0);
@@ -114,7 +115,7 @@ describe('rehearsal language and diagnostic integrity', () => {
     const brief = join(isolated.root, 'hello-with-criterion.brief.md');
     writeFileSync(brief, readFileSync(join(repositoryRoot, 'examples', 'hello-research.brief.md'), 'utf-8').replace(
       '## Round contract',
-      '## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract',
+      "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report the measured count and the direct command evidence.\"}]\n---\n## What the report must show\n\n1. Report the measured count and the direct command evidence.\n\n## Round contract",
     ));
     const result = rehearse([brief], isolated);
 

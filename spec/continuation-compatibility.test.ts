@@ -177,7 +177,7 @@ it('returns CLI exit 1 with a stable refusal when resuming legacy stopped cancel
   const created = cancelled();
   const path = runRecordPath(created.runDirPath, 'run.json');
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  const brief = '# Goal\nComplete the fixture.\n\n# Acceptance criteria\n1. The fixture is complete.';
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The fixture is complete.\"}]\n---\n# Goal\nComplete the fixture.\n\n# Acceptance criteria\n1. The fixture is complete.";
   const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
   raw.taskDescription = brief; raw.briefAdmission = admission;
   writeFileSync(path, JSON.stringify(raw));

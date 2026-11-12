@@ -102,7 +102,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     scope: ['docs/other.txt'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false,
     artifact_contract: { version: 1, produces: [], reads: [] },
     decision: { successors: ['assess'], default: 'assess', kind: 'successor' } });
-  const brief = '---\noutputs: [docs/value.txt]\n---\n# Deliver a value\n\n## Acceptance criteria\n1. The value is independently checked.\n';
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The value is independently checked.\"}]\noutputs: [docs/value.txt]\n---\n# Deliver a value\n\n## Acceptance criteria\n1. The value is independently checked.\n";
   const final = await runWorkflow(config, route?.length === 3 ? JSON.stringify(config) : raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
   const directory = runDir(project, final.runId), ledger = readEvidence(directory);
   return { final, directory, ledger, calls, project };

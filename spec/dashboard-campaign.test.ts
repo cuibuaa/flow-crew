@@ -88,7 +88,7 @@ describe('dashboard campaign API', () => {
     const runIds = projects.map(project => {
       mkdirSync(project);
       const created = createRun(project, 'default', 'name: default\nstages: []', []);
-      configureWorkflowBrief({ name: 'default', stages: [] }, project, created.runId, created.runDirPath, 1, false, undefined, campaignName(project));
+      configureWorkflowBrief({ name: 'default', stages: [] }, project, created.runId, created.runDirPath, 1, { resumingExistingRun: false, briefWasAdmitted: false }, undefined, campaignName(project));
       updateRunState(project, created.runId, state => { state.status = 'complete'; });
       return created.runId;
     });

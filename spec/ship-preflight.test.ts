@@ -16,7 +16,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
+import * as buildInspection from '../src/build-manifest.js';
+import { BuildInspectionError, BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
 import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
@@ -111,7 +112,7 @@ it('reports the single entry even with inert legacy workflow metadata', async ()
   const output = new Capture();
   const args = ['ship-preflight', '--brief', 'brief.md'];
   const deps = commonDeps({ stdout: output.writer });
-  const brief = '---\n---\n# Goal\n\n## Acceptance criteria\n1. Deliver the coherent change.\n';
+  const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver the coherent change.\"}]\n---\n# Goal\n\n## Acceptance criteria\n1. Deliver the coherent change.\n";
   writeFileSync(path, brief);
   expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
   expect(output.value).toContain('Entry workflow: entry');
@@ -413,6 +414,20 @@ describe('ship-preflight validation baseline fact', () => {
   });
 });
 
+describe('typed deployment inspection', () => {
+  it.each([
+    ['hash_mismatch', 'manifest is missing; freshness cannot be proven', 'stale'],
+    ['missing_manifest', 'opaque diagnostic without classifier vocabulary', 'unknown'],
+    ['unreadable_manifest', 'opaque detail', 'unknown'],
+    ['invalid_manifest', 'opaque detail', 'unknown'],
+    ['output_mismatch', 'manifest is invalid', 'stale'],
+  ] as const)('classifies %s independently of the reason text', async (code, reason, state) => {
+    vi.spyOn(buildInspection, 'assertDistFresh').mockImplementation(() => { throw new BuildInspectionError(code, reason); });
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps());
+    expect(result.report.daemonFreshness.sourceToDist).toMatchObject({ state, reason });
+  });
+});
+
 describe('ship-preflight declared brief inputs fact', () => {
   it('blocks a nonempty declared output even when the body also reads it as context', async () => {
     mkdirSync(join(fixture.project, 'docs'), { recursive: true });
@@ -422,7 +437,7 @@ describe('ship-preflight declared brief inputs fact', () => {
       'research:',
       '  baseline: 0',
       '  policy: greedy_stack',
-      '  result_file: docs/research-result.json',
+      'outputs: [docs/research-result.json]',
       '---',
       '# Goal',
       'Measure a result.',
@@ -458,7 +473,7 @@ describe('ship-preflight declared brief inputs fact', () => {
     const target = join(fixture.root, 'worktree');
     const path = join(launch === 'target-overlap' ? target : fixture.project, 'runs', 'results');
     writeFileSync(join(fixture.project, '.gitignore'), 'runs/\n');
-    writeFileSync(join(fixture.project, 'brief.md'), `---\noutputs:\n  - path: ${path}\n    type: directory\n---\n# Goal\nRetain results.\n\n## Acceptance criteria\n1. Retain results in the declared directory.\n`);
+    writeFileSync(join(fixture.project, 'brief.md'), `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Retain results in the declared directory.\"}]\noutputs:\n  - path: ${path}\n    type: directory\n---\n# Goal\nRetain results.\n\n## Acceptance criteria\n1. Retain results in the declared directory.\n`);
     const args = ['ship-preflight', '--brief', 'brief.md'];
     if (launch === 'project') args.push('--project', fixture.project);
     else if (launch !== 'unknown') args.push('--target', launch === 'in-place' ? fixture.project : target);
@@ -500,25 +515,13 @@ describe('ship-preflight declared brief inputs fact', () => {
 
   it('takes explicit bare-directory entries literally, reports invalid declarations, and keeps prose conservative', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
-    const brief = [
-      '---',
-      'inputs:',
-      '  - dependency_cache',
-      '  - ../outside-cache',
-      '---',
-      '# Background',
-      'The ordinary words scheduler and generator are descriptive prose.',
-      '## What the report must show',
-      '1. Report every invalid leading input declaration.',
-    ].join('\n');
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report every invalid leading input declaration.\"}]\ninputs:\n  - dependency_cache\n  - ../outside-cache\n---\n# Background\nThe ordinary words scheduler and generator are descriptive prose.\n## What the report must show\n1. Report every invalid leading input declaration.";
 
-    expect(extractDeclaredBriefInputPaths(brief)).toEqual(['dependency_cache']);
+    expect(extractDeclaredBriefInputPaths(brief)).toEqual([]);
     const verification = verifyDeclaredBriefInputs(brief, fixture.project);
-    expect(verification.inputs).toEqual([
-      expect.objectContaining({ path: 'dependency_cache', exists: true, readable: true }),
-    ]);
+    expect(verification.inputs).toEqual([]);
     expect(verification.unresolvedInputs).toEqual([
-      expect.objectContaining({ value: '../outside-cache', line: 4, reason: expect.stringContaining('project-relative') }),
+      expect.objectContaining({ reason: expect.stringContaining('inputs') }),
     ]);
     expect(parseDeclaredBriefInputs('# Background\nThe scheduler and generator remain ordinary nouns.').references.map(reference => reference.path)).toEqual([]);
 
@@ -528,8 +531,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       ['ship-preflight', '--brief', 'brief.md'],
       commonDeps({ stdout: stdout.writer, stderr: new Capture().writer }),
     );
-    expect(code).toBe(0);
-    expect(stdout.value).toContain('UNRESOLVED DECLARED "../outside-cache" at line 4');
+    expect(code).toBe(1);
+    expect(stdout.value).toContain('inputs');
   });
 
   it('reports explicit punctuation, traversal, null, and malformed YAML instead of rewriting or dropping them', () => {
@@ -540,9 +543,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       '---',
     ].join('\n'));
     expect(punctuation.references).not.toContainEqual(expect.objectContaining({ path: 'package.json' }));
-    expect(punctuation.unresolvedInputs).toContainEqual(expect.objectContaining({
-      value: 'package.json,', line: 3,
-    }));
+    expect(punctuation.references).toContainEqual(expect.objectContaining({ path: 'package.json,' }));
+    expect(punctuation.unresolvedInputs).toEqual([]);
 
     const traversal = parseBriefInputs([
       '---',
@@ -551,7 +553,7 @@ describe('ship-preflight declared brief inputs fact', () => {
       '---',
     ].join('\n'));
     expect(traversal.unresolvedInputs).toContainEqual(expect.objectContaining({
-      value: 'cache/..', line: 3,
+      reason: expect.stringContaining('inputs'),
     }));
 
     const nullEntry = parseBriefInputs([
@@ -560,7 +562,7 @@ describe('ship-preflight declared brief inputs fact', () => {
       '  -',
       '---',
     ].join('\n'));
-    expect(nullEntry.unresolvedInputs).toContainEqual(expect.objectContaining({ line: 3 }));
+    expect(nullEntry.unresolvedInputs).toContainEqual(expect.objectContaining({ reason: expect.stringContaining('inputs') }));
 
     const malformed = parseBriefInputs([
       '---',
@@ -569,7 +571,7 @@ describe('ship-preflight declared brief inputs fact', () => {
       '---',
     ].join('\n'));
     expect(malformed.unresolvedInputs).toContainEqual(expect.objectContaining({
-      value: '[unterminated', line: 3, reason: expect.stringContaining('YAML'),
+      reason: expect.stringContaining('YAML'),
     }));
   });
 

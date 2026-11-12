@@ -42,7 +42,7 @@ describe('planning and reality declaration admission', () => {
         'reasoning_effort: default', 'tools: []', 'prompt: fixture role',
       ].join('\n'));
     }
-    const brief = ['---', 'outputs:', '  - docs/work.md', '---',
+    const brief = ['---', `criteria: ${JSON.stringify(Array.from({ length: 12 }, (_, index) => ({id: `requirement_${index + 1}`, text: `Requirement ${index + 1} is implemented and checked.`})))}`, 'outputs:', '  - docs/work.md', '---',
       '# Many-criterion admission', '## What the report must show',
       ...Array.from({ length: 12 }, (_, index) => `${index + 1}. Requirement ${index + 1} is implemented and checked.`),
     ].join('\n');

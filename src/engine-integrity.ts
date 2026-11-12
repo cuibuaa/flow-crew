@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { fcGlobalDir } from './store.js';
 import { engineOwnedDatabasePaths, prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
-import { externalOutputDirectory, extractBriefOutputDeclarations, extractDeclaredBriefInputPaths } from './ship-inputs.js';
+import { externalOutputDirectory, readAdmittedBriefContract } from './ship-inputs.js';
 
 export class EngineStateError extends Error {}
 
@@ -266,8 +266,9 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     }
     const briefPath = runRecordPath(run, 'task_brief.md');
     const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : '';
-    for (const output of extractBriefOutputDeclarations(brief).filter(o => isAbsolute(o.path))) {
-      const directory = externalOutputDirectory(output, project, undefined, { runDir: run, inputPaths: extractDeclaredBriefInputPaths(brief) });
+    const contract = brief ? readAdmittedBriefContract(run, brief) : { inputs: [], outputs: [] };
+    for (const output of contract.outputs.filter(o => isAbsolute(o.path))) {
+      const directory = externalOutputDirectory(output, project, undefined, { runDir: run, inputPaths: contract.inputs.map(input => input.path) });
       publishEngineFile(directory, () => mkdirSync(directory, { recursive: true }));
     }
   }

@@ -126,7 +126,7 @@ describe('declarative command grammar', () => {
   });
 
   it('preserves option values beginning with hyphens, including YAML briefs', () => {
-    const brief = '---\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n';
+    const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver a result.\"}]\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n";
     expect(parseCommandArgs('quick', ['--task', brief]).values.get('--task')).toBe(brief);
     expect(() => parseCommandArgs('prune', ['--run', '--apply'])).toThrow(/requires a value/);
     expect(parseCommandArgs('fc_tasks update', ['fc_tasks', 'update', 'fc_tasks', '--entry', '{}']).positionals).toEqual(['fc_tasks']);

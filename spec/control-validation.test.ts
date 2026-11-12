@@ -162,7 +162,7 @@ async function partialWorkflow(confirmed: boolean) {
     return result({ status: 'delivered', summary: 'Value written', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
   const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const brief = `---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n      report: {format: vitest-json}\n---\n# Value\n\n## Acceptance criteria\n1. Independently verify the value.\n`;
+  const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Independently verify the value.\"}]\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n      report: {format: vitest-json}\n---\n# Value\n\n## Acceptance criteria\n1. Independently verify the value.\n`;
   const final = await runWorkflow(config, raw, root, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
   return { root, final, calls, ledger: readEvidence(runDir(root, final.runId)) };
 }

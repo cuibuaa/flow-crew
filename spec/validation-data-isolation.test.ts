@@ -46,7 +46,7 @@ it('preserves the stage-measured environment when the engine replays a selected 
   } };
   const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
   const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined,
-    '---\noutputs: [docs/value.txt]\n---\n# Deliver value\n\n## Acceptance criteria\n1. Independently inspect the value and validation facts.\n', true);
+    "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Independently inspect the value and validation facts.\"}]\noutputs: [docs/value.txt]\n---\n# Deliver value\n\n## Acceptance criteria\n1. Independently inspect the value and validation facts.\n", true);
   expect(readFileSync(join(outside, 'ledger'), 'utf8')).toBe('original');
   expect(readFileSync(join(isolated, 'ledger'), 'utf8')).toBe('measuredmeasured');
   expect(final.status).toBe('complete');

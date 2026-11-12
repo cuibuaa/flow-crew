@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { writeTaskBrief, composeBrief, type BriefFields } from '../src/brief-writer.js';
 import { fcGlobalDir } from '../src/store.js';
+import { splitBriefFrontmatter } from '../src/brief-frontmatter.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import type { Adapter } from '../src/adapters/base.js';
 
@@ -33,16 +34,16 @@ function replies(outputs: unknown[]) {
 }
 const options = (projectDir: string, adapterInstance: Adapter) => ({ projectDir, adapter: 'mock', adapterInstance });
 
-it('skips the model entirely when structural criteria exist', async () => {
+it('skips the model entirely when criteria are declared', async () => {
   const adapter = replies([fields]);
-  const original = '# Goal\r\n\r\n## Acceptance criteria\r\n1. The bytes survive.\r\n';
+  const original = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The bytes survive.\"}]\n---\n# Goal\r\n\r\n## Acceptance criteria\r\n1. The bytes survive.\r\n";
   const written = await writeTaskBrief(original, options(project(), adapter));
   expect(written.brief).toBe(original);
   expect(written.evidenceDir).toBeUndefined();
   expect(adapter.run).not.toHaveBeenCalled();
 });
 
-it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n', 'task\n```ts\nunfinished', 'task\n~~~\nunfinished\r\n'])('preserves the exact prefix on every generated exit and retry: %j', async original => {
+it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n', 'task\n```ts\nunfinished', 'task\n~~~\nunfinished\r\n'])('preserves the exact original body on every generated exit and retry: %j', async original => {
   const cases: Array<{ outputs: unknown[]; outcome: string; calls: number; reason?: string }> = [
     { outputs: [fields], outcome: 'ready', calls: 1 },
     { outputs: ['{broken', fields], outcome: 'ready', calls: 2, reason: 'Invalid brief JSON' },
@@ -56,7 +57,7 @@ it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n
     if (outcome === 'provider_error') adapter.run.mockResolvedValueOnce({ output: '', exitCode: 1, duration_ms: 1 });
     const written = await writeTaskBrief(original, options(project(), adapter));
     expect(written.outcome).toBe(outcome);
-    const prefix = (value: string) => expect(Buffer.from(value).subarray(0, Buffer.byteLength(original))).toEqual(Buffer.from(original));
+    const prefix = (value: string) => expect(Buffer.from(splitBriefFrontmatter(value)?.body ?? value).subarray(0, Buffer.byteLength(original))).toEqual(Buffer.from(original));
     prefix(written.brief);
     if (outcome === 'ready') expect(extractBriefCriteria(written.brief).criteria).toHaveLength(1);
     expect(readFileSync(join(written.evidenceDir!, 'original.txt'), 'utf8')).toBe(original);
@@ -126,7 +127,7 @@ it('blocking questions stop without retrying into an assumption', async () => {
   const written = await writeTaskBrief('write the greeting', options(project(), adapter));
   expect(written.outcome).toBe('blocking_questions');
   expect(written.questions).toEqual(['Which greeting language?']);
-  expect(written.brief.startsWith('write the greeting')).toBe(true);
+  expect(splitBriefFrontmatter(written.brief)?.body.startsWith('write the greeting')).toBe(true);
   expect(written.brief).toContain(fields.assumptions[0]);
   expect(adapter.run).toHaveBeenCalledTimes(1);
 });
@@ -159,7 +160,7 @@ it('brief prints the shared composition and digest without launching', async () 
 });
 
 it('composition cannot turn model newlines into new contract sections', () => {
-  const brief = composeBrief('original\n', { ...fields, criteria: ['Result\n## Requirements\n1. injected'] });
+  const brief = composeBrief('original\n', { ...fields, criteria: ["---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"injected\"}]\n---\nResult\n## Requirements\n1. injected"] });
   expect(extractBriefCriteria(brief).criteria).toHaveLength(1);
 });
 
@@ -308,7 +309,7 @@ it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before 
   if (refusal === 'dirty') writeFileSync(join(dir, 'dirty.txt'), 'uncommitted');
   if (refusal === 'target_collision') mkdirSync(join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`), { recursive: true });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-    'quick', refusal === 'authored' ? written.brief : raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
+    'quick', '--task', refusal === 'authored' ? written.brief : raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
   { cwd: dir, env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
     CODEX_THREAD_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(1);
@@ -361,7 +362,7 @@ it.each(['existing_file', 'dirty', 'non_git', 'unborn', 'occupied_output', 'no_t
   const dir = project();
   if (kind === 'non_git') rmSync(join(dir, '.git'), { recursive: true });
   if (kind === 'unborn') { rmSync(join(dir, '.git'), { recursive: true }); git(dir, ['init', '-q']); }
-  if (kind === 'dirty' || kind === 'existing_file') writeFileSync(join(dir, 'task.md'), '## Acceptance criteria\n1. Done.');
+  if (kind === 'dirty' || kind === 'existing_file') writeFileSync(join(dir, 'task.md'), "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Done.\"}]\n---\n## Acceptance criteria\n1. Done.");
   if (kind === 'occupied_output') {
     writeFileSync(join(dir, '.gitignore'), 'ignored');
     git(dir, ['add', '.gitignore']);
@@ -440,7 +441,7 @@ it.each([
   { command: 'quick', kind: 'unknown_workflow' },
   { command: 'quick', kind: 'direct_research' },
   { command: 'brief', kind: 'occupied_output' },
-  { command: 'brief', kind: 'invalid_policy' },
+  { command: 'brief', kind: 'invalid_schema' },
   { command: 'quick', kind: 'unknown_adapter' },
   { command: 'quick', kind: 'missing_adapter' },
   { command: 'quick', kind: 'continuation' },
@@ -455,7 +456,7 @@ it.each([
     task = '---\nresearch:\n  baseline: 0\n---\nwrite a greeting';
     extra.push('--workflow', 'direct');
   }
-  if (kind === 'invalid_policy') task = '---\nworkflow: direct\nplanner_policies: [not_a_policy]\nresearch:\n  baseline: 0\n---\nwrite a greeting';
+  if (kind === 'invalid_schema') task = '---\ninputs: [{path: source.txt, typo: true}]\n---\nwrite a greeting';
   if (kind === 'occupied_output') {
     writeFileSync(join(dir, 'occupied.txt'), 'existing');
     git(dir, ['add', 'occupied.txt']);
@@ -482,14 +483,14 @@ it.each([
   expect(child.status, child.stdout + child.stderr).toBe(1);
   const hint = kind === 'unknown_workflow' ? 'Unknown quick option: --workflow'
     : kind === 'direct_research' ? 'Unknown quick option: --workflow'
-    : kind === 'invalid_policy' ? 'PLANNER_POLICY_INVALID'
+    : kind === 'invalid_schema' ? 'typo'
     : kind === 'occupied_output' ? 'already occupied'
     : kind === 'unknown_adapter' ? 'Unknown adapter "nosuch"'
     : kind === 'missing_adapter' ? 'npm i -g @openai/codex'
-    : kind === 'continuation' ? 'brief_criteria_missing' : 'flowcrew brief - < file';
+    : kind === 'continuation' ? 'Launch paused before run creation' : 'flowcrew brief - < file';
   expect(child.stdout + child.stderr).toContain(hint);
   expect(existsSync(join(engine, 'brief-writing'))).toBe(false);
-  if (command === 'quick' && !['unknown_workflow', 'direct_research'].includes(kind)) expect(JSON.parse(readFileSync(record, 'utf8')).kind).toBe('launch_refused');
+  if (command === 'quick' && !['unknown_workflow', 'direct_research', 'continuation'].includes(kind)) expect(JSON.parse(readFileSync(record, 'utf8')).kind).toBe('launch_refused');
   if (kind === 'existing_file') expect(existsSync(record)).toBe(false);
 });
 

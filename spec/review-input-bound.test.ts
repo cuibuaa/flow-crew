@@ -37,7 +37,7 @@ vi.mock('node:child_process', async importOriginal => {
 const CODEX_LIMIT = 1_048_576;
 const agents = join(import.meta.dirname, '../config/agents');
 const contract = { version: 1, produces: [], reads: [] };
-const brief = '# Coherent change\n\n## Acceptance criteria\n1. Produce docs/report.md with a greeting.\n';
+const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce docs/report.md with a greeting.\"}]\n---\n# Coherent change\n\n## Acceptance criteria\n1. Produce docs/report.md with a greeting.\n";
 const stage = StageConfigSchema.parse({ id: 'assess', role: 'planner', scope: [],
   decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } });
 const role: AgentConfig = { name: 'planner', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: '' };

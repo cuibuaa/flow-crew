@@ -3,7 +3,7 @@ import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { readRunState, runDir } from './store.js';
-import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
+import { readAdmittedBriefContract } from './ship-inputs.js';
 import { declaredOutputSource } from './declared-output-archive.js';
 import { readRunStateView, type RunStateView } from './run-state-view.js';
 
@@ -28,7 +28,7 @@ export function summarizeRunStateView(view: RunStateView): object {
 /** Required products are engine facts, independent of a role's task excerpt or guidance. */
 export function declaredOutputFacts(projectDir: string, runId: string, state = readRunState(projectDir, runId)) {
   const briefPath = runRecordPath(runDir(projectDir, runId), 'task_brief.md');
-  const outputs = state.declaredOutputs ?? (existsSync(briefPath) ? parseBriefFrontmatter(readFileSync(briefPath, 'utf8')).outputs : undefined);
+  const outputs = state.declaredOutputs ?? readAdmittedBriefContract(runDir(projectDir, runId), existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : '').outputs;
   return (outputs ?? []).map(output => {
     try {
       declaredOutputSource(projectDir, output);
