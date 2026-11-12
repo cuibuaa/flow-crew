@@ -1,5 +1,6 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { captureProjectTree, projectCommit, readEvidence } from '../src/evidence-ledger.js';
@@ -20,7 +21,7 @@ import { validationExecutionId } from '../src/scheduler/sched_settlement/gate-va
 import * as gateValidation from '../src/scheduler/sched_settlement/gate-validation.js';
 import * as projectValidation from '../src/project-validation.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { createScopeSafeStageRunner, settleStageGroup } from '../src/scheduler/sched_scope/stage-group.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 

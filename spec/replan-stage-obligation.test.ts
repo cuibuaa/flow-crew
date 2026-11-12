@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
@@ -8,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { runWorkflow, StageConfigSchema, type WorkflowConfig } from '../src/scheduler.js';
+import { StageConfigSchema, type WorkflowConfig } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,

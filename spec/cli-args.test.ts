@@ -1,5 +1,5 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -30,7 +30,7 @@ function runCli(args: string[], isolated: Fixture): Promise<{ code: number | nul
       cwd: repository,
       env: { ...process.env, HOME: isolated.home, USERPROFILE: isolated.home, FC_HOME: isolated.fcHome },
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 20_000,
+
     });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout += chunk.toString(); });

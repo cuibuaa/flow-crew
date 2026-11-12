@@ -1,3 +1,4 @@
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -209,22 +210,30 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
   const args = ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', 'write a greeting', '--adapter', 'mock'];
   const child = spawn(process.execPath, args, { cwd: sub, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
+  const publication = new AbortController();
+  let childClosed = false;
+  child.once('close', () => {
+    childClosed = true;
+    publication.abort(new Error('Quick child closed before publishing its stop boundary'));
+  });
   try {
-    for (let i = 0; i < 400; i++) {
-      try { if (readFileSync(join(root, 'stopped'), 'utf8')) break; } catch { /* wait for boundary */ }
-      await new Promise(resolve => setTimeout(resolve, 25));
-    }
+    await waitForPathEvent(root, () => {
+      try { return readFileSync(join(root, 'stopped'), 'utf8') || undefined; }
+      catch { return undefined; }
+    }, publication.signal);
     expect(readFileSync(join(root, 'stopped'), 'utf8')).toBe(boundary);
   } finally {
-    const stopped = new Promise(resolve => child.once('close', resolve));
-    child.kill('SIGKILL'); await stopped;
+    if (!childClosed) {
+      const stopped = new Promise(resolve => child.once('close', resolve));
+      child.kill('SIGKILL'); await stopped;
+    }
   }
   expect(readdirSync(engine)).not.toContain('runs');
   const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
   expect(readFileSync(join(evidence, 'original.txt'), 'utf8')).toBe('write a greeting');
   writeFileSync(join(root, 'release'), 'continue');
   const rerun = spawnSync(process.execPath, args, { cwd: sub,
-    env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8', timeout: 25000 });
+    env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
   const runs = readdirSync(join(engine, 'runs'));
   expect(runs).toHaveLength(1);
@@ -283,7 +292,7 @@ it('raw text reaches the single entry with evidence attached', async () => {
     audit_findings: { version: 1, findings: [] } });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
-  { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures }, encoding: 'utf8', timeout: 25000 });
+  { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(0);
   const runs = readdirSync(join(fcGlobalDir(), 'runs')).map(id => join(fcGlobalDir(), 'runs', id));
   const run = runs.find(path => {

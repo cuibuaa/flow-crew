@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { createHash } from 'node:crypto';
@@ -7,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { runWorkflow, StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
+import { StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -65,12 +67,10 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
         reason: 'Finish the missing measurements before the same independent review.',
         stages: [...state.planControl!.stages, measure, publish],
       }));
-      if (options.repeat) await new Promise(resolve => setTimeout(resolve, 30));
       writeFileSync(join(project, 'report.txt'), options.repeat ? `Repair ${round}.\n` : 'Repair prepared.\n'); writes.push('report.txt');
     } else if (opts.stageId === 'measure') {
       expect(calls.filter(id => id === 'repair')).toHaveLength(round);
       expect(readFileSync(join(project, 'report.txt'), 'utf8')).toBe(options.repeat ? `Repair ${round}.\n` : 'Repair prepared.\n');
-      if (options.repeat) await new Promise(resolve => setTimeout(resolve, 20));
       writeFileSync(join(project, 'sample.txt'), options.repeat ? `measured ${round}\n` : 'measured\n'); writes.push('sample.txt');
       if (options.failed) exitCode = 7;
     } else if (opts.stageId === 'publish') {

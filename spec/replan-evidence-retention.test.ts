@@ -1,5 +1,6 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { startDashboard } from '../src/dashboard.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
 import {
   fcGlobalDir,
   runDir,

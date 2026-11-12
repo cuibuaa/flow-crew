@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { readStageInput } from '../src/store.js';
@@ -13,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { readRunEvents } from '../src/run-events.js';
 import { foldItems } from '../src/inbox.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));

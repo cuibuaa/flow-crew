@@ -1,6 +1,7 @@
+import './test-support/policy-runtime.js';
+import { runStage, runWorkflow } from './test-support/stage-deadline.js';
 import { requestPath, runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
-import './test-support/policy-runtime.js';
 import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { appendGateConstraintAuditContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -19,7 +20,6 @@ import {
   findAllReady,
   normalizeStageContracts,
   recordSchedulerTechnicalAttemptResult,
-  runWorkflow,
   StageConfigSchema,
   WorkflowConfigSchema,
   type WorkflowConfig,
@@ -34,7 +34,6 @@ import {
   writeRunState,
   type StoreState,
 } from '../src/store.js';
-import { runStage } from '../src/worker.js';
 import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import {
   createTechnicalRetryBudgetState,

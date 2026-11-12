@@ -1,5 +1,6 @@
-import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts, inputFile } from './spec_contracts/declared-fixtures.js';
 import { randomBytes } from 'node:crypto';
@@ -28,8 +29,6 @@ import {
 import {
   inspectDispatchAdmission,
   inspectRealityCheckReachability,
-  runWorkflow,
-
   type StageConfig,
   type WorkflowConfig,
 } from '../src/scheduler.js';
@@ -432,10 +431,6 @@ describe('violation paths at durable and human event layers', () => {
         if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         invocations += 1;
         write(join(projectDir, violatingPath), `export const attempt = ${invocations};\n`);
-        const deadline = Date.now() + 1_500;
-        while (existsSync(join(projectDir, violatingPath)) && Date.now() < deadline) {
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-        }
         return fixtureResult({
           output: 'wrote outside the admitted scope',
           exitCode: 0,
@@ -525,7 +520,7 @@ describe('environment refusal precedence', () => {
         },
         input: brief,
         encoding: 'utf8',
-        timeout: 30_000,
+
       },
     );
   }

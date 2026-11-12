@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
@@ -21,7 +23,6 @@ import {
   canResumeOwnGateSession,
   gateVerdictCorrectionPath,
   GATE_VERDICT_CORRECTION_VERSION,
-  runWorkflow,
   type WorkflowConfig,
 } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';

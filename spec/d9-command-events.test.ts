@@ -8,13 +8,17 @@ import { CommandActivityTracker, type CommandActivitySnapshot } from '../src/com
 import { observeEnginePublications } from '../src/engine-fs.js';
 import { createRun } from './test-support/create-run.js';
 import { readStageStatus } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
-const commandReads = vi.hoisted(() => ({ runPath: '', count: 0, active: false }));
+const commandReads = vi.hoisted(() => {
+  vi.resetModules(); // Reload setup's store so its writes use the policy filesystem fixture.
+  return { runPath: '', count: 0, active: false };
+});
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, readFileSync(...args: Parameters<typeof actual.readFileSync>) {
+  const { stageFileSystem } = await import('./test-support/stage-filesystem.js');
+  return { ...stageFileSystem(actual), readFileSync(...args: Parameters<typeof actual.readFileSync>) {
     if (commandReads.active && String(args[0]) === commandReads.runPath) commandReads.count++;
     return actual.readFileSync(...args);
   } };
@@ -56,17 +60,11 @@ describe('command activity without lifecycle event copies', () => {
         tracker.close();
         return scripted.run(prompt, role, opts);
       } };
-      const deadlineStartedAt = Date.now();
       try {
         const result = await runStage(adapter, {
           stageId: 'work', role: { name: 'coder', model: 'test', reasoning_effort: 'low',
             description: 'deterministic tool fixture', tools: [], prompt: 'Complete the fixture.' },
           dependsOn: [], promptTemplate: 'Execute the tool script.', timeout_ms: 30_000,
-          // Measure lifecycle I/O, independent of the host's speed reaching wrap-up.
-          deadlineClock: {
-            monotonicNow: () => 0, wallNow: () => deadlineStartedAt,
-            setTimer: () => ({} as ReturnType<typeof setTimeout>), clearTimer: () => {},
-          },
           projectDir, runId: created.runId, runDir: created.runDirPath, retries: 0,
           artifactContract: fixtureArtifactContract('work'),
         });
@@ -93,4 +91,10 @@ describe('command activity without lifecycle event copies', () => {
     expect(busy.eventTypes).not.toContain('stage_command_started');
     expect(busy.eventTypes).not.toContain('stage_command_completed');
   });
+});
+
+// Native SQLite commits have their own sync path outside node:fs.
+vi.mock('node:sqlite', async importOriginal => {
+  const { stageSqlite } = await import('./test-support/stage-filesystem.js');
+  return stageSqlite(await importOriginal<typeof import('node:sqlite')>());
 });

@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -11,13 +13,13 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
-import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { declaredDispatch, fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { readEvidence } from '../src/evidence-ledger.js';
-import { runProjectCommand } from '../src/project-validation.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 
 let root: string, project: string, roles: string, previousStore: string;
 beforeEach(() => {
@@ -103,8 +105,8 @@ it.each([false, true])('continues a rejected gate in the next iteration, retaini
     const original = readEvidence(join(root, 'state', 'runs', before.runId))
       .filter(entry => entry.kind === 'command' && entry.owner === 'code' && entry.reproductionOf === undefined).at(-1);
     if (original?.kind !== 'command' || !original.command || !original.context) throw Error('Missing synthetic reproduction');
-    const replay = await runProjectCommand({ role: 'test', command: original.context.shell, args: ['-c', original.command],
-      display: original.command, cwd: original.context.cwd, timeoutMs: 5000 });
+    const replay = await stageFixtureCommand({ role: 'test', command: original.context.shell, args: ['-c', original.command],
+      display: original.command, cwd: original.context.cwd });
     expect(replay.exitCode).toBe(1);
   }
   expect(f.calls).toEqual([{ stage: 'review', iteration: 2 }]);

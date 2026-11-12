@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
@@ -13,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { loadWorkflow, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { loadWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, setFcGlobalDir, runDir, readRunState, writeRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
 import { decisionSchema, validateDecision, emptyDecisionGraph, declareReviewChoices } from '../src/decision-graph.js';
@@ -240,7 +242,7 @@ describe('independent post-author routing', () => {
   });
 
   it('checks the rendered router and focused reviewer inputs, closed risk schema and full alternative', async () => {
-    execFileSync(process.execPath, ['--input-type=module', '-e', `import {execFileSync} from 'node:child_process'; for (const args of [['init','-q'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','base']]) execFileSync('git', args);`], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc') }, timeout: 5000 });
+    execFileSync(process.execPath, ['--input-type=module', '-e', `import {execFileSync} from 'node:child_process'; for (const args of [['init','-q'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','base']]) execFileSync('git', args);`], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc') } });
     const seen: Record<string, string> = {};
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const adapter: Adapter = { async run(user, role, opts) {

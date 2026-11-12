@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -14,7 +16,6 @@ import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js'
 import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import type { Adapter } from '../src/adapters/base.js';

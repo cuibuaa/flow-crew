@@ -1,13 +1,14 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
-import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runShipSetup } from '../src/cli-ship-setup.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
 import { reviewFacts } from '../src/decision-context.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
@@ -15,7 +16,7 @@ import { fcGlobalDir, runDir } from '../src/store.js';
 import { captureProjectTree, readEvidence, VALIDATION_FACT_VERSION, type ValidationFact } from '../src/evidence-ledger.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { gateValidationRefusal, currentValidationResults, recordAttemptValidation, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
-import { runProjectCommand } from '../src/project-validation.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
 const roots: string[] = [];
@@ -98,8 +99,8 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
         const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?1:0)`)}`;
         const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
         const request = JSON.stringify({ command, cwd: target, shell: '/bin/sh' });
-        const probe = await runProjectCommand({ role: 'test', command: '/bin/sh',
-          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Value reproduction', cwd: target, timeoutMs: 5000 });
+        const probe = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
+          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Value reproduction', cwd: target });
         expect(probe.exitCode).toBe(0);
         const record = JSON.parse(probe.stdout!).record;
         expect(record.exitCode).toBe(1); reproduction = record.sequence;

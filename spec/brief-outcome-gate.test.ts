@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -6,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 
 const repository = join(import.meta.dirname, '..');

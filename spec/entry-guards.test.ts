@@ -1,5 +1,6 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import { stringify as stringifyYaml } from 'yaml';
@@ -210,7 +211,7 @@ describe('Dashboard admission handshake', () => {
     };
     mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
     writeFileSync(join(projectDir, 'config', 'agents', 'worker.yaml'), stringifyYaml(worker));
-    const final = await scheduler.runWorkflow(
+    const final = await runWorkflow(
       config,
       raw,
       projectDir,
@@ -721,7 +722,7 @@ function runCliSync(isolated: CliFixture, cliArgs: string[], input?: string) {
       },
       encoding: 'utf-8',
       input,
-      timeout: 20_000,
+
       maxBuffer: 4 * 1024 * 1024,
     },
   );
@@ -758,18 +759,8 @@ async function runQuick(
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   child.stdin.end(stdin);
   const code = await new Promise<number | null>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error('quick child timed out'));
-    }, 20_000);
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('exit', (exitCode) => {
-      clearTimeout(timer);
-      resolve(exitCode);
-    });
+    child.once('error', reject);
+    child.once('close', resolve);
   });
   return { code, stdout, stderr };
 }

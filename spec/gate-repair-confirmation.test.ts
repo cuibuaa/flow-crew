@@ -1,5 +1,6 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { declareValidation } from './test-support/structured-validation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,14 +8,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Adapter } from '../src/adapters/base.js';
-import { runWorkflow, loadWorkflow } from '../src/scheduler.js';
+import { loadWorkflow } from '../src/scheduler.js';
 import { runDir, writeStageStatus, readRunState, writeRunState } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { appendEvidence, captureProjectTree, readEvidence, type EvidenceEntry } from '../src/evidence-ledger.js';
 import { assessFindings, type AuditFinding } from '../src/scoped-audit-repair.js';
-import { runProjectCommand } from '../src/project-validation.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 import * as validation from '../src/project-validation.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { normalizeNativeEvent } from '../src/adapters/native-events.js';
@@ -72,8 +73,8 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
         const transportedCommand = client ? `${client} '${JSON.stringify({ command, ...context }).replaceAll("'", "'\\''")}'` : command;
         tracker.feed(JSON.stringify({ type: 'item.started', item: { type: 'command_execution', id: 'reviewer-probe', command: transportedCommand,
           ...(variant === 'unknown' || client ? {} : context) } }) + '\n');
-        const response = await runProjectCommand({ command: context.shell, args: ['-c', transportedCommand], role: 'test', display: transportedCommand,
-          cwd: context.cwd, runDir: opts.runDir, timeoutMs: 5000 });
+        const response = await stageFixtureCommand({ command: context.shell, args: ['-c', transportedCommand], role: 'test', display: transportedCommand,
+          cwd: context.cwd, runDir: opts.runDir });
         expect(response.exitCode).toBe(client || !first ? 0 : 1);
         if (client) {
           const record = JSON.parse(response.stdout!).record;
@@ -118,9 +119,9 @@ describe('repair requires a reviewer reproduction', () => {
       await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
       return { exitCode: null };
     });
-    const call = (request: unknown) => runProjectCommand({ role: 'test', command: '/bin/sh',
+    const call = (request: unknown) => stageFixtureCommand({ role: 'test', command: '/bin/sh',
       args: ['-c', `${recorder.command} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`],
-      display: 'recorder client', cwd: directory, timeoutMs: 5000 });
+      display: 'recorder client', cwd: directory });
     try {
       const malformed = await call({ command: 'false', cwd: 'relative', shell: '/bin/sh' });
       expect(JSON.parse(malformed.stdout!)).toHaveProperty('error');
@@ -333,7 +334,7 @@ describe('repair requires a reviewer reproduction', () => {
       const originals: EvidenceEntry[] = [];
       for (const id of ['one', 'two']) {
         const command = `test "$(cat ${id})" = good`;
-        const response = await runProjectCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project, timeoutMs: 5000 });
+        const response = await stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
         expect(response.exitCode).toBe(1);
         originals.push(appendEvidence(run.runDirPath, { kind: 'command', owner: 'adapter-event', stageId: 'review', attemptIndex: 1,
           commandId: id, command, context, exitCode: response.exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before }));
@@ -345,7 +346,7 @@ describe('repair requires a reviewer reproduction', () => {
       const after = captureProjectTree(project).hash;
       for (const [index, original] of originals.entries()) {
         if (mode === 'absent' || mode === 'partial' && index === 1 || original.kind !== 'command') continue;
-        const response = await runProjectCommand({ role: 'test', command: context.shell, args: ['-c', original.command!], display: original.command!, cwd: project, timeoutMs: 5000 });
+        const response = await stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', original.command!], display: original.command!, cwd: project });
         expect(response.exitCode).toBe(0);
         appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
           commandId: `closure-${index}`, command: mode === 'wrong-command' ? 'true' : original.command,
@@ -353,7 +354,7 @@ describe('repair requires a reviewer reproduction', () => {
           outputDigest: 'closure', treeHash: mode === 'stale' ? before : after, treeAfterHash: after, reproductionOf: original.sequence });
       }
       if (mode === 'partial') {
-        const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', 'test "$(cat two)" = good'], display: 'remaining defect', cwd: project, timeoutMs: 5000 });
+        const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh', args: ['-c', 'test "$(cat two)" = good'], display: 'remaining defect', cwd: project });
         expect(response.exitCode).toBe(1);
       }
       for (const id of ['repair', ...(mode === 'later' ? ['later'] : []), 'review']) {
@@ -374,7 +375,7 @@ describe('repair requires a reviewer reproduction', () => {
     const project = mkdtempSync(join(tmpdir(), 'historical-closure-')); roots.push(project);
     const run = createRun(project, 'historical', 'name: historical\nstages: []\n', ['repair', 'review']);
     const context = { cwd: project, shell: '/bin/sh' }, command = 'test "$(cat value)" = good';
-    const execute = () => runProjectCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project, timeoutMs: 5000 });
+    const execute = () => stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
     writeFileSync(join(project, 'value'), 'bad');
     const before = captureProjectTree(project).hash;
     const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
@@ -434,7 +435,7 @@ describe('repair requires a reviewer reproduction', () => {
     const context = { cwd: project, shell: '/bin/sh' }, command = 'test "$(cat value)" = good';
     writeFileSync(join(project, 'value'), 'bad');
     const before = captureProjectTree(project).hash;
-    const execute = () => runProjectCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project, timeoutMs: 5000 });
+    const execute = () => stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
     const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
       commandId: 'original', command, context, exitCode: (await execute()).exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before });
     expect(original).toMatchObject({ exitCode: 1 });

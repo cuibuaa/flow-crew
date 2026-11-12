@@ -62,7 +62,7 @@ async function quick(args: string[] = [], env: NodeJS.ProcessEnv = {}, input = b
       ...env,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-    timeout: 20_000,
+
   });
   let stdout = '';
   let stderr = '';

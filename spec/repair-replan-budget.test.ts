@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { execFileSync } from 'node:child_process';
@@ -10,7 +12,7 @@ import { stringify } from 'yaml';
 import type { Adapter } from '../src/adapters/base.js';
 import { readRunEvents } from '../src/run-events.js';
 import { pendingScopePlanningInputs } from '../src/scheduler/sched_scope/scope-planning.js';
-import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { runDir } from '../src/store.js';
 import { declaredDispatch, fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
