@@ -66,7 +66,7 @@ export interface BriefValidationCommand {
   evidencePath: string;
 }
 
-/** Time one execution of the whole batch may take (shared among its commands) and the
+/** Time one execution of the whole batch may take (its commands run in order within it) and the
  * number of executions of an unfinished batch. Absent fields use the engine defaults. */
 export interface ValidationLimits { timeoutMs?: number; attempts?: number }
 
@@ -584,7 +584,7 @@ async function failureFacts(command: ValidationCommand, response: ValidationRunR
   return { identifiers: [], owner: 'unknown', reason: 'No declared structured reporter; failure identity remains unknown' };
 }
 
-/** One batch; reserve an equal share for each remaining command. */
+/** One batch; commands run in order and each may use what remains of the batch allowance. */
 export async function runProjectValidationBaseline(
   projectDir: string,
   dependencies: ProjectValidationDependencies = {},
@@ -608,7 +608,7 @@ export async function runProjectValidationBaseline(
   const results: ValidationCommandResult[] = [];
   const batchStarted = now();
   const budgetMs = Math.max(0, Math.min(dependencies.timeoutMs ?? loadEngineDefaults().validation_timeout_ms, dependencies.remainingMs?.() ?? Infinity));
-  for (const [index, command] of discovery.commands.entries()) {
+  for (const command of discovery.commands) {
     const role = command.role;
     if (dependencies.skipExecution) {
       results.push({
@@ -625,13 +625,12 @@ export async function runProjectValidationBaseline(
     }
     const started = now();
     const remaining = Math.max(0, Math.min(budgetMs - (started - batchStarted), dependencies.remainingMs?.() ?? Infinity));
-    const shareMs = remaining / (discovery.commands.length - index);
     let response: ValidationRunResponse;
     try {
-      response = dependencies.abortSignal?.aborted || shareMs <= 0
+      response = dependencies.abortSignal?.aborted || remaining <= 0
         ? { exitCode: null, unfinished: true, error: 'Validation budget ended before command execution' }
         : await runner({ ...command, cwd: root,
-        timeoutMs: shareMs, priority: dependencies.priority,
+        timeoutMs: remaining, priority: dependencies.priority,
         ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
       response = { exitCode: null, ...(dependencies.abortSignal?.aborted ? { unfinished: true } : {}), error: errorMessage(error) };

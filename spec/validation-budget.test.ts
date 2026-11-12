@@ -147,7 +147,7 @@ describe('completed author work reaches its independent gate within the validati
     expect(result.validations[0].attemptIndex).toBe(2);
   });
 
-  it('reserves test and lint allowance even when the build hangs silently', { timeout: 60_000 }, async () => {
+  it('ends the batch unfinished when the build hangs silently and runs no later command', { timeout: 60_000 }, async () => {
     setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
     const root = project();
     const adapter: Adapter = { async run(_prompt, _role, opts) {
@@ -158,13 +158,13 @@ describe('completed author work reaches its independent gate within the validati
     const { final, validations, rd } = await workflow(root, adapter, `validation:\n  commands:\n    build:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'setInterval(()=>{},1000)']\n    test:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n    lint:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n`);
     const commands = validations[0].executions[0].commands;
     expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified' });
-    expect(commands.slice(1).map(command => command.exitCode)).toEqual([0, 0]);
+    expect(commands.slice(1).map(command => [command.exitCode, command.unfinished])).toEqual([[null, true], [null, true]]);
     expect(final.status).toBe('parked');
     expect(final.validation?.[0]).toMatchObject({ measurement: 'unverified' });
     expect(renderRunSummary(root, rd, final)).toContain('unverified');
   });
 
-  it('bounds a near-idle suite after its worker dies and still starts the next command', { timeout: 60_000 }, async () => {
+  it('bounds a near-idle suite after its worker dies and leaves the batch unfinished', { timeout: 60_000 }, async () => {
     setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
     const root = project(); let gateInput = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -175,7 +175,7 @@ describe('completed author work reaches its independent gate within the validati
     const program = `const c=require('child_process').spawn(process.execPath,['-e','process.kill(process.pid,"SIGKILL")']);c.once('exit',(_code,signal)=>{console.log('worker died '+signal);setInterval(()=>{},1000)});`;
     const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n    lint: {command: /bin/sh, args: ['-c', 'exit 0']}\n`);
     const commands = result.validations[0].executions[0].commands;
-    expect(commands[1]).toMatchObject({ exitCode: 0, state: 'passed' });
+    expect(commands[1]).toMatchObject({ exitCode: null, unfinished: true });
     expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified' });
     expect(commands[0].output).toContain('worker died SIGKILL');
     expect(gateInput).toBe('');
@@ -185,7 +185,7 @@ describe('completed author work reaches its independent gate within the validati
 
 });
 
-it('reserves each command its share of the remaining batch without a stall detector', async () => {
+it('gives each command, in order, what remains of the batch allowance', async () => {
   setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 6000 });
   let elapsed = 0;
   const allowances: number[] = [];
@@ -193,12 +193,13 @@ it('reserves each command its share of the remaining batch without a stall detec
     commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: 'fixture', args: [], display: role })),
     runCommand: request => {
       allowances.push(request.timeoutMs!);
-      elapsed += request.role === 'build' ? request.timeoutMs! : 10;
-      return request.role === 'build' ? { exitCode: null, unfinished: true } : { exitCode: 0 };
+      elapsed += request.role === 'test' ? request.timeoutMs! : 10;
+      return request.role === 'test' ? { exitCode: null, unfinished: true } : { exitCode: 0 };
     },
   });
-  expect(allowances).toEqual([2000, 2000, 3990]);
-  expect(batch.results.map(result => result.exitCode)).toEqual([null, 0, 0]);
+  // The long command may use everything the earlier one left; nothing remains for the last.
+  expect(allowances).toEqual([6000, 5990]);
+  expect(batch.results.map(result => [result.role, result.exitCode])).toEqual([['build', 0], ['test', null], ['lint', null]]);
 });
 
 describe('final results own the comparison population', () => {
