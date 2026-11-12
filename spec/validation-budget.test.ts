@@ -53,7 +53,8 @@ describe('completed author work reaches its independent gate within the validati
       timeoutMs: boundary === 'timeout' ? 60 : 5000, ...(boundary === 'abort' ? { abortSignal: AbortSignal.timeout(60) } : {}) });
     expect(Date.now() - started).toBeLessThan(2000);
     expect(result).toMatchObject({ exitCode: null, unfinished: true });
-    expect(stop).toHaveBeenCalledOnce(); expect(unref).toHaveBeenCalledOnce();
+    // The owner settles after its consumers retire; it no longer detaches from the child.
+    expect(stop).toHaveBeenCalledOnce(); expect(unref).not.toHaveBeenCalled();
     expect(stdout.destroyed).toBe(true); expect(stderr.destroyed).toBe(true);
   });
 
