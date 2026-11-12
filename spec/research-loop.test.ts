@@ -28,7 +28,8 @@ import * as researchOwner from '../src/scheduler/sched_policy/research.js';
 import { readRunEvents } from '../src/run-events.js';
 import { runLand } from '../src/cli-land.js';
 import { renderRunSummary } from '../src/run-summary.js';
-import { scheduleDeadline, stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { scheduleDeadline, stageWrapUpTiming } from '../src/attempt-deadline.js';
+import { controlResearchTime, manualResearchClock as manualClock } from './test-support/research-clock.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -41,15 +42,24 @@ import * as validationOwner from '../src/project-validation.js';
 const agents = join(import.meta.dirname, '../config/agents');
 const delivered = JSON.stringify({ status: 'delivered', summary: 'Advisory author note: keep -999999; claimed measurement 1.', caveats: [], remaining_work: [], blocks: null });
 let root: string, project: string, previousStore: string;
+let time: ReturnType<typeof controlResearchTime>;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'research-loop-')); project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   setEngineDefaults({ max_iterations: 1, max_retries: 0, stage_technical_retries: 0, gate_retry_loops: 0 });
   isolatedProjectCommand('git', ['init', '-q'], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'baseline'], project, root);
+  time = controlResearchTime();
 });
-afterEach(() => { vi.restoreAllMocks(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
+function researchReady(child: ReturnType<typeof spawn>, closed: Promise<unknown>) {
+  return Promise.race([
+    once(child, 'message').then(([message]) => message as { runId: string; directory: string }),
+    closed.then(() => { throw new Error('Research scheduler closed before readiness'); }),
+  ]);
+}
+
 function brief(edit: (config: ResearchConfig) => void = () => {}) {
   const config = makeInstrument(project, { publication: 'reports/result.md', budget: { max_rounds: 1, invocation_seconds: 10 } });
   edit(config); return `---\n${stringify({ research: config })}---\nPropose candidates within the declared mechanism.\n`;
@@ -110,11 +120,9 @@ describe('versioned declaration-owned research loop', () => {
     const { state: parked } = await run(text, adapter);
     expect(parked.status).toBe('parked');
     setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
-    const nativeNow = Date.now, clock = vi.spyOn(Date, 'now').mockImplementation(() => nativeNow() + 600_000);
+    time.advanceTo(600_000);
     const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-    let resumed;
-    try { resumed = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, parked.runId, text, true); }
-    finally { clock.mockRestore(); }
+    const resumed = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, parked.runId, text, true);
     expect(resumed.status).toBe('incomplete'); expect(resumed.reasonCode).toBe('validation_unresolved');
     expect(adapter.calls.map(call => call.stageId)).toEqual(['produce']);
     expect(resumed.stages.produce.attempts).toHaveLength(1); expect(resumed.stages.review.attempts ?? []).toHaveLength(0);
@@ -360,16 +368,6 @@ describe('versioned declaration-owned research loop', () => {
   });
 });
 
-function manualClock() {
-  let elapsed = 0; const started = Date.now();
-  const timers = new Map<ReturnType<typeof setTimeout>, { at: number; callback: () => void }>();
-  const clock: AttemptDeadlineClock = { monotonicNow: () => elapsed, wallNow: () => started + elapsed,
-    setTimer(callback, delay) { const timer = {} as ReturnType<typeof setTimeout>; timers.set(timer, { at: elapsed + delay, callback }); return timer; },
-    clearTimer(timer) { timers.delete(timer); } };
-  return { clock, timers, advanceTo(value: number) {
-    elapsed = value; for (const [timer, entry] of [...timers]) if (entry.at <= elapsed) { timers.delete(timer); entry.callback(); }
-  } };
-}
 it.each([false, true])('settles real warning handoffs without measuring unfinished author work (exhausted=%s)', async exhausted => {
   setEngineDefaults({ default_timeout_ms: 20000, max_iterations: 3, max_retries: 0, stage_technical_retries: 0, gate_retry_loops: 0 });
   let text = brief(config => { config.budget.max_rounds = 3; });
@@ -408,16 +406,26 @@ it('uses overflow-safe timer chunks without extending the absolute hard deadline
 });
 it('retires author work at the absolute wall cap even inside an attempt finishing interval', async () => {
   const text = brief(config => { config.budget.wall_seconds = 60; });
-  let authorAbortedAt = Infinity, authorPid = 0;
+  const events: string[] = [];
+  let authorPid = 0;
   let authorResult: Awaited<ReturnType<typeof commands.execWithStdin>> | undefined;
   const adapter: Adapter = { async run(_prompt, _role, opts) {
-    const markAbort = () => { authorAbortedAt = Date.now(); };
+    const markAbort = () => { events.push('abort'); };
     if (opts.abortSignal?.aborted) markAbort(); else opts.abortSignal?.addEventListener('abort', markAbort, { once: true });
-    const result = await commands.execWithStdin(process.execPath, ['-e', 'console.log("PID=" + process.pid); setTimeout(() => process.exit(0), 6500)'], '', {
+    const result = await commands.execWithStdin(process.execPath, ['-e', 'console.log("PID=" + process.pid); setInterval(() => {}, 1000)'], '', {
       cwd: project, timeout_ms: 15000, abortSignal: opts.abortSignal,
       onChild: ({ pid }) => { authorPid = pid ?? 0; },
+      onStdout: text => {
+        if (!text.includes('PID=')) return;
+        events.push('ready');
+        time.advanceTo(4999);
+        expect(opts.abortSignal?.aborted).toBe(false);
+        events.push('before-cap');
+        time.advanceTo(5000);
+        expect(opts.abortSignal?.aborted).toBe(true);
+      },
     });
-    authorResult = result;
+    events.push('closed'); authorResult = result;
     return result;
   } };
   const rc = parseBriefFrontmatter(text).research!, stages = researchStages(rc);
@@ -425,7 +433,7 @@ it('retires author work at the absolute wall cap even inside an attempt finishin
   const created = createRun(project, 'research', stringify(config), stages.map(s => s.id));
   await initializeResearchInstrument(project, created.runDirPath, rc);
   // A resumed fixture has already spent 55 seconds. Freeze/setup is complete
-  // before arming its last five seconds, so the author really owns live work.
+  // before advancing its last five logical seconds after child readiness.
   const initial = readRunState(project, created.runId); initial.research = rc;
   initial.engineCheckpoint = captureEngineCheckpoint(project, initial.runId);
   initial.startedAt = new Date(Date.now() - 55000).toISOString();
@@ -433,9 +441,9 @@ it('retires author work at the absolute wall cap even inside an attempt finishin
   measured.startedAt = initial.startedAt; measured.deadline = Date.parse(initial.startedAt) + 60000;
   engineFiles.atomicWrite(join(researchDirectory(created.runDirPath), 'state.json'), JSON.stringify(measured));
   writeRunState(project, initial.runId, initial);
-  const state = await runResearchLoop(project, initial.runId, created.runDirPath, config, adapter, new Map(), agents, undefined, text);
+  const state = await runResearchLoop(project, initial.runId, created.runDirPath, config, adapter, new Map(), agents, undefined, text, undefined, () => time.clock);
   expect(authorPid).toBeGreaterThan(0);
-  expect(authorAbortedAt).toBeLessThanOrEqual(Date.parse(state.startedAt) + 60500);
+  expect(events).toEqual(['ready', 'before-cap', 'abort', 'closed']);
   expect(authorResult).toMatchObject({ exitCode: 137, processSignal: 'SIGTERM', timedOut: false });
   expect(() => process.kill(authorPid, 0)).toThrow();
   const manifest = read(runRecordPath(runDir(project, state.runId), 'research_manifest.json'));
@@ -617,24 +625,19 @@ describe('terminal publication is separate and never recovered into project file
       const { config, raw } = loadWorkflow(${JSON.stringify(join(repo, 'config/workflows/entry.yaml'))});
       const adapter = { async run(_prompt, _role, opts) {
         writeFileSync(join(project, 'candidate.json'), '{"value":1}');
-        console.log('CANCEL_READY ' + JSON.stringify({ runId: JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId, directory: opts.runDir }));
-        await new Promise(resolve => setTimeout(resolve, 30000));
+        process.send({ runId: JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId, directory: opts.runDir });
+        await new Promise(() => {});
         return { exitCode: 0, duration_ms: 1, output: ${JSON.stringify(delivered)} };
       } };
       await runWorkflow(config, raw, project, adapter, new Map(), undefined, ${JSON.stringify(agents)}, undefined, brief);
     `);
     const child = spawn(process.execPath, ['--import', 'tsx', script, project, home], {
-      cwd: repo, env: { ...process.env, HOME: root, FC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: repo, env: { ...process.env, HOME: root, FC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
-    const closed = once(child, 'close'); let stdout = '', stderr = '';
-    child.stdout.on('data', b => { stdout += b.toString(); }); child.stderr.on('data', b => { stderr += b.toString(); });
+    const closed = once(child, 'close'), ready = researchReady(child, closed);
+    child.stdout.resume(); child.stderr.resume();
     try {
-      const deadline = Date.now() + 20000;
-      while (!stdout.includes('CANCEL_READY ')) {
-        expect(child.exitCode, stderr).toBeNull(); expect(Date.now(), stderr).toBeLessThan(deadline);
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
-      const binding = JSON.parse(stdout.split('CANCEL_READY ')[1].split('\n')[0]);
+      const binding = await ready;
       const units = { isActive: async () => ({ kind: 'absent' as const }), stopUnit: async () => {}, runUnit: async () => {}, journalTail: async () => '' };
       const options = { registry: new TaskRegistry({ baseDir: home }), units, runsDir: join(home, 'runs'),
         signalGraceMs: 100, timeoutMs: 1500,
@@ -689,31 +692,24 @@ describe('terminal publication is separate and never recovered into project file
       const { config, raw } = loadWorkflow(${JSON.stringify(join(repo, 'config/workflows/entry.yaml'))});
       const adapter = { async run(_prompt, _role, opts) {
         writeFileSync(join(project, 'candidate.json'), JSON.stringify({ value: Number(process.argv[4]) }));
-        console.log('OWNER_READY ' + JSON.stringify({ runId: JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId, directory: opts.runDir }));
-        if (process.argv[5] === 'live') await new Promise(resolve => setTimeout(resolve, 30000));
+        process.send({ runId: JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId, directory: opts.runDir });
+        if (process.argv[5] === 'live') await new Promise(() => {});
         return { exitCode: 0, duration_ms: 1, output: ${JSON.stringify(delivered)} };
       } };
       await runWorkflow(config, raw, project, adapter, new Map(), undefined, ${JSON.stringify(agents)}, undefined, brief);
     `);
-    const children: Array<{ child: ReturnType<typeof spawn>; closed: Promise<unknown>; stdout: string; stderr: string }> = [];
+    const children: Array<{ child: ReturnType<typeof spawn>; closed: Promise<unknown>; ready: Promise<{ runId: string; directory: string }>; stderr: string }> = [];
     const start = (value: number, mode: string) => {
       const child = spawn(process.execPath, ['--import', 'tsx', script, project, home, String(value), mode], {
-        cwd: repo, env: { ...process.env, HOME: root, FC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: repo, env: { ...process.env, HOME: root, FC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
-      const entry = { child, closed: once(child, 'close'), stdout: '', stderr: '' }; children.push(entry);
-      child.stdout!.on('data', b => { entry.stdout += b.toString(); }); child.stderr!.on('data', b => { entry.stderr += b.toString(); });
+      const closed = once(child, 'close');
+      const entry = { child, closed, ready: researchReady(child, closed), stderr: '' }; children.push(entry);
+      child.stdout!.resume(); child.stderr!.on('data', b => { entry.stderr += b.toString(); });
       return entry;
     };
-    const ready = async (entry: typeof children[number]) => {
-      const deadline = Date.now() + 15000;
-      while (!entry.stdout.includes('OWNER_READY ')) {
-        expect(entry.child.exitCode, entry.stderr).toBeNull(); expect(Date.now(), entry.stderr).toBeLessThan(deadline);
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
-      return JSON.parse(entry.stdout.split('OWNER_READY ')[1].split('\n')[0]);
-    };
     try {
-      const older = start(1, 'live'), old = await ready(older);
+      const older = start(1, 'live'), old = await older.ready;
       const units = { isActive: async () => ({ kind: 'absent' as const }), stopUnit: async () => {}, runUnit: async () => {}, journalTail: async () => '' };
       const coordinator = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: home }), units, runsDir: join(home, 'runs'),
         signalGraceMs: 0, timeoutMs: 0,
@@ -723,7 +719,7 @@ describe('terminal publication is separate and never recovered into project file
       expect((await coordinator.cancelRun(old.runId)).observation.schedulerAlive).toBe(true);
       expect(existsSync(runRecordPath(old.directory, 'research_manifest.json'))).toBe(false);
       older.child.kill('SIGTERM'); await older.closed;
-      const newer = start(25, successor), current = await ready(newer);
+      const newer = start(25, successor), current = await newer.ready;
       expect(current.runId).not.toBe(old.runId);
       if (successor === 'complete') {
         await newer.closed; expect(newer.child.exitCode, newer.stderr).toBe(0);
@@ -761,7 +757,7 @@ describe('terminal publication is separate and never recovered into project file
         setFcGlobalDir(${JSON.stringify(home)});
         try { console.log(JSON.stringify({ blocked: !claimLaunchIntent(${JSON.stringify(project)}, ${JSON.stringify(next.runId)}, Date.now() + ${2 * LAUNCH_INTENT_TTL_MS}).claimed })); }
         catch { console.log(JSON.stringify({ blocked: true })); }
-      `], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: home }, timeout: 10000, encoding: 'utf8' });
+      `], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: home }, encoding: 'utf8' });
       expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout), 'Admission must not enter while restoration owns the project mutex').toEqual({ blocked: true });
     })).toBe(true);

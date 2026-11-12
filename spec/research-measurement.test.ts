@@ -6,6 +6,7 @@ import { captureMeasuredCandidate, finalizeResearchInstrument, initializeResearc
   recordResearchSubmission, researchAuthorContext, researchDirectory, researchInstrumentState, restoreResearchBest } from '../src/research-measurement.js';
 import { ResearchInstrumentSchema, type ResearchConfig } from '../src/research-instrument.js';
 import { makeInstrument, instrumentProgram } from './test-support/research-instrument-fixture.js';
+import { controlResearchTime } from './test-support/research-clock.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
@@ -15,12 +16,14 @@ import * as files from '../src/engine-fs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let root: string, project: string, run: string, previousStore: string;
+let time: ReturnType<typeof controlResearchTime>;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'research-instrument-')); project = join(root, 'project'); run = join(root, 'run');
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   mkdirSync(project); mkdirSync(run); writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'controlled-run' }));
+  time = controlResearchTime();
 });
-afterEach(() => { vi.restoreAllMocks(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
 async function setup(edit: (config: ResearchConfig) => void = () => {}) {
   const config = makeInstrument(project); edit(config);
@@ -304,14 +307,21 @@ describe('hard budgets and cancellation', () => {
   });
   it('times out and retires an owned process', async () => {
     await setup(config => { config.budget.invocation_seconds = 5; });
-    const spawn = commands.spawnOwnedCommand; let closedAfter = Infinity;
+    const spawn = commands.spawnOwnedCommand, events: string[] = [];
     vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
-      const launchedAt = Date.now(), owned = spawn(cmd, args, options);
-      owned.child.once('close', () => { closedAfter = Date.now() - launchedAt; });
-      return owned;
+      const owned = spawn(cmd, args, options);
+      owned.child.stderr?.on('data', data => {
+        if (!String(data).includes('PID=')) return;
+        events.push('ready');
+        time.advanceTo(4999);
+        expect(events).toEqual(['ready']);
+        time.advanceTo(5000);
+      });
+      owned.child.once('close', () => { events.push('closed'); });
+      return { ...owned, stop: () => { events.push('stop'); return owned.stop(); } };
     });
     const result = await evaluate({ sleep: true }); expect(result).toMatchObject({ outcome: 'execution_error', reason: 'instrument_timeout' });
-    expect(closedAfter).toBeLessThan(6000);
+    expect(events).toEqual(['ready', 'stop', 'closed']);
     const pid = Number(read(result.raw!.path).stderr.match(/PID=(\d+)/)?.[1]); expect(pid).toBeGreaterThan(0);
     expect(() => process.kill(pid, 0)).toThrow();
   });
@@ -331,20 +341,18 @@ describe('hard budgets and cancellation', () => {
   });
   it('cancellation retires an owned process and cannot bank a late verdict', async () => {
     await setup(); const controller = new AbortController(); vi.spyOn(commands, 'runProcessAbortSignal').mockReturnValue(controller.signal);
-    const spawn = commands.spawnOwnedCommand; let abortedAt = 0, closedAt = Infinity;
+    const spawn = commands.spawnOwnedCommand, events: string[] = [];
     vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
       const owned = spawn(cmd, args, options);
-      owned.child.stderr?.on('data', data => { if (String(data).includes('PID=')) { abortedAt = Date.now(); controller.abort(); } });
-      owned.child.once('close', () => { closedAt = Date.now(); });
-      return owned;
+      owned.child.stderr?.on('data', data => { if (String(data).includes('PID=')) { events.push('ready'); controller.abort(); } });
+      owned.child.once('close', () => { events.push('closed'); });
+      return { ...owned, stop: () => { events.push('stop'); return owned.stop(); } };
     });
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const result = await evaluate({ sleep: true }); expect(result).toMatchObject({ outcome: 'execution_error', reason: 'research_cancelled' });
-      expect(closedAt - abortedAt).toBeLessThan(1500);
-      const pid = Number(read(result.raw!.path).stderr.match(/PID=(\d+)/)?.[1]); expect(pid).toBeGreaterThan(0);
-      expect(() => process.kill(pid, 0)).toThrow(); expect(read(join(researchInstrumentState(run).incumbent.path, 'candidate.json')).value).toBe(100);
-    } finally { clearTimeout(timer); }
+    controller.signal.addEventListener('abort', () => { events.push('abort'); }, { once: true });
+    const result = await evaluate({ sleep: true }); expect(result).toMatchObject({ outcome: 'execution_error', reason: 'research_cancelled' });
+    expect(events).toEqual(['ready', 'abort', 'stop', 'closed']);
+    const pid = Number(read(result.raw!.path).stderr.match(/PID=(\d+)/)?.[1]); expect(pid).toBeGreaterThan(0);
+    expect(() => process.kill(pid, 0)).toThrow(); expect(read(join(researchInstrumentState(run).incumbent.path, 'candidate.json')).value).toBe(100);
   });
 });
 

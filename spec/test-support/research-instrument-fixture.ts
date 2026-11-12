@@ -67,7 +67,8 @@ if (c.exact) {
   response.observations.raw = raw; response.diagnostics.raw = raw; response.next_state.raw = raw;
 }
 const emit = () => console.log(JSON.stringify(response).replaceAll('"large_raw_number"', '9007199254740993').replaceAll('"fraction_raw_number"', '0.123456789012345678901').replaceAll('"huge_raw_number"', '1e999'));
-if (c.sleep && r.phase === 'evaluate') { console.error('PID=' + process.pid); setTimeout(emit, 60000); }
+// Stay live until the owning timeout/cancellation retires us, independent of host speed.
+if (c.sleep && r.phase === 'evaluate') { console.error('PID=' + process.pid); setInterval(() => {}, 1000); }
 else emit();
 `;
 export function makeInstrument(project: string, change: Partial<ResearchConfig> = {}): ResearchConfig {
