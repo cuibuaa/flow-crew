@@ -1,7 +1,7 @@
 import { type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { onTestFinished, vi } from 'vitest';
+import { onTestFinished } from 'vitest';
 import { sendRpc, type RpcRequest, type RpcResponse } from '../../src/orchestrator-rpc.js';
 
 export { waitForPathEvent as daemonPublication } from './wait-for-path-event.js';
@@ -15,16 +15,9 @@ export async function daemonFile<T>(path: string, observe: () => T | undefined):
   return daemonPublication(parent, observe);
 }
 
-/** Only the acknowledgement timer installed synchronously by sendRpc uses a
- * stationary fixture clock. Socket connect/data/end/error still run normally,
- * and the actual production client still parses and validates the response.
- * No global timer mock survives the synchronous call. */
+/** The production client waits on the connection; no fixture clock is needed. */
 export function daemonRpc<T extends RpcResponse = RpcResponse>(socket: string, request: RpcRequest): Promise<T> {
-  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementationOnce(
-    () => ({}) as ReturnType<typeof setTimeout>,
-  );
-  try { return sendRpc<T>(socket, request); }
-  finally { timer.mockRestore(); }
+  return sendRpc<T>(socket, request);
 }
 
 export function daemonClosed(child: ChildProcess): Promise<void> {
