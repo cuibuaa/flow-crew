@@ -74,7 +74,7 @@ describe('published declaration inputs', () => {
   it('leaves configured validation comparison to the engine', () => {
     const owned = fixture();
     try {
-      writeFileSync(join(owned.run, 'validation_baseline.json'), JSON.stringify({ baseline: { gateCriteria: [] } }));
+      writeFileSync(join(owned.run, 'validation_baseline.json'), JSON.stringify({ baseline: {} }));
       const base = loadBasePrompt(join(projectRoot, 'config/agents'));
       for (const isGate of [false, true]) {
         const prompt = base + buildStagePrompt({ stageId: 'audit', isGate, dependsOn: [],

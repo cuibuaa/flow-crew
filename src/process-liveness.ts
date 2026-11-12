@@ -95,9 +95,12 @@ function processGroupReadWork(members: readonly { pid: number }[]): string | und
   } catch { return undefined; } // ss/counters unavailable: no receive-progress claim
 }
 
-/** Read-only work evidence for one identity-bound, engine-owned process group.
- * CPU and I/O counters include quiet descendants. Process state describes a
- * wait; it cannot by itself prove that work advanced.
+/** Read-only work evidence for one identity-bound, engine-owned process tree.
+ * A provider is a process group. A command is the supervisor that owns it: the
+ * working child runs in its own session, so its members are the supervisor's
+ * descendants, and the supervisor's own polling is not work (as a provider's
+ * CPU polling is not). CPU and I/O counters include quiet descendants. Process
+ * state describes a wait; it cannot by itself prove that work advanced.
  * Unavailable observations remain unknown, never a claim that work is idle. */
 export function processGroupWork(pid: number, startTimeTicks?: string, kind: 'command' | 'provider' = 'command'): {
   startTimeTicks: string; fingerprint: string; readWork?: string; ioObserved: boolean;
@@ -111,16 +114,24 @@ export function processGroupWork(pid: number, startTimeTicks?: string, kind: 'co
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || startTimeTicks === undefined) throw error;
     }
     if (leader && startTimeTicks !== undefined && leader[19] !== startTimeTicks) return undefined;
-    const work: string[] = [];
-    let ioObserved = true;
-    const members: Array<{ pid: number; state: string; cpuTicks: number; wait: string }> = [];
+    const stats = new Map<number, string[]>();
     for (const id of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
-      let stat: string[];
-      try { stat = fields(id); } catch (error) {
+      try { stats.set(Number(id), fields(id)); } catch (error) {
         if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) continue;
         throw error;
       }
-      if (Number(stat[2]) !== pid || stat[0] === 'Z' || stat[0] === 'X') continue;
+    }
+    const owned = (id: number): boolean => {
+      if (Number(stats.get(id)?.[2]) === pid) return true;
+      for (let at = Number(stats.get(id)?.[1]); at > 1; at = Number(stats.get(at)?.[1])) if (at === pid) return true;
+      return false;
+    };
+    const work: string[] = [];
+    let ioObserved = true;
+    const members: Array<{ pid: number; state: string; cpuTicks: number; wait: string }> = [];
+    for (const [memberPid, stat] of stats) {
+      const id = String(memberPid);
+      if (!owned(memberPid) || stat[0] === 'Z' || stat[0] === 'X') continue;
       // A disappearing descendant is itself a lifecycle change, while an
       // unreadable live member cannot certify an idle group.
       let io: string;
@@ -132,14 +143,12 @@ export function processGroupWork(pid: number, startTimeTicks?: string, kind: 'co
         io = 'unavailable';
         ioObserved = false;
       }
-      // Provider CPU polling is not model work. Tool descendants remain
+      // The owner's own polling is not work. Tool descendants remain
       // observable command work; inbound bytes are sampled separately below.
-      if (kind === 'command' || Number(id) !== pid) {
-        work.push(`${id}:${stat[19]}:${stat[11]}:${stat[12]}:${io}`);
-      }
+      if (memberPid !== pid) work.push(`${id}:${stat[19]}:${stat[11]}:${stat[12]}:${io}`);
       let wait = 'unknown';
       try { wait = readFileSync(`/proc/${id}/wchan`, 'utf8').trim(); } catch { /* optional diagnostic */ }
-      members.push({ pid: Number(id), state: stat[0], cpuTicks: Number(stat[11]) + Number(stat[12]), wait });
+      members.push({ pid: memberPid, state: stat[0], cpuTicks: Number(stat[11]) + Number(stat[12]), wait });
     }
     const readWork = kind === 'provider' ? processGroupReadWork(members) : undefined;
     if (readWork !== undefined) work.push(readWork);

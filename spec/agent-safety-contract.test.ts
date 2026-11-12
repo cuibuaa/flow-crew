@@ -102,11 +102,11 @@ describe('shipped role outcome contracts', () => {
     expect(prompt('ai_detector')).toContain('cited sources, comparator papers and experiment records within read authorization');
   });
 
-  it('uses relevant post-change baseline evidence and retains exact rejected repair checks', () => {
+  it('tells the author that the engine record owns the full-suite verdict and that no red command may remain', () => {
     const loaded = prompt('coder').replace(/\s+/g, ' ');
     expect(loaded).toContain('After the last change, supply relevant evidence for acceptance properties not established by engine records.');
-    expect(loaded).toContain('Existing failures may remain when the admitted rule is no new regression');
-    expect(loaded).toContain('Repairs reproduce the rejected property with targeted checks');
+    expect(loaded).toContain('Repairs use targeted checks; the completed engine validation record owns the full-suite verdict.');
+    expect(loaded).not.toMatch(/existing failures|no new regression|pre-existing/i);
   });
 
   it('grounds research claims in verified retrievable evidence with sufficient authority', () => {

@@ -114,14 +114,6 @@ function validationBaseline(projectDir: string): ProjectValidationBaseline {
       missingRoles: ['build', 'lint'],
     },
     results: [validationResult('test', 'failed', ['spec/existing.test.ts'])],
-    gateCriteria: [{
-      role: 'test',
-      rule: 'no_regression_from_baseline',
-      baselineFailureCount: 1,
-      baselineFailureIdentifiers: ['spec/existing.test.ts'],
-      baselineFailureEvidence: 'complete',
-      description: 'test may not add failures',
-    }],
   };
 }
 
@@ -155,7 +147,7 @@ afterEach(() => {
 });
 
 describe('engine behaviour contracts', () => {
-  it('exposes the run-local command facts without classifying causation at the gate consumer', async () => {
+  it('rejects a reviewer pass whenever the engine record has a nonzero exit, whatever the base and the failure identities were', async () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
@@ -194,12 +186,14 @@ describe('engine behaviour contracts', () => {
     const noBaselineVerdict = readGateEvaluation(projectDir, 'qa', control.runId);
     expect(prompt).not.toContain('Engine-enforced validation baseline');
     expect(unchanged?.pass).toBe(false);
-    expect(unchangedVerdict?.pass).toBe(true);
+    // The base failed on the same file: identity and base state decide nothing, the exit does.
+    expect(unchangedVerdict).toMatchObject({ pass: false, validation: [expect.objectContaining({ exitCode: 1, measurement: 'unverified' })] });
     expect(regressed?.pass).toBe(false);
     expect(regressed?.immutablePath).not.toBe(unchanged?.immutablePath);
     expect(existsSync(runRecordPath(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
     expect(existsSync(runRecordPath(created.runDirPath, regressed!.immutablePath!))).toBe(true);
-    expect(regressedVerdict).toMatchObject({ pass: true, validation: [expect.objectContaining({ exitCode: 1, measurement: 'unverified', disposition: 'unknown' })] });
+    expect(regressedVerdict).toMatchObject({ pass: false, validation: [expect.objectContaining({ exitCode: 1, measurement: 'unverified' })] });
+    expect(regressedVerdict).not.toHaveProperty('validation.0.disposition');
     expect(noBaselineVerdict?.pass).toBe(true);
   });
 

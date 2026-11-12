@@ -58,7 +58,6 @@ function baseline(result: ValidationCommandResult): ProjectValidationBaseline {
       missingRoles: [],
     },
     results: [result],
-    gateCriteria: [],
   };
 }
 
@@ -123,7 +122,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
 
     for (const result of [unknown, partial, launchError, completeNamed]) {
       expect(evaluateValidationDelta(green, [result])[0]).toMatchObject({
-        state: 'unverified', reason: 'Command unverified; independent gate owns disposition', newFailureIdentifiers: [],
+        state: 'unverified', newFailureIdentifiers: [],
       });
     }
   });

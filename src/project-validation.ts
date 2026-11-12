@@ -251,15 +251,8 @@ export interface ValidationCommandResult {
   reason?: string;
 }
 
-export interface ValidationGateCriterion {
-  role: ValidationRole;
-  display?: string;
-  rule: 'must_remain_green' | 'no_regression_from_baseline' | 'baseline_unresolved' | 'not_configured';
-  baselineFailureCount?: number;
-  baselineFailureIdentifiers: string[];
-  baselineFailureEvidence?: FailureEvidence;
-  description: string;
-}
+/** The one rule, as advice: a baseline that already exits nonzero is admitted, never refused. */
+export const VALIDATION_ADVICE = '  Advice: the run completes only when every declared validation command exits 0 on the final tree; a command that already exits nonzero at base is admitted, so declare commands that exit 0 at base for failures unrelated to the task.\n';
 
 export interface ProjectValidationBaseline {
   version: 1;
@@ -267,7 +260,6 @@ export interface ProjectValidationBaseline {
   projectDir: string;
   discovery: ValidationDiscovery;
   results: ValidationCommandResult[];
-  gateCriteria: ValidationGateCriterion[];
 }
 
 export interface ProjectValidationDependencies {
@@ -443,10 +435,10 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   }
   const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
-  const { child, stop } = spawnOwnedCommand(request.priority === undefined || process.platform === 'win32' ? request.command : 'nice',
-    request.priority === undefined || process.platform === 'win32' ? request.args : ['-n', String(request.priority), request.command, ...request.args], {
+  const { child, stop } = spawnOwnedCommand(request.command, request.args, {
     cwd: request.cwd,
     env: environment.env,
+    priority: request.priority,
   });
   const activity = request.runDir && request.execution ? new CommandActivityTracker({
     runDir: request.runDir, ...request.execution,
@@ -683,7 +675,6 @@ export async function runProjectValidationBaseline(
     projectDir: root,
     discovery,
     results,
-    gateCriteria: [], // Legacy field, no code-owned causal criteria are generated.
   };
 }
 

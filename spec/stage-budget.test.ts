@@ -810,7 +810,7 @@ describe('durable bounded continuation', () => {
       continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } });
     atomicWrite(runRecordPath(created.runDirPath, RUN_VALIDATION_BASELINE_FILE), JSON.stringify({ version: 1,
       capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline: { version: 1,
-        projectDir: project, discovery: { state: 'not_configured', commands: [], missingRoles: ['build', 'test', 'lint'] }, results: [], gateCriteria: [] } }));
+        projectDir: project, discovery: { state: 'not_configured', commands: [], missingRoles: ['build', 'test', 'lint'] }, results: [] } }));
     expect(settledGateValidationExecution(project, created.runId, 'work')).toBeUndefined();
     expect(await recordGateValidationDelta(project, created.runId, 'work')).toBeUndefined();
     expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_work.json'))).toBe(false);

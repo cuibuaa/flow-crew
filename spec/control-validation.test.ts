@@ -206,7 +206,7 @@ describe('one projection across historic receipts and every reader', () => {
     const command = { role: 'test' as const, command: 'fixture', args: [], display: 'source-mutating command',
       exitCode: 0, state: 'passed' as const, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'none' as const };
     writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
-      version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [command], missingRoles: [] }, results: [], gateCriteria: [],
+      version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [command], missingRoles: [] }, results: [],
     } }));
     const seeded = seedAttemptValidation(root, runId, [command]);
     if (seeded.kind !== 'validation') throw Error('Fixture validation missing');
@@ -284,7 +284,7 @@ describe('one projection across historic receipts and every reader', () => {
   it.each(fixtures)('projects b4c75c fact $sequence without changing its recorded labels', async fixture => {
     const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['author', 'review']);
     const commands = fixture.commands;
-    const baseline = { version: 1, projectDir: root, results: commands, gateCriteria: [], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
+    const baseline = { version: 1, projectDir: root, results: commands, discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
       commands: commands.map(command => ({ role: command.role, command: 'fixture', args: [], display: command.display })) } };
     writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
     const fact = seedAttemptValidation(root, runId, commands, { delta: commands.map(command => ({ role: command.role, display: command.display, state: 'not_measured', reason: 'Historical stored interpretation', newFailureIdentifiers: [] })) });
@@ -350,7 +350,7 @@ describe('one projection across historic receipts and every reader', () => {
       reason: 'Historical absence was called a pass', newFailureIdentifiers: [] }));
     writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
       version: 1, projectDir: root, discovery: { state: 'unknown', configPath: 'fixture', commands: [], missingRoles: ['build', 'test', 'lint'] },
-      results: [], gateCriteria: [],
+      results: [],
     } }));
     const fact = seedAttemptValidation(root, runId, commands, { delta });
     appendEvidence(base, { kind: 'attempt', stageId: fact.stageId, attemptIndex: fact.attemptIndex,
@@ -389,7 +389,7 @@ describe('one projection across historic receipts and every reader', () => {
     const delta = evaluateValidationDelta(undefined, [command]);
     expect(evaluateValidationDelta(undefined, [once])).toEqual(delta);
     expect(delta[0].state).toBe('verified');
-    const baseline = { version: 1, projectDir: root, results: [command], gateCriteria: [], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
+    const baseline = { version: 1, projectDir: root, results: [command], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
       commands: [{ role: 'test', command: 'fixture', args: [], display: command.display }] } };
     writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
     const fact = seedAttemptValidation(root, runId, [command], { delta });
@@ -427,7 +427,7 @@ it('retains an explicitly unrun command as unverified and refuses successful ter
   writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
     version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [
       { role: 'test', command: 'declared', args: [], display: 'declared' },
-    ], missingRoles: ['build', 'lint'] }, results: [], gateCriteria: [],
+    ], missingRoles: ['build', 'lint'] }, results: [],
   } }));
   writeFileSync(runRecordPath(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance of the stated unrun command',
     audit_findings: { version: 1, findings: [] }, validation_review: { commands: [{ role: 'test', display: 'declared', disposition: 'unknown', reason: 'No execution was available' }], request_base: [] } }));
@@ -454,7 +454,7 @@ it('retains legacy diagnostics while completed zero exits stay verified through 
     { role: 'test', command: 'test', args: [], display: 'test' },
   ];
   writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
-    version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands, missingRoles: ['lint'] }, results: [], gateCriteria: [],
+    version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands, missingRoles: ['lint'] }, results: [],
   } }));
   seedAttemptValidation(root, runId, [
     { role: 'build', display: 'build', state: 'launch_error', exitCode: 0, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' },

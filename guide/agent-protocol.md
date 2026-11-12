@@ -239,11 +239,14 @@ No reproduction is a second configured validation.
 Native command progress records retain command, context when available, raw exit and output
 digest without tree captures. Only engine-recorded reproductions and their closure replays
 receive command tree hashes; cite the engine-recorded command endpoint for a finding.
-Repair admission uses confirmed reproductions alone. A partial or unknown configured
-validation comparison cannot veto their scoped repair. Confirmed introduced failures still block acceptance. The independent gate decides whether
-the brief permits acceptance with incomplete, unknown or unmeasured validation; those facts
-remain explicit in its input and the report and never become a passing validation result. A solely pre-existing configured
-failure is not a repair finding.
+Repair admission uses confirmed reproductions and completed nonzero engine validation records.
+A completed record with any nonzero exit always returns the work to repair, whatever the base
+tree, the failure identity or the review verdict was; an unfinished record is a resource state
+the engine reruns within its allowance, never a finding or a repair reason. A run completes only
+when the final tree's record is complete with exit 0 for every declared command. The gate does
+not decide whether a failing or unfinished command may stand. A baseline that already exits
+nonzero is admitted, so the task may be to make it pass; setup shows one advisory line saying so.
+A project with failures unrelated to the task declares a validation command that exits 0 at base.
 An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
 skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.

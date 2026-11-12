@@ -134,12 +134,6 @@ function validationBaseline(projectDir: string): ProjectValidationBaseline {
       missingRoles: ['build', 'lint'],
     },
     results: [validationResult('test', 'passed')],
-    gateCriteria: [{
-      role: 'test',
-      rule: 'must_remain_green',
-      baselineFailureIdentifiers: [],
-      description: 'test passed at baseline and must remain green',
-    }],
   };
 }
 
@@ -292,7 +286,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('5 — preserves immutable attempt evidence and raw coverage without vetoing independent review', async () => {
+  it('5 — preserves immutable attempt evidence; a nonzero exit rejects the reviewer pass and the later zero exit accepts it', async () => {
     const root = temporaryRoot('item-5');
     const projectDir = join(root, 'project');
     const stateRoot = join(root, 'state');
@@ -325,7 +319,7 @@ describe('engine self-collision after-state replays and controls', () => {
       }),
     });
     const currentRegression = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(currentRegression).toMatchObject({ pass: true, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified', exitCode: 1 })]) });
+    expect(currentRegression).toMatchObject({ pass: false, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified', exitCode: 1 })]) });
     const immutableFailure = readFileSync(runRecordPath(created.runDirPath, failed!.immutablePath!), 'utf-8');
     const second = {
       index: 2,
@@ -339,7 +333,7 @@ describe('engine self-collision after-state replays and controls', () => {
       recordedAt: new Date().toISOString(),
     })}\n`);
     const stale = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(stale).toMatchObject({ pass: true, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
+    expect(stale).toMatchObject({ pass: false, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
 
     seedAttemptValidation(projectDir, created.runId, validationBaseline(projectDir).results.map(result => ({ ...result, state: 'passed', exitCode: 0, failureIdentity: 'none', failureIdentifiers: [], failureCount: 0 })));
     const passing = await recordGateValidationDelta(projectDir, created.runId, 'qa', {

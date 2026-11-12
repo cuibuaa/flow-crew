@@ -106,8 +106,8 @@ never authorize destructive restoration.
 Project validation owns dependency preparation. Each configured validation batch
 installs from the current project lockfiles with the discovered package manager's
 frozen install command before running checks; preparation failures stop the batch.
-Setup captures the target baseline. The ready record fixes comparison commands and
-results, not the installed dependency set:
+Setup captures the target baseline. The ready record fixes the declared commands,
+not the installed dependency set:
 live gates and settlement prepare from the run's current lockfiles through the same
 [validation owner](../src/project-validation.ts).
 

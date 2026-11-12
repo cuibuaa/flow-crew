@@ -555,7 +555,7 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 export interface GateVerdict {
   findings?: import('./scoped-audit-repair.js').FindingAssessment;
   validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'command' | 'args' | 'env' | 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed' | 'sourceBound' | 'totals' | 'testsRun' | 'failureCount'>
-    & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: string; disposition?: 'caused_by_change' | 'already_failing' | 'environment' | 'unknown'; measurement: import('./project-validation.js').ValidationMeasurement }>;
+    & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: string; measurement: import('./project-validation.js').ValidationMeasurement }>;
   pass: boolean;
   reason?: string;
   repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };

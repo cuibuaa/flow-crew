@@ -40,12 +40,6 @@ export function writeReadySetupRecord(
       failureIdentifiers: [],
       failureIdentity: 'none' as const,
     }],
-    gateCriteria: [{
-      role: 'build' as const,
-      rule: 'must_remain_green' as const,
-      baselineFailureIdentifiers: [],
-      description: 'Fixture build must remain green',
-    }],
   };
   mkdirSync(dirname(readyRecordPath), { recursive: true });
   writeFileSync(readyRecordPath, `${JSON.stringify({

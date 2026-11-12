@@ -240,6 +240,8 @@ describe('scheduler owns validation after author settlement', () => {
     const ledger = readEvidence(runDir(root, final.runId));
     const records = ledger.filter(entry => entry.kind === 'validation');
     expect(records).toHaveLength(2); expect(new Set(records.map(entry => entry.treeHash)).size).toBe(2);
+    // The first tree exits nonzero, so the independent pass is rejected and repair runs; the second exits 0.
+    expect(records.map(entry => entry.pass)).toEqual([false, true]);
     for (const record of records) {
       expect(record.executions).toHaveLength(1);
       const author = ledger.find(entry => entry.kind === 'attempt' && entry.stageId === record.stageId && entry.attemptIndex === record.attemptIndex)!;

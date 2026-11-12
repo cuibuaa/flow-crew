@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
@@ -108,59 +107,24 @@ describe('direct workflow', () => {
     }
   });
 
-  it('accepts independent review with a failed command marked unverified without inferring an uncited repair', async () => {
+  // A nonzero exit never completes a run, whatever the base was: spec/validation-ownership.test.ts
+  // ('exit-code-only: refuses terminal acceptance for a nonzero final tree') and ('author and repair end first;
+  // each tree has one execution') hold the failing side; here the passing record is consumed without a rerun.
+  it('consumes the engine record of a passing attempt without a gate rerun', async () => {
     const task = brief('outputs:\n  - docs/report.md');
     const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
     const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     writeFileSync(readyPath, JSON.stringify(ready));
     writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
-    for (const args of [['init', '-q'], ['config', 'user.name', 'Fixture'], ['config', 'user.email', 'fixture@example.invalid'], ['add', '.'], ['commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, fixtureRoot);
-    const calls: string[] = [];
-    const receipts: string[] = [];
-    const final = await runDirect(task, calls, false, (prompt, _role, opts) => {
-      if (opts.stageId === 'implement') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
-      if (opts.stageId === 'repair') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
-      if (opts.stageId === 'review') {
-        expect(prompt).toContain('evidence-ledger.jsonl');
-        expect(prompt).toContain('change.diff');
-        const ledger = readEvidence(opts.runDir);
-        const validation = ledger.filter(entry => entry.kind === 'validation').at(-1)!;
-        receipts.push(String(validation.sequence));
-
-      }
-    });
-    expect(final.status, final.failureReason).toBe('complete');
-    expect(calls).toEqual(['implement', 'review']);
-    expect(receipts).toHaveLength(1);
-    expect(final.validation).toEqual([expect.objectContaining({ exitCode: 1, measurement: 'unverified' })]);
-  });
-
-  // A no-regression receipt can still carry commands that failed or never ran
-  // (a red baseline that stays red); only passing commands make a rerun redundant.
-  it.each([
-    { state: 'passed', probe: 'process.exit(0);\n', rerunAdvised: false },
-    { state: 'failed', probe: 'process.exit(1);\n', rerunAdvised: true },
-  ])('consumes recorded commands without a gate rerun when the attempt is $state', async ({ state, probe, rerunAdvised }) => {
-    const task = brief('outputs:\n  - docs/report.md');
-    const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
-    const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
-    ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
-    if (state === 'failed') {
-      ready.validationBaseline.results[0] = { ...ready.validationBaseline.results[0], state: 'failed', exitCode: 1, failureIdentity: 'unknown' };
-      ready.validationBaseline.gateCriteria[0] = { role: 'build', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Fixture build failed at baseline' };
-    }
-    writeFileSync(readyPath, JSON.stringify(ready));
-    writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
     const prompts: string[] = [];
     const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
     expect(final.status, final.failureReason).toBe('complete');
-    if (state === 'failed') expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
+    expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)).toMatchObject({ pass: true, resourceState: 'complete' });
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain('evidence-ledger.jsonl');
     expect(prompts[0]).toContain('change.diff');
     expect(prompts[0]).toContain('decisions consume its tree-bound results without rerunning the suite');
-
   });
 
   it('cannot accept a missing declared output even when the reviewer accepts', async () => {

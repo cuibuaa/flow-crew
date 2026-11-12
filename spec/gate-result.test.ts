@@ -59,7 +59,7 @@ function writeVerdict(verdict: Record<string, unknown>): string {
 
 function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = true, validationVersion?: number): void {
   const baselineBytes = JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: {
-    version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [{ role: 'test', command: 'fixture', args: [], display: 'npm run test' }], missingRoles: [] }, results: [], gateCriteria: [],
+    version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [{ role: 'test', command: 'fixture', args: [], display: 'npm run test' }], missingRoles: [] }, results: [],
   } });
   writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), baselineBytes);
   const reason = state === 'unresolved'
@@ -319,7 +319,6 @@ describe('stage group settlement boundaries', () => {
         commands: [{ role: 'test', command: process.execPath, args: ['-e', 'process.exit(0)'], display: 'fixture test' }] },
       results: [{ role: 'test', display: 'fixture test', state: 'passed', exitCode: 0,
         durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'none' }],
-      gateCriteria: [],
     };
     writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), JSON.stringify({
       version: 1, source: 'ship-setup-ready-record', baseline,
@@ -379,7 +378,6 @@ describe('validation at the review boundary', () => {
         commands: [{ role: 'test', command: process.execPath, args: ['-e', 'process.exit(1)'], display: 'opaque validation' }] },
       results: [{ role: 'test', display: 'opaque validation', state: 'passed', exitCode: 0,
         durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'none' }],
-      gateCriteria: [],
     };
     vi.spyOn(gateValidation, 'snapshotShipSetupValidationBaseline').mockImplementation((_project, _brief, directory) => {
       const artifact: gateValidation.RunValidationBaselineArtifact = {

@@ -410,7 +410,12 @@ describe('ship-preflight validation baseline fact', () => {
     expect(result.report.validationBaseline.execution).toBe('skipped');
     expect(result.report.validationBaseline.discovery.commands.map(command => command.role)).toEqual(['build', 'test', 'lint']);
     expect(result.report.validationBaseline.results.every(result => result.state === 'unverified')).toBe(true);
-    expect(result.report.validationBaseline.gateCriteria).toEqual([]);
+    expect(result.report.validationBaseline).not.toHaveProperty('gateCriteria');
+    // One advisory states the single rule; no per-command rule lines remain.
+    const output = new Capture();
+    await cmdShipPreflightWithDeps(['ship-preflight'], commonDeps({ stdout: output.writer }));
+    expect(output.value.match(/^ {2}Advice: /gm)).toHaveLength(1);
+    expect(output.value).not.toMatch(/^ {2}gate \w+:/m);
   });
 });
 

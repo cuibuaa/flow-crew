@@ -36,7 +36,6 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
       commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' } }],
     });
     expect(testResult(baseline)).toMatchObject({ exitCode: 0, failureIdentity: 'unknown', identityOwner: 'runner-json', reason: expect.stringContaining('partial') });
-    expect(baseline.gateCriteria).toEqual([]);
     expect(evaluateValidationDelta(undefined, baseline.results)[0].state).toBe('verified');
     expect(evaluateValidationDelta(baseline, baseline.results)[0].state).toBe('verified');
   });

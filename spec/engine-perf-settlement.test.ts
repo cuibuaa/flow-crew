@@ -249,6 +249,5 @@ describe('mixed language validation retains all measured commands', () => {
     const otherRoles = baseline.results.filter(result => result.role !== 'test');
     expect(evaluateValidationDelta(baseline, [...otherRoles, js]).filter(result => result.state === 'unverified')).toHaveLength(1);
     expect(evaluateValidationDelta(baseline, [...otherRoles, js, { ...js, display: 'different test command' }]).filter(result => result.state === 'unverified')).toHaveLength(1);
-    expect(baseline.gateCriteria).toEqual([]);
   });
 });

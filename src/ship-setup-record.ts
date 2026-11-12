@@ -5,7 +5,6 @@ import type {
   ProjectValidationBaseline,
   ValidationCommand,
   ValidationCommandResult,
-  ValidationGateCriterion,
   ValidationRole,
 } from './project-validation.js';
 import { fcGlobalDir } from './store.js';
@@ -16,9 +15,6 @@ const RESULT_STATES = new Set<string>([
 ]);
 const FAILURE_IDENTITIES = new Set<ValidationCommandResult['failureIdentity']>(['known', 'unknown', 'none']);
 const FAILURE_EVIDENCE = new Set<NonNullable<ValidationCommandResult['failureEvidence']>>(['complete', 'partial']);
-const GATE_RULES = new Set<ValidationGateCriterion['rule']>([
-  'must_remain_green', 'no_regression_from_baseline', 'baseline_unresolved', 'not_configured',
-]);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -78,26 +74,6 @@ function validResult(value: unknown): value is ValidationCommandResult {
   return hasFailureFacts && typeof item.reason === 'string' && item.reason.trim().length > 0;
 }
 
-function validCriterion(value: unknown): value is ValidationGateCriterion {
-  const item = record(value);
-  const shapeValid = Boolean(item
-    && role(item.role)
-    && typeof item.rule === 'string'
-    && GATE_RULES.has(item.rule as ValidationGateCriterion['rule'])
-    && stringArray(item.baselineFailureIdentifiers)
-    && typeof item.description === 'string'
-    && (item.baselineFailureCount === undefined
-      || (Number.isSafeInteger(item.baselineFailureCount) && (item.baselineFailureCount as number) >= 0)));
-  if (!shapeValid || !item) return false;
-  if (item.baselineFailureEvidence === undefined) return true;
-  if (typeof item.baselineFailureEvidence !== 'string'
-      || !FAILURE_EVIDENCE.has(item.baselineFailureEvidence as NonNullable<ValidationGateCriterion['baselineFailureEvidence']>)
-      || item.rule !== 'no_regression_from_baseline') return false;
-  return item.baselineFailureEvidence !== 'partial'
-    || (item.baselineFailureIdentifiers as string[]).length > 0
-    || item.baselineFailureCount !== undefined;
-}
-
 function validBaseline(value: unknown, canonicalTarget: string): value is ProjectValidationBaseline {
   const baseline = record(value);
   const discovery = record(baseline?.discovery);
@@ -111,16 +87,8 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
       || !Array.isArray(discovery.missingRoles)
       || !discovery.missingRoles.every(role)) return false;
   const rawResults = baseline.results;
-  const rawCriteria = baseline.gateCriteria;
-  if (!Array.isArray(rawResults) || !Array.isArray(rawCriteria)) return false;
-  const results = rawResults.filter(validResult);
-  const criteria = rawCriteria.filter(validCriterion);
-  if (results.length !== rawResults.length || criteria.length !== rawCriteria.length) return false;
-  return results.every((result) => {
-    const criterion = criteria.find(candidate => candidate.role === result.role && (candidate.display === undefined || candidate.display === result.display));
-    if (!criterion || result.failureEvidence === undefined && criterion.baselineFailureEvidence === undefined) return true;
-    return result.failureEvidence === criterion?.baselineFailureEvidence;
-  });
+  // Records from older versions may still carry a causal-criteria list; it decides nothing and is ignored.
+  return Array.isArray(rawResults) && rawResults.every(validResult);
 }
 
 /** SHA-256 identity of the exact admitted brief bytes. */

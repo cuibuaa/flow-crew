@@ -702,7 +702,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
       role: 'test', state: 'unverified', failureIdentity: 'unknown',
     }));
-    expect(record.validationBaseline.gateCriteria).toEqual([]);
   });
 
   it('keeps declared commands without inferring additional commands from a second language', async () => {
@@ -718,7 +717,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state).toBe('ready');
     expect(report.validationBaseline?.discovery.commands.map(command => command.display)).toEqual(['npm run build', 'npm run test', 'npm run lint']);
     expect(runner).not.toHaveBeenCalled();
-    expect(report.validationBaseline?.gateCriteria).toEqual([]);
   });
 
   it.each([
@@ -732,7 +730,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report).toMatchObject({ state: 'ready', validationBaseline: {
       results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unverified',
         failureIdentity: 'unknown', failureIdentifiers: [] })]),
-      gateCriteria: [],
     } });
     expect(runner).not.toHaveBeenCalled();
   });
@@ -820,7 +817,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
         results: [
           expect.objectContaining({ role: 'test', state: 'unverified' }),
         ],
-        gateCriteria: [],
       },
     });
     expect(baseline).not.toHaveBeenCalled();

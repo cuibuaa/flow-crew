@@ -47,8 +47,8 @@ const result = await request;
 process.send({type:'complete', result});
 process.disconnect();
 `);
-  const child = spawn(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'), path, JSON.stringify(input)], {
-    cwd: directory, env: { ...process.env, FC_HOME: fcGlobalDir() }, timeout: 30_000,
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), path, JSON.stringify(input)], {
+    cwd: directory, env: { ...process.env, HOME: directory, FC_HOME: fcGlobalDir() }, timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   children.push(child);
@@ -83,8 +83,8 @@ const result=await runProjectCommand({role:'test',command:process.execPath,args:
   display:'chosen interruption',cwd:${JSON.stringify(directory)},timeoutMs:30000,abortSignal:control.signal});
 console.log(JSON.stringify({returned:true,exitCode:result.exitCode,unfinished:result.unfinished}));
 `);
-    const child = spawn(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'), path], {
-      cwd: directory, env: { ...process.env, FC_HOME: fcGlobalDir() }, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'],
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), path], {
+      cwd: directory, env: { ...process.env, HOME: directory, FC_HOME: fcGlobalDir() }, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'],
     });
     children.push(child);
     let stdout = '', stderr = '';

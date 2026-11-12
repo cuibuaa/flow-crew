@@ -33,11 +33,6 @@ function baseline(projectDir: string): ProjectValidationBaseline {
       durationMs: 1, output: '', failureCount: 1,
       failureIdentifiers: ['tests/test_one.py::test_known'], failureIdentity: 'known',
     }],
-    gateCriteria: [{
-      role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 1,
-      baselineFailureIdentifiers: ['tests/test_one.py::test_known'],
-      description: 'test may not regress from the recorded identity',
-    }],
   };
 }
 
@@ -75,7 +70,6 @@ describe('ship-setup ready-record baseline reader', () => {
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toEqual(item.validationBaseline);
     expect(item.validationBaseline.results[0].failureEvidence).toBeUndefined();
-    expect(item.validationBaseline.gateCriteria[0].baselineFailureEvidence).toBeUndefined();
     expect(readShipSetupReadyValidationBaseline(item.projectDir, `${item.brief}\n`, item.globalRoot))
       .toBeUndefined();
   });
@@ -87,22 +81,17 @@ describe('ship-setup ready-record baseline reader', () => {
     result.failureIdentity = 'unknown';
     result.reason = 'Failure identity is unavailable because the non-TAP output format is not recognized';
     delete result.failureCount;
-    item.validationBaseline.gateCriteria[0].baselineFailureIdentifiers = [];
-    delete item.validationBaseline.gateCriteria[0].baselineFailureCount;
-    item.validationBaseline.gateCriteria[0].description = `test remains unresolved. ${result.reason}`;
     writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
 
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toEqual(item.validationBaseline);
   });
 
-  it('round-trips partial known evidence and its matching gate marker', () => {
+  it('round-trips partial known evidence', () => {
     const item = fixture();
     const result = item.validationBaseline.results[0];
     result.failureEvidence = 'partial';
     result.reason = 'Failure identity was recovered from retained lines after output truncation';
-    item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
-    item.validationBaseline.gateCriteria[0].description = 'retained identities are a lower bound';
     writeFileSync(item.recordPath, `${JSON.stringify(item.record)}\n`, 'utf-8');
 
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
@@ -112,18 +101,12 @@ describe('ship-setup ready-record baseline reader', () => {
   it.each([
     ['partial result without a cause', (item: ReturnType<typeof fixture>) => {
       item.validationBaseline.results[0].failureEvidence = 'partial';
-      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
-    }],
-    ['result and criterion evidence mismatch', (item: ReturnType<typeof fixture>) => {
-      item.validationBaseline.results[0].failureEvidence = 'complete';
-      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
     }],
     ['evidence marker on an unknown result', (item: ReturnType<typeof fixture>) => {
       const result = item.validationBaseline.results[0];
       result.failureIdentity = 'unknown';
       result.failureEvidence = 'partial';
       result.reason = 'unavailable';
-      item.validationBaseline.gateCriteria[0].baselineFailureEvidence = 'partial';
     }],
   ])('rejects inconsistent failure evidence: %s', (_label, mutate) => {
     const item = fixture();

@@ -41,7 +41,7 @@ export function reportRunProcessProgress(projectDir: string, runId: string): voi
  * Deleting the boot restriction alone cannot exclude orphan writers. The pipe
  * gate closes the spawn/publication crash window, including raw-command
  * supervision: ownership lives in the existing engine checkpoint. */
-function spawnRunCommand(command: string, args: string[], options: SpawnOptions, supervise = false): ChildProcess {
+function spawnRunCommand(command: string, args: string[], options: SpawnOptions, supervise = false, priority?: number): ChildProcess {
   const owner = runOwner.getStore();
   if ((!owner && !supervise) || process.platform === 'win32') return spawn(command, args, options);
   if (!Array.isArray(options.stdio)) throw new Error('RUN_PROCESS_STDIO: owned commands require explicit descriptors');
@@ -76,7 +76,7 @@ function spawnRunCommand(command: string, args: string[], options: SpawnOptions,
           gate.end('exec\n');
         } catch { gate.end(); child.kill('SIGTERM'); }
       });
-      gate.write('start\n');
+      gate.write(priority === undefined ? 'start\n' : `start ${priority}\n`);
     } else gate.end('start\n');
   } catch (error) {
     gate.end();
@@ -510,7 +510,10 @@ def stop(signum, frame):
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 gate = os.fdopen(3, 'r+b', buffering=0)
-if gate.readline() != b'start\n': sys.exit(125)
+start = gate.readline().split()
+if start[:1] != [b'start']: sys.exit(125)
+# A niceness increment, as nice(1) applies it, without needing that binary on PATH.
+if len(start) > 1: os.nice(int(start[1]))
 reader, writer = os.pipe()
 primary = os.fork()
 if primary == 0:
@@ -555,11 +558,12 @@ if result < 0:
 sys.exit(result)
 `;
 
-export function spawnOwnedCommand(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) {
+export function spawnOwnedCommand(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv; priority?: number }) {
   const environment = commandEnvironment(options.env);
   let child: ChildProcess;
   try {
-    child = spawnRunCommand(command, args, { ...options, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }, process.platform === 'linux');
+    const { priority, ...spawnOptions } = options;
+    child = spawnRunCommand(command, args, { ...spawnOptions, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }, process.platform === 'linux', priority);
   } catch (error) { environment.cleanup(); throw error; }
   const retired = new Promise<void>(resolve => child.once('close', () => resolve()));
   const stop = (): Promise<void> => {

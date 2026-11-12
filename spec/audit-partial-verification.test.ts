@@ -73,7 +73,6 @@ describe('partial failure evidence audit', () => {
 
     const baseline = await baselineFor({ exitCode: 1, stdout: output }, { ids: [identifier], complete: false });
     const result = testResult(baseline);
-    const criterion = baseline.gateCriteria.find(({ role }) => role === 'test');
 
     expect(result).toMatchObject({
       state: 'failed',
@@ -83,7 +82,6 @@ describe('partial failure evidence audit', () => {
       failureCount: 1,
       reason: expect.stringContaining('partial'),
     });
-    expect(criterion).toBeUndefined();
     expect(testDelta(baseline, result)).toMatchObject({ state: 'unverified' });
   });
 
@@ -183,7 +181,6 @@ describe('partial failure evidence audit', () => {
     for (const fixture of cases) {
       const baseline = await baselineFor(fixture.response);
       const result = testResult(baseline);
-      const criterion = baseline.gateCriteria.find(({ role }) => role === 'test');
       expect(result, fixture.label).toMatchObject({
         failureIdentity: 'unknown',
         failureIdentifiers: [],
@@ -191,7 +188,6 @@ describe('partial failure evidence audit', () => {
       });
       expect(result.failureCount, fixture.label).toBeUndefined();
       expect(result.failureEvidence, fixture.label).toBeUndefined();
-      expect(criterion, fixture.label).toBeUndefined();
     }
   });
 
@@ -263,19 +259,10 @@ describe('partial failure evidence audit', () => {
 
     const legacy = structuredClone(partial);
     delete testResult(legacy).failureEvidence;
-    // Older receipts carried causal criteria; readers retain their consistency
-    // checks without generating these criteria for new facts.
+    // Older receipts carried causal criteria; readers ignore them and decide nothing from them.
     legacy.gateCriteria = [{ role: 'test', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Historical criterion' }];
     writeRecord(legacy);
     expect(readShipSetupReadyValidationBaseline(canonicalProject, brief, globalRoot)).toEqual(legacy);
-
-    const mismatch = structuredClone(partial);
-    mismatch.gateCriteria = [{ role: 'test', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Historical criterion' }];
-    const mismatchCriterion = mismatch.gateCriteria.find(({ role }) => role === 'test');
-    if (!mismatchCriterion) throw new Error('portable baseline omitted its test criterion');
-    mismatchCriterion.baselineFailureEvidence = 'complete';
-    writeRecord(mismatch);
-    expect(readShipSetupReadyValidationBaseline(canonicalProject, brief, globalRoot)).toBeUndefined();
 
     const causeless = structuredClone(partial);
     delete testResult(causeless).reason;

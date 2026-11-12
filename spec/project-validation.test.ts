@@ -193,7 +193,6 @@ describe('configuration-driven project validation baseline', () => {
       projectDir: root,
       discovery: { state: 'configured', configPath: `${root}/Makefile`, commands: [], missingRoles: ['build', 'lint'] },
       results: [unconfigured('build'), red, unconfigured('lint')],
-      gateCriteria: [],
     } satisfies ProjectValidationBaseline;
 
     const unchanged = evaluateValidationDelta(baseline, [unconfigured('build'), red, unconfigured('lint')]);
@@ -214,7 +213,6 @@ describe('configuration-driven project validation baseline', () => {
       projectDir: root,
       discovery: { state: 'partial', configPath: 'fixture', commands: [], missingRoles: [...roles] },
       results: roles.map(absent),
-      gateCriteria: [],
     } satisfies ProjectValidationBaseline;
     expect(evaluateValidationDelta(baseline, roles.map(absent)).map((entry) => entry.state))
       .toEqual(['unverified', 'unverified', 'unverified']);
@@ -282,7 +280,6 @@ describe('configuration-driven project validation baseline', () => {
         result('test', 'failed', ['spec/existing.test.ts'], 1),
         result('lint', 'passed'),
       ],
-      gateCriteria: [],
     } satisfies ProjectValidationBaseline;
 
     const improved = evaluateValidationDelta(baseline, [
@@ -337,7 +334,6 @@ describe('configuration-driven project validation baseline', () => {
     });
     if (!test?.reason) throw new Error('unknown failure cause was not recorded');
     expect(test?.failureCount).toBeUndefined();
-    expect(baseline.gateCriteria).toEqual([]);
   });
 
   it('keeps incidental output opaque while declared structured totals own identity', async () => {
@@ -369,6 +365,5 @@ describe('configuration-driven project validation baseline', () => {
       expect.objectContaining({ role: 'lint', state: 'failed', exitCode: 127 }),
     ]);
     expect(baseline.results.every((result) => result.reason?.includes('No declared structured reporter'))).toBe(true);
-    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
   });
 });

@@ -35,6 +35,7 @@ import {
 } from './orchestrator-rpc.js';
 import {
   runProjectValidationBaseline,
+  VALIDATION_ADVICE,
   projectValidationResult,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
@@ -833,9 +834,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     const exit = result.exitCode === undefined ? '' : ` exit=${result.exitCode}`;
     writer.write(`  ${result.role}: ${projectValidationResult(result).state.toUpperCase()}${exit}${result.display ? ` — ${result.display}` : ''}${result.reason ? ` — ${result.reason}` : ''}\n`);
   }
-  for (const criterion of report.validationBaseline.gateCriteria) {
-    writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);
-  }
+  if (report.validationBaseline.discovery.commands.length) writer.write(VALIDATION_ADVICE);
 }
 
 export function shipPreflightUsage(): string {

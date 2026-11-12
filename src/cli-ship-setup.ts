@@ -9,6 +9,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { briefDeclarationFailures } from './brief-preflight.js';
 import {
   runProjectValidationBaseline,
+  VALIDATION_ADVICE,
   projectValidationResult,
   parseBriefValidationCommands,
   unmeasured,
@@ -1286,9 +1287,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
     for (const result of report.validationBaseline.results) {
       writer.write(`  ${result.role}: ${unmeasured(result) ? 'UNVERIFIED' : projectValidationResult(result).state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
     }
-    for (const criterion of report.validationBaseline.gateCriteria) {
-      writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);
-    }
+    if (report.validationBaseline.discovery.commands.length) writer.write(VALIDATION_ADVICE);
     writer.write(`Ready record: ${report.readyRecordPath}\n`);
     return;
   }

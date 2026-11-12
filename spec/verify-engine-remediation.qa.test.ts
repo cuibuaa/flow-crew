@@ -128,7 +128,7 @@ afterEach(() => {
 
 describe('independent engine-remediation verification', () => {
 
-  it('records and consumes the validation delta through a completed scheduler gate', { timeout: 20_000 }, async () => {
+  it('records the nonzero validation exit through a completed scheduler gate and rejects the reviewer pass', { timeout: 20_000 }, async () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     const globalRoot = join(root, 'fc-home');
@@ -184,11 +184,12 @@ describe('independent engine-remediation verification', () => {
       attemptIndex: 1,
       executionId: expect.any(String),
       immutablePath: expect.any(String),
-      delta: expect.arrayContaining([{ role: 'build', display: 'node -e process.exit(0)', state: 'unverified', reason: 'Command unverified; independent gate owns disposition', newFailureIdentifiers: [] }]),
+      delta: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unverified', newFailureIdentifiers: [] })]),
     });
     expect(existsSync(runRecordPath(runDirectory, delta.immutablePath))).toBe(true);
+    // The probe exits 1 on the reviewed tree: the model's pass cannot stand against the engine's record.
     expect(readGateEvaluation(projectDir, 'qa', final.runId)).toMatchObject({
-      pass: true,
+      pass: false,
       validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]),
     });
     expect({

@@ -90,7 +90,7 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
     ? (metadata as Record<string, unknown>).validation : undefined, runRecordPath(base, 'task_brief.md'));
   if (declaration.error) throw new Error(declaration.error);
   const baseline: ProjectValidationBaseline = admitted ?? { version: 1, execution: 'skipped', projectDir,
-    discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [], gateCriteria: [] };
+    discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [] };
   if (baseline.discovery.state === 'unknown' && declaration.commands.length) throw new Error(baseline.discovery.reason ?? 'Validation declarations conflict');
   const baseCommit = projectCommit(projectDir);
   const artifact: RunValidationBaselineArtifact = { version: 1, capturedAt: new Date().toISOString(),

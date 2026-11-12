@@ -28,9 +28,9 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
 
 ## You bring the problem. It brings the rigor.
 
-- **Checks before opinions.** For runs with a setup baseline, engine-owned configured validation settles against it
-  before every gate review. Recorded regressions go straight to admitted repair; reviewers cannot approve them.
-  Unresolved validation stops review.
+- **Checks before opinions.** The engine runs the brief's declared validation once per final tree, before every gate
+  review. Any nonzero exit returns the work to repair and reviewers cannot approve it; a run completes only
+  when every declared command exits 0. Unfinished validation is a resource state the engine reruns, never a review.
 - **Independent gates, bounded repairs.** Authors have downstream independent gates. Rejected work returns through
   admitted repairs to the same gates within a configured budget. Exhaustion stops work instead of repeating the whole plan.
 - **Distinct, honest outcomes.** `complete` records engineering completion or a completed instrument loop; project
