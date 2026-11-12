@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { onTestFinished, vi } from 'vitest';
@@ -34,9 +34,10 @@ export function daemonClosed(child: ChildProcess): Promise<void> {
   });
 }
 
-/** Wait for close (including drained output), with runner-owned hang protection. */
-export async function daemonCommand(command: string, args: string[], options: SpawnOptions) {
-  const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+/** Wait for close (including drained output), with runner-owned hang protection.
+ * The caller starts the isolated probe; this only collects its result. */
+export async function daemonCommand(child: ChildProcess) {
+  child.stdin?.end();
   let stdout = '', stderr = '';
   child.stdout!.on('data', chunk => { stdout += String(chunk); });
   child.stderr!.on('data', chunk => { stderr += String(chunk); });

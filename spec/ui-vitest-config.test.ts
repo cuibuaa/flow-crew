@@ -101,8 +101,10 @@ describe("H-M7-ui-cwd-discovery", () => {
         recursive: true,
       });
       mkdirSync(join(archiveRoot, "spec", "test-support"), { recursive: true });
-      copyFileSync(join(PROJECT_ROOT, "spec", "test-support", "policy-runtime.ts"),
-        join(archiveRoot, "spec", "test-support", "policy-runtime.ts"));
+      for (const support of ["policy-runtime.ts", "stage-filesystem.ts"]) {
+        copyFileSync(join(PROJECT_ROOT, "spec", "test-support", support),
+          join(archiveRoot, "spec", "test-support", support));
+      }
       cpSync(join(UI_ROOT, "src"), join(archiveUiRoot, "src"), { recursive: true });
       symlinkSync(
         ROOT_DEPENDENCIES,

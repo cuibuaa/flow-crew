@@ -29,9 +29,3 @@ vi.mock('../../src/scheduler-heartbeat.js', async (importOriginal) => {
 vi.mock('node:os', async importOriginal => ({
   ...await importOriginal<typeof import('node:os')>(), loadavg: () => [0, 0, 0],
 }));
-
-// Native SQLite commits have their own sync path outside node:fs.
-vi.mock('node:sqlite', async importOriginal => {
-  const { stageSqlite } = await import('./stage-filesystem.js');
-  return stageSqlite(await importOriginal<typeof import('node:sqlite')>());
-});

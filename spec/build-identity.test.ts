@@ -182,10 +182,10 @@ describe('one backend and UI build identity', () => {
     ].join('\n'));
     const { env } = validationEnvironment(scratch, process.env);
     const build = async () => {
-      const result = await daemonCommand(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
+      const result = await daemonCommand(spawn(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
         cwd: root,
         env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME },
-      });
+      }));
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       return assertDistFresh(root);
     };
@@ -419,10 +419,10 @@ describe('one backend and UI build identity', () => {
     roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(outputRoot).digest('hex').slice(0, 16)}`));
     for (const mode of ['test', 'development', 'private']) {
       const destination = mode === 'private' ? outputRoot : root;
-      const result = await daemonCommand(process.execPath, ['--import', 'tsx', 'scripts/build.ts', ...(mode === 'private' ? [destination] : [])], {
+      const result = await daemonCommand(spawn(process.execPath, ['--import', 'tsx', 'scripts/build.ts', ...(mode === 'private' ? [destination] : [])], {
         cwd: root,
         env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'home/.fc'), NODE_ENV: mode },
-      });
+      }));
       expect(result.status, result.stderr || result.stdout).toBe(0);
       expect(readFileSync(join(destination, 'ui/dist/index.html'), 'utf8')).toBe('production');
       expect(assertDistFresh(root, join(destination, 'dist')).ui?.outputs).toHaveLength(1);
@@ -445,8 +445,8 @@ describe('one backend and UI build identity', () => {
       chmodSync(npm, 0o755);
       if (shape !== 'package') { mkdirSync(join(root, 'scripts')); writeFileSync(join(root, 'scripts/build.ts'), 'source'); }
       if (shape === 'source-ui') { mkdirSync(join(root, 'ui')); writeFileSync(join(root, 'ui/package.json'), '{}'); }
-      const result = await daemonCommand(process.execPath, ['-e', hook!], { cwd: root,
-        env: { ...process.env, PATH: bin, HOME: join(root, 'home'), FC_HOME: join(root, 'home/.fc') } });
+      const result = await daemonCommand(spawn(process.execPath, ['-e', hook!], { cwd: root,
+        env: { ...process.env, PATH: bin, HOME: join(root, 'home'), FC_HOME: join(root, 'home/.fc') } }));
       expect(result.status, result.stderr).toBe(0);
       const calls = readdirSync(root).includes('calls.jsonl') ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];
       expect(calls).toEqual(shape === 'package' ? [] : shape === 'source' ? [['run', 'build']] : [['install', '--prefix', 'ui'], ['run', 'build']]);

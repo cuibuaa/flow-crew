@@ -525,7 +525,7 @@ describe('bounded timeout negotiation', () => {
     expect(recorded.stages.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
   });
 
-  it('waits for adapter cancellation settlement before recording child close', { timeout: 5_000 }, async () => {
+  it('waits for adapter cancellation settlement before recording child close', async () => {
     const stageId = 'child_close';
     const { runId, runDirPath } = directRunDir(stageId);
     const clock = new ManualAttemptDeadlineClock();

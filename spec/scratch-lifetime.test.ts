@@ -92,10 +92,10 @@ function retire(citation: string): void {
 }
 
 async function clean(keep = 0): Promise<string> {
-  const result = await daemonCommand(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'clean', '--keep', String(keep)], {
+  const result = await daemonCommand(spawn(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'clean', '--keep', String(keep)], {
     cwd: project,
     env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'control'), PROJECT_DIR: project },
-  });
+  }));
   expect(result.status, result.stderr).toBe(0);
   return result.stdout;
 }
@@ -177,7 +177,7 @@ describe('invocation scratch lifetime without provider calls', () => {
   it('recovers scratch ownership after abrupt process death and retires every payload', async () => {
     const ready = join(root, 'crashed-citation');
     const moduleUrl = new URL('../src/invocation-scratch.ts', import.meta.url).href;
-    const crash = await daemonCommand(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
+    const crash = await daemonCommand(spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
       import { writeFileSync } from 'node:fs';
       import { join } from 'node:path';
       import { createInvocationScratch } from ${JSON.stringify(moduleUrl)};
@@ -189,7 +189,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     `], {
       cwd: project,
       env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'control') },
-    });
+    }));
     expect(crash.signal, crash.stderr).toBe('SIGKILL');
     const citation = readFileSync(ready, 'utf8');
     const payload = realpathSync(citation);

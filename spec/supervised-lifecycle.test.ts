@@ -294,7 +294,7 @@ async function registerBackgroundTask(harness: Harness, project: string, marker:
 }
 
 function runCli(harness: Harness, project: string, cliArgs: string[]) {
-  return daemonCommand(
+  return daemonCommand(spawn(
     process.execPath,
     [distCli, ...cliArgs],
     {
@@ -311,7 +311,7 @@ function runCli(harness: Harness, project: string, cliArgs: string[]) {
         NO_COLOR: '1',
       },
     },
-  );
+  ));
 }
 
 async function showTask(harness: Harness, id: number): Promise<TaskEntry> {

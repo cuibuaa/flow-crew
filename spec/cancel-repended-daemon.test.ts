@@ -173,7 +173,7 @@ async function createHarness(): Promise<Harness> {
 }
 
 function cli(fixture: Harness, args: string[]) {
-  return daemonCommand(process.execPath, [distCli, ...args], {
+  return daemonCommand(spawn(process.execPath, [distCli, ...args], {
     cwd: repositoryRoot, env: { ...fixture.env, HOME: join(fixture.root, 'home'), FC_HOME: fixture.root },
-  });
+  }));
 }
