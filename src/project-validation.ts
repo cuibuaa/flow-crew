@@ -91,12 +91,13 @@ const commandDeclaration = z.object({
 const commandsDeclaration = z.object({ commands: z.object({
   build: commandDeclaration.optional(), test: commandDeclaration.optional(), lint: commandDeclaration.optional(),
 }).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') }).strict();
-// Only a brief states limits; the project's own declaration file stays commands-only.
-// The timeout bound is the largest delay a timer can carry.
-const validationDeclaration = commandsDeclaration.extend({
+// A brief and the project's declaration file state limits alike; a brief's replace the project's field by field.
+// The timeout bound is the largest delay a timer can carry. A brief may state limits alone.
+const limitFields = {
   timeoutMs: z.number().int().positive().max(2 ** 31 - 1).optional(),
   attempts: z.number().int().positive().optional(),
-});
+};
+const validationDeclaration = commandsDeclaration.extend({ commands: commandsDeclaration.shape.commands.optional(), ...limitFields });
 
 const projectCommandDeclaration = commandDeclaration.extend({ rerun: z.object({
   command: argument.refine(value => value.trim().length > 0), args: z.array(argument),
@@ -104,7 +105,7 @@ const projectCommandDeclaration = commandDeclaration.extend({ rerun: z.object({
 }).strict().optional() });
 const projectValidationDeclaration = commandsDeclaration.extend({ commands: z.object({
   build: projectCommandDeclaration.optional(), test: projectCommandDeclaration.optional(), lint: projectCommandDeclaration.optional(),
-}).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') });
+}).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role'), ...limitFields });
 
 /** Fixed model output uses the same command objects as declarations; an empty
  * selection explicitly means no measurement, not a green suite. */
@@ -124,9 +125,9 @@ export function parseValidationCommands(validation: unknown, evidencePathRoot: s
     + parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.code === 'unrecognized_keys'
       ? `unknown ${issue.path.length === 1 && issue.path[0] === 'commands' ? 'role' : 'field'} ${issue.keys.join(', ')}` : issue.message}`).join('; ') };
   return { commands: ROLES.flatMap(role => {
-    const command = parsed.data.commands[role];
+    const command = parsed.data.commands?.[role];
     return command ? [{ role, ...command, evidencePath: `${evidencePathRoot}#validation.commands.${role}` }] : [];
-  }), ...(project ? {} : declaredLimits(parsed.data as ValidationLimits)) };
+  }), ...declaredLimits(parsed.data) };
 }
 
 /** The same declaration parser serves setup and low-level author entry points. */
@@ -143,6 +144,8 @@ export interface ValidationDiscovery {
   configPaths?: string[];
   commands: ValidationCommand[];
   missingRoles: ValidationRole[];
+  /** Limits the project's declaration file states; a brief's replace them field by field. */
+  limits?: ValidationLimits;
   reason?: string;
 }
 
@@ -306,7 +309,7 @@ export function discoverProjectValidation(projectDir: string, fs: ValidationFile
   const commands = parsed.commands.map(command => ({ ...command, display: [command.command, ...command.args].join(' '),
     provenance: { source: 'project' as const, evidencePath: command.evidencePath } }));
   const missingRoles = ROLES.filter(role => !commands.some(command => command.role === role));
-  return { state: missingRoles.length ? 'partial' : 'configured', configPath, commands, missingRoles };
+  return { state: missingRoles.length ? 'partial' : 'configured', configPath, commands, missingRoles, ...(parsed.limits ? { limits: parsed.limits } : {}) };
 }
 
 function argv(command: Pick<ValidationCommand, 'command' | 'args'>): string[] {

@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { engineValidation } from '../src/engine-validation.js';
 import { runProjectCommand, projectValidationResult, parseBriefValidationCommands, parseValidationCommands, type ValidationCommand } from '../src/project-validation.js';
 import * as validationOwner from '../src/project-validation.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, runWorkflow, snapshotShipSetupValidationBaseline } from '../src/scheduler.js';
 import { runDir, fcGlobalDir, readStageStatus } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import * as evidenceOwner from '../src/evidence-ledger.js';
@@ -420,8 +420,37 @@ describe('the project declares its validation limits', () => {
     expect(parseBriefValidationCommands(brief(`{commands: ${command}, attempts: 2}`), 'brief.md').limits).toEqual({ attempts: 2 });
     const none = parseBriefValidationCommands(brief(`{commands: ${command}}`), 'brief.md');
     expect(none.error).toBeUndefined(); expect(none.limits).toBeUndefined();
-    // The project's own declaration file states commands only.
-    expect(parseValidationCommands({ commands: { test: { command: 'node', args: [] } }, timeoutMs: 5 }, 'config/validation.json', true).error).toContain('timeoutMs');
+    // The project's declaration file states the same two limits through the same parser.
+    expect(parseValidationCommands({ commands: { test: { command: 'node', args: [] } }, timeoutMs: 5, attempts: 2 }, 'config/validation.json', true).limits).toEqual({ timeoutMs: 5, attempts: 2 });
+    // A brief may state limits alone; the commands then come from the project.
+    const alone = parseBriefValidationCommands(brief('{timeoutMs: 900000}'), 'brief.md');
+    expect(alone.error).toBeUndefined(); expect(alone.commands).toEqual([]); expect(alone.limits).toEqual({ timeoutMs: 900000 });
+  });
+
+  describe('project and brief limits meet in the run plan', () => {
+    const plan = (projectDeclaration: object | undefined, validation?: string) => {
+      const root = project(), base = join(root, 'run'); mkdirSync(join(root, 'config'), { recursive: true }); mkdirSync(base);
+      if (projectDeclaration) writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: 'node', args: ['check.cjs'] } }, ...projectDeclaration }));
+      return snapshotShipSetupValidationBaseline(root, validation === undefined ? 'Deliver the value.' : brief(validation), base);
+    };
+    it('declared-limits: project limits are used when the brief states none', () => {
+      const result = plan({ timeoutMs: 1_800_000, attempts: 2 });
+      expect(result.limits).toEqual({ timeoutMs: 1_800_000, attempts: 2 });
+      expect(result.baseline.discovery.commands.map(entry => entry.display)).toEqual(['node check.cjs']);
+    });
+    it('declared-limits: a brief limit overrides the project field by field and, alone, keeps the project commands', () => {
+      expect(plan({ timeoutMs: 1_800_000, attempts: 2 }, '{timeoutMs: 5000}').limits).toEqual({ timeoutMs: 5000, attempts: 2 });
+      const both = plan({ timeoutMs: 1_800_000 }, `{commands: ${command}, attempts: 4}`);
+      expect(both.limits).toEqual({ timeoutMs: 1_800_000, attempts: 4 });
+      expect(both.baseline.discovery.commands[0].provenance?.corroboratedBy).toHaveLength(1);
+    });
+    it('declared-limits: limits stated nowhere leave the engine defaults to apply', () => {
+      expect(plan({}).limits).toBeUndefined();
+      expect(plan(undefined, `{commands: ${command}}`).limits).toBeUndefined();
+    });
+    it.each([['timeoutMs', 0], ['timeoutMs', 'slow'], ['attempts', 1.5]])('declared-limits: an invalid project %s %j refuses with the declaration error', (field, value) => {
+      expect(() => plan({ [field]: value })).toThrow(new RegExp(`Invalid project validation configuration at .*Invalid validation declaration at .*${field}`));
+    });
   });
 
   it.each(['concurrency: 8', 'priority: 0', 'validation_concurrency: 8', 'validation_priority: 0'])('declared-limits: a brief cannot set %s', field => {

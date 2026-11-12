@@ -154,8 +154,10 @@ extra fields and control characters refuse parsing. The block may also state the
 limits, both optional positive integers: `timeoutMs` (the time one execution of the whole
 batch may take, shared among its commands; at most 2147483647) and `attempts` (the executions
 of an unfinished batch). A non-number, a non-positive or fractional value, or any other field
-refuses parsing with its name. Absent fields use the engine's `validation_timeout_ms` and
-`validation_attempts`. Concurrency and priority are not brief fields. Without declarations, setup discovers
+refuses parsing with its name. The project's own `config/validation.json` accepts the same two
+fields. Per field, the brief's value wins, else the project's, else the engine's
+`validation_timeout_ms` or `validation_attempts`. A brief may state limits without `commands`;
+the commands then come from the project declaration. Concurrency and priority are not brief fields. Without declarations, setup discovers
 commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
 command selection semantics. Do not replace the full configured suite with a subset.
 The engine validates settled author and repair trees outside author budgets. One completed
@@ -163,7 +165,7 @@ record per content hash supplies every review and gate with direct exits and str
 reporter totals. All zero exits accept validation; any nonzero exit rejects. Unfinished
 executions retry within the declared `attempts` and `timeoutMs` (engine defaults when absent);
 exhaustion parks the run without spending a review or repair round. A suite that needs longer
-than the engine default declares its own `timeoutMs`; the record shows the limits in force. The
+than the engine default declares its own `timeoutMs` (project or brief); the record shows the limits in force. The
 store-wide FIFO uses engine `validation_concurrency` and `validation_priority` (niceness),
 across daemon scheduler processes. Resume reuses completed records and preserves spent resource allowance.
 A completed record is reused under any limits and is never executed again. The record's

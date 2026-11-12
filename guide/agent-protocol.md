@@ -266,7 +266,7 @@ one content-addressed record and reuses every completed result across stages, ga
 
 Engine configuration declares `validation_timeout_ms`, `validation_attempts`,
 `validation_concurrency` and `validation_priority` (Unix niceness adjustment); the brief's
-`validation.timeoutMs` and `validation.attempts` replace the first two for its own run. A store-wide
+`validation.timeoutMs` and `validation.attempts`, else the project's `config/validation.json`, replace the first two. A store-wide
 FIFO coordinates separate daemon scheduler processes. Duplicate requests share their tree's
 owner. Each command gets a share of the remaining batch allowance. An opaque command that
 combines build and tests remains one declared command; its text is never parsed.

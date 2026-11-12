@@ -267,8 +267,6 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
       if (results.kind !== 'validation') throw Error('No validation facts');
       const test = results.executions[0].commands.find(command => command.role === 'test')!;
       expect(test.exitCode).toBe(1);
-      const _review = { commands: [{ role: 'test', display: test.display, disposition: 'caused_by_change',
-        reason: kind === 'cache' ? 'The added cache contract is unmet atop two independent environment failures; not proof of a newly introduced business bug' : 'Worker CPU execution differs from the declared constraint; integration mismatch' }], request_base: [] };
       if (!confirm) return success({ ...verdict(opts) });
       const predicate = `require('fs').readFileSync('resource.txt','utf8')===${JSON.stringify(kind === 'cache' ? 'STATE' : '0-5')}`;
       const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?0:1)`)}`, cwd: root, shell: '/bin/sh' };

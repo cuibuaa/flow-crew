@@ -24,7 +24,7 @@ export interface RunValidationBaselineArtifact {
   capturedAt: string;
   source: 'ship-setup-ready-record' | 'project-declarations' | 'model-selection';
   baseCommit?: string;
-  /** The brief's declared validation limits; absent fields use the engine defaults. */
+  /** The brief's declared validation limits, else the project's; absent fields use the engine defaults. */
   limits?: ValidationLimits;
   baseline: ProjectValidationBaseline;
 }
@@ -93,8 +93,9 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
     discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [] };
   if (baseline.discovery.state === 'unknown' && declaration.commands.length) throw new Error(baseline.discovery.reason ?? 'Validation declarations conflict');
   const baseCommit = projectCommit(projectDir);
+  const limits: ValidationLimits = { ...baseline.discovery.limits, ...declaration.limits };
   const artifact: RunValidationBaselineArtifact = { version: 1, capturedAt: new Date().toISOString(),
-    source: admitted ? 'ship-setup-ready-record' : 'project-declarations', baseCommit, ...(declaration.limits ? { limits: declaration.limits } : {}),
+    source: admitted ? 'ship-setup-ready-record' : 'project-declarations', baseCommit, ...(Object.keys(limits).length ? { limits } : {}),
     // Historical setup measurements are retained for audit, but never decide a new attempt.
     baseline };
   writeFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`);

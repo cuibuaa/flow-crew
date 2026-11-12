@@ -27,8 +27,8 @@ Parser field names are listed exactly.
 |---|---:|---|
 | `default_timeout_ms` | 10800000 | Normal execution budget including wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
 | `stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
-| `validation_timeout_ms` | 60000 | Time one engine validation execution may take, divided among commands; a brief's `validation.timeoutMs` replaces it |
-| `validation_attempts` | 3 | Executions of an unfinished validation batch; a brief's `validation.attempts` replaces it |
+| `validation_timeout_ms` | 60000 | Time one engine validation execution may take, divided among commands; the project's `config/validation.json` or a brief's `validation.timeoutMs` replaces it (brief first) |
+| `validation_attempts` | 3 | Executions of an unfinished validation batch; the project's `config/validation.json` or a brief's `validation.attempts` replaces it (brief first) |
 | `validation_concurrency` | 1 | Distinct trees validated at once across daemon scheduler processes; engine-owned, not a brief field |
 | `validation_priority` | 19 | Unix niceness adjustment of validation commands; engine-owned, not a brief field |
 | `max_iterations` | 5 | Workflow iteration limit; also bounds unfinished slices unless the brief declares `max_continuations` |

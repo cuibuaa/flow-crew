@@ -1,4 +1,5 @@
 {
+  "timeoutMs": 1800000,
   "commands": {
     "build": {
       "command": "npm",
