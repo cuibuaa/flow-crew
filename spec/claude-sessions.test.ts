@@ -1,3 +1,4 @@
+import { controlProcessClock } from './test-support/process-clock.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,9 +26,11 @@ const role: AgentConfig = {
 };
 type Input = Parameters<NonNullable<RunOpts['onInvocationInput']>>[0];
 interface Call { argv: string[]; stdin: string; home?: string; secureSource?: string; hadHistory: boolean }
+let clock: ReturnType<typeof controlProcessClock>;
 let root: string, project: string, directory: string, previousStore: string;
 
 beforeEach(() => {
+  clock = controlProcessClock();
   root = mkdtempSync(join(tmpdir(), 'fc-claude-sessions-'));
   project = join(root, 'project');
   const bin = join(root, 'bin');
@@ -67,7 +70,10 @@ process.stdin.on('end', () => {
   if (fixture.control && resumed) {
     if (fixture.controlIdentity) emit({type:'system',subtype:'init',session_id:fixture.controlIdentity});
     if (fixture.controlRejection) emit({type:'result',is_error:true,error:{param:fixture.controlRejection,message:'synthetic rejected parameter'}});
-    if (fixture.control === 'timeout') { setInterval(() => {}, 1000); return; }
+    if (fixture.control === 'timeout') {
+      if (!fixture.controlIdentity) emit({type:'system',subtype:'init'});
+      setInterval(() => {}, 1000); return;
+    }
     process.exit(fixture.control);
   }
   const sessionId = fixture.nativeId ?? (resumed ? argv[argv.indexOf('--resume') + 1] : '11111111-1111-4111-8111-111111111111');
@@ -81,6 +87,8 @@ process.stdin.on('end', () => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   setFcGlobalDir(previousStore);
   vi.unstubAllEnvs();
   rmSync(root, { recursive: true, force: true });
@@ -93,6 +101,19 @@ function calls(): Call[] {
 }
 function options(extra: Partial<RunOpts> = {}): RunOpts {
   return { stageId: 'work', workDir: project, runDir: directory, timeout_ms: 10_000, ...extra };
+}
+async function controlledExit(prompt: string, control: number | string, extra: Partial<RunOpts>) {
+  let acknowledge!: () => void;
+  const consumed = new Promise<void>(resolve => { acknowledge = resolve; });
+  const pending = new ClaudeAdapter().run(prompt, role, options({ ...extra,
+    timeout_ms: control === 'timeout' ? 2000 : 10_000, onInvocationInput: acknowledge,
+  }));
+  if (control === 'timeout') {
+    // Input capture acknowledges parsing init, including a mismatched identity.
+    await consumed;
+    await clock.advance(2000);
+  }
+  return pending;
 }
 function stage(id: string, extra: Partial<StageConfig> = {}): StageConfig {
   return StageConfigSchema.parse({ id, role: 'coder', adapter: 'claude', scope: [`${id}.ts`], ...extra });
@@ -268,17 +289,16 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
 
   it.each([125, 137, 'timeout'])('does not fall back across control exit %s', async control => {
     scenario({ control });
-    const result = await new ClaudeAdapter().run(DUTIES, role, options({ resumeSessionId: UUID, timeout_ms: control === 'timeout' ? 2000 : 10_000 }));
+    const result = await controlledExit(DUTIES, control, { resumeSessionId: UUID });
     expect(result.exitCode).toBe(control === 'timeout' ? 124 : control);
     expect(calls()).toHaveLength(1);
   });
 
   it.each([125, 137, 'timeout'])('preserves control exit %s despite a mismatched native identity', async control => {
     scenario({ control, controlIdentity: OTHER_UUID });
-    const result = await new ClaudeAdapter().run('Synthetic correction.', role, options({
+    const result = await controlledExit('Synthetic correction.', control, {
       resumeSessionId: UUID, freshSessionPrompt: DUTIES, preserveSession: true,
-      timeout_ms: control === 'timeout' ? 2000 : 10_000,
-    }));
+    });
     expect(result.exitCode).toBe(control === 'timeout' ? 124 : control);
     expect(result.sessionId).toBeUndefined();
     expect(calls()).toHaveLength(1);

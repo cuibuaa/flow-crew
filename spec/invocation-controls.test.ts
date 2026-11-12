@@ -1,9 +1,10 @@
+import { controlProcessClock } from './test-support/process-clock.js';
 import { requestPath, runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execWithStdin, type Adapter } from '../src/adapters/base.js';
 import { appendGuidanceEnvelope, guidanceForExecution } from '../src/guidance.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
@@ -22,15 +23,18 @@ import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
 let root: string, projectDir: string, prior: string;
 beforeEach(() => {
+  controlProcessClock();
   prior = fcGlobalDir(); root = mkdtempSync(join(tmpdir(), 'invocation-controls-'));
   projectDir = join(root, 'project'); mkdirSync(projectDir); setFcGlobalDir(join(root, 'state'));
 });
-afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
 const role = { name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'Fixture system input' };
 function fixture() {
   const run = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['work']);
   return { run, options: { ...run, runDir: run.runDirPath, projectDir, stageId: 'work', role, dependsOn: [], retries: 0,
-    promptTemplate: 'Complete the bounded work.', timeout_ms: 8_000, artifactContract: fixtureArtifactContract('work') } };
+    promptTemplate: 'Complete the bounded work.', timeout_ms: 8_000,
+    deadlineClock: { monotonicNow: () => 0, wallNow: () => Date.now(),
+      setTimer: () => ({}) as ReturnType<typeof setTimeout>, clearTimer: () => {} }, artifactContract: fixtureArtifactContract('work') } };
 }
 
 describe('control reaches the invocation with verified retirement', () => {
@@ -60,14 +64,18 @@ describe('control reaches the invocation with verified retirement', () => {
         return { output: 'done', exitCode: 0, duration_ms: 1 };
       }
       opts.onInvocationInput?.({ systemPrompt: agent.prompt, userPrompt: prompt });
+      const release = join(projectDir, 'release-a');
+      const childA = `const fs=require('node:fs');
+        const watcher=fs.watch('.',()=>{if(fs.existsSync('release-a')){watcher.close();process.exit(0)}});
+        if(fs.existsSync('release-a')){watcher.close();process.exit(0)}`;
       const script = `const {spawn}=require('node:child_process');
         const emit=x=>console.log(JSON.stringify(x));
-        const a=spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),600)'],{stdio:'ignore'});
-        const b=spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),30000)'],{stdio:'ignore'});
+        const a=spawn(process.execPath,['-e',${JSON.stringify(childA)}],{stdio:'ignore'});
+        const b=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
         emit({type:'item.started',item:{id:'long-a',type:'command_execution',command:'long child a'}});
         emit({type:'item.started',item:{id:'long-b',type:'command_execution',command:'long child b'}});
         a.on('close',code=>emit({type:'item.completed',item:{id:'long-a',type:'command_execution',exit_code:code}}));
-        setTimeout(()=>{},30000);`;
+        setInterval(()=>{},1000);`;
       const result = await execWithStdin(process.execPath, ['-e', script], '', { cwd: projectDir, timeout_ms: 5_000,
         abortSignal: opts.abortSignal, execution: { ...opts, onCommandLifecycle: event => {
           opts.onCommandLifecycle?.(event);
@@ -77,13 +85,13 @@ describe('control reaches the invocation with verified retirement', () => {
             source: 'operator', knownStageIds: ['work'], body }).id;
           else try { requestStageCommandInterrupt({ runDir: run.runDirPath, stageId: 'work', reason: body }); }
           catch (error) { interruptError = error; }
+          // Publish guidance before allowing the first completion boundary.
+          if (control === 'guidance') writeFileSync(release, 'complete');
         } }, onChild: ({ pid }) => { providerPid = pid; }, onStdout: (chunk, activity) => activity?.feed(chunk) });
       direct = result;
       return result;
     } };
-    // Leave room for loaded-host startup without injecting scheduler wrap-up
-    // guidance into this command-control proof; the child still has a 5s timeout.
-    const result = await runStage(adapter, { ...options, timeout_ms: 30_000 });
+    const result = await runStage(adapter, options);
     expect(interruptError).toBeUndefined();
     if (control === 'guidance') expect(abortedAtFirstCompletion).toBe(true);
     expect(result.exitCode).toBe(0); expect(calls).toBe(2);

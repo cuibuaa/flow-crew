@@ -26,6 +26,9 @@ import { runValidationCommand } from '../src/project-validation.js';
 import { runAllChecks } from '../src/reality-gate/index.js';
 import { generateRunSummary } from './test-support/run-summary.js';
 
+import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+import { controlProcessClock } from './test-support/process-clock.js';
+
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 
 
@@ -400,18 +403,29 @@ describe('structural engine state protection', () => {
   });
 
   it.skipIf(process.platform !== 'linux')('retires owned descendants before checking stage integrity and keeps retirement within the deadline', async () => {
-    const pidfile = join(project, 'descendant.pid');
-    const result = await withEngineIntegrity(input(), () => execWithStdin(process.execPath, ['-e', `
-      const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
-      require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(c.pid));c.unref();
-    `], '', {cwd:project,timeout_ms:5000,terminationTiming:{graceMs:250,pollMs:10}}));
-    expect(result.exitCode).toBe(0);
-    const pid = readFileSync(pidfile,'utf8');
-    if (existsSync('/proc/'+pid+'/stat')) expect(readFileSync('/proc/'+pid+'/stat','utf8').split(') ')[1].split(' ')[0]).toBe('Z');
-    const descendant = "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)";
-    const timeout = await withEngineIntegrity(input(), () => execWithStdin(process.execPath,['-e', `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>{c.disconnect();c.unref()});`],'',{
-      cwd:project,timeout_ms:500,terminationTiming:{graceMs:1000,pollMs:10}}));
-    expect(timeout.exitCode).toBe(124);expect(timeout.processExitCode).toBe(0);
+    const clock = controlProcessClock();
+    try {
+      const pidfile = join(project, 'descendant.pid');
+      const pendingExit = withEngineIntegrity(input(), () => execWithStdin(process.execPath, ['-e', `
+        const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+        require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(c.pid));c.unref();
+      `], '', {cwd:project,timeout_ms:5000,terminationTiming:{graceMs:250,pollMs:10}}));
+      await clock.waitForTimer(250);
+      await clock.advance(250);
+      const result = await pendingExit;
+      expect(result.exitCode).toBe(0);
+      const pid = readFileSync(pidfile,'utf8');
+      if (existsSync('/proc/'+pid+'/stat')) expect(readFileSync('/proc/'+pid+'/stat','utf8').split(') ')[1].split(' ')[0]).toBe('Z');
+      const descendant = "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)";
+      const pending = withEngineIntegrity(input(), () => execWithStdin(process.execPath,['-e', `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>{c.disconnect();c.unref()});`],'',{
+        cwd:project,timeout_ms:500,terminationTiming:{graceMs:1000,pollMs:10}}));
+      // Escalation is armed by close of the naturally exited leader. Only now
+      // expire the executor deadline while its ignoring descendant is owned.
+      await clock.waitForTimer(1000);
+      await clock.advance(1000);
+      const timeout = await pending;
+      expect(timeout.exitCode).toBe(124);expect(timeout.processExitCode).toBe(0);
+    } finally { vi.restoreAllMocks(); vi.useRealTimers(); }
   });
 
   it('does not confuse independent observer diagnostics with altered canonical records', async () => {
@@ -422,7 +436,8 @@ describe('structural engine state protection', () => {
       await handle.ready;
       await withEngineIntegrity(input(), async () => {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);
-        await new Promise(resolve=>setTimeout(resolve,30));
+        await waitForPathEvent(dirname(runRecordPath(run, 'events.jsonl')), () =>
+          existsSync(runRecordPath(run, 'events.jsonl')) && readFileSync(runRecordPath(run, 'events.jsonl'), 'utf8').includes('scheduler_loop_stalled') ? true : undefined);
       });
       expect(readFileSync(runRecordPath(run,'events.jsonl'),'utf8')).toContain('scheduler_loop_stalled');
     } finally { await handle.stop(); removeSchedulerProcessIdentity(run,process.pid); }

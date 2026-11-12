@@ -2,7 +2,7 @@ import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setImmediate as yieldToProcess } from 'node:timers/promises';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, readRunState, readStageStatus, writeRunState } from '../src/store.js';
@@ -37,6 +37,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  resumeValidation();
   cancel.abort();
   await validation;
 });
@@ -51,6 +52,34 @@ function startAttempt() {
   beginAttemptEvidenceGeneration(run.runDirPath, stageId, attempt.index, attempt.startedAt);
   return status;
 }
+
+function resumeValidation() {
+  try {
+    const pid = Number(readFileSync(join(project, 'ready'), 'utf8').split(':')[0]);
+    if (Number.isSafeInteger(pid) && pid > 0) process.kill(pid, 'SIGCONT');
+  }
+  catch { /* The command may already have closed. */ }
+}
+
+// SIGSTOP makes the observation stable even if the test worker is descheduled
+// between checking /proc and asking the watchdog to sample it.
+async function waitForStoppedValidation() {
+  const pid = Number(readFileSync(join(project, 'ready'), 'utf8').split(':')[0]);
+  while (readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[0] !== 'T') {
+    await yieldToProcess();
+  }
+}
+
+const publishReady = `const fs=require('node:fs');const ready=value=>{
+  fs.writeFileSync('ready.tmp',value);fs.renameSync('ready.tmp','ready');
+};`;
+const sleepingCommand = `${publishReady} ready(String(process.pid)); process.kill(process.pid, 'SIGSTOP'); setInterval(() => {}, 10000)`;
+const cpuCommand = `${publishReady} let generation=0;
+  function work(){const before=process.cpuUsage();
+    while(process.cpuUsage(before).user < 30000) Math.sqrt(Math.random());
+    ready(process.pid+':'+(++generation));
+    process.kill(process.pid,'SIGSTOP');setImmediate(work);
+  }work();`;
 
 async function startValidation(code: string) {
   const commands = ['build', 'test', 'lint'].map((role, index) => ({
@@ -70,6 +99,7 @@ async function startValidation(code: string) {
   });
   // Wait for the owned fixture to execute, without relying on provider tools.
   await waitForPathEvent(project, () => existsSync(join(project, 'ready')) ? true : undefined);
+  await waitForStoppedValidation();
 }
 
 function monitor() { return new StageWatchdog(project, run.runId, config); }
@@ -88,10 +118,9 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
 
   it('uses the configured silence bound for a sleeping local command', async () => {
     const status = startAttempt();
-    await startValidation("require('node:fs').writeFileSync('ready', ''); setInterval(() => {}, 10000)");
+    await startValidation(sleepingCommand);
     const supervisor = monitor();
     await supervisor.tick();
-    await delay(150);
     await supervisor.tick();
     const lastProgressAt = savedProgress().stageProgress[stageId].lastProgressAt;
     const signal = runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`);
@@ -112,18 +141,26 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
 
   it('keeps silent CPU work alive from sampled process facts', async () => {
     const status = startAttempt();
-    await startValidation("require('node:fs').writeFileSync('ready', ''); for (;;) Math.sqrt(Math.random())");
+    await startValidation(cpuCommand);
     const supervisor = monitor();
     await supervisor.tick();
     const startedAt = savedProgress().stageProgress[stageId].lastProgressAt;
+    const cpuTicks = () => inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status })
+      .processSample!.members.reduce((total, member) => total + member.cpuTicks, 0);
+    let previousTicks = cpuTicks();
     for (let count = 0; count < 3; count++) {
-      await delay(150);
+      resumeValidation();
+      await waitForPathEvent(project, () => readFileSync(join(project, 'ready'), 'utf8').endsWith(`:${count + 2}`) ? true : undefined);
+      await waitForStoppedValidation();
+      expect(cpuTicks()).toBeGreaterThan(previousTicks);
+      previousTicks = cpuTicks();
       vi.spyOn(Date, 'now').mockReturnValue(startedAt + (count + 1) * (config.idleThresholdMs + 1));
       await supervisor.tick();
       expect(savedProgress().stageProgress[stageId].lastProgressAt).toBe(Date.now());
     }
     expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
     expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(1);
+    resumeValidation();
     cancel.abort();
     await validation;
     expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(0);
@@ -131,10 +168,9 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
 
   it('retains attempt-bound work observations across a watchdog restart', async () => {
     startAttempt();
-    await startValidation("require('node:fs').writeFileSync('ready', ''); setInterval(() => {}, 10000)");
+    await startValidation(sleepingCommand);
     const supervisor = monitor();
     await supervisor.tick();
-    await delay(150);
     await supervisor.tick();
     const saved = savedProgress();
     const { lastProgressAt, processWork } = saved.stageProgress[stageId];
