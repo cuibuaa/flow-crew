@@ -1,6 +1,6 @@
 import { EXIT_CODE } from './exit-code.js';
-import { mkdirSync, rmSync } from './engine-fs.js';
-import { existsSync } from 'node:fs';
+import { mkdirSync } from './engine-fs.js';
+import fs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { assertCommandSocketAuthority, assertUnixSocketPath } from './daemon-identity.js';
@@ -13,10 +13,42 @@ import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import type { OperationalProjection } from './cli-events.js';
 import type { DeploymentStatus } from './orchestrator.js';
 
-export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
-/** Cancellation convergence itself may consume 1.5s; leave transport room for
- * request parsing, observation, and the final response. */
-export const CANCELLATION_RPC_TIMEOUT_MS = 5_000;
+/** A caller stopped observing; this says nothing about the command's outcome. */
+export class RpcInProgress {
+  readonly status = 'in-progress';
+  readonly code = 'RPC_IN_PROGRESS';
+  readonly message = 'Request still in progress; inspect current state before issuing another command.';
+}
+
+export interface RpcWaitOptions {
+  signal?: AbortSignal;
+}
+
+/** The only declared waiting limit. Abort retires the client observation, never
+ * work in the daemon. The result is also usable with injected request senders. */
+export async function waitForRpc<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  waitMs?: number,
+): Promise<T | RpcInProgress> {
+  if (waitMs !== undefined && (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 2_147_483_647)) {
+    throw new Error('RPC wait must be a nonnegative number within the Node timer range');
+  }
+  const controller = new AbortController();
+  if (waitMs === undefined) return operation(controller.signal);
+  let timer: ReturnType<typeof setTimeout>;
+  const limited = new Promise<RpcInProgress>(resolve => {
+    timer = setTimeout(() => {
+      const result = new RpcInProgress();
+      resolve(result);
+      controller.abort(result);
+    }, waitMs);
+  });
+  try {
+    return await Promise.race([operation(controller.signal), limited]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 export class DaemonUnavailableError extends Error {
   readonly exitCode = EXIT_CODE.failed;
@@ -57,7 +89,8 @@ function rpcFailure(error: unknown): { ok: false; code: string; message: string 
 }
 
 export function rpcErrorExitCode(error: unknown): number {
-  return error instanceof RpcOutcomeUnknownError ? error.exitCode : EXIT_CODE.failed;
+  return error instanceof RpcInProgress ? EXIT_CODE.inProgress
+    : error instanceof RpcOutcomeUnknownError ? error.exitCode : EXIT_CODE.failed;
 }
 
 export type RpcRequest =
@@ -179,58 +212,84 @@ export function commandSocketPath(explicit?: string): string {
   return path;
 }
 
+export function sendRpc<T extends RpcResponse = RpcResponse>(
+  socketPath: string,
+  request: RpcRequest,
+  options?: RpcWaitOptions,
+): Promise<T>;
+export function sendRpc<T extends RpcResponse = RpcResponse>(
+  socketPath: string,
+  request: RpcRequest,
+  waitMs: number | undefined,
+): Promise<T | RpcInProgress>;
 export async function sendRpc<T extends RpcResponse = RpcResponse>(
   socketPath: string,
   request: RpcRequest,
-  timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+  options?: number | RpcWaitOptions,
+): Promise<T | RpcInProgress> {
+  if (typeof options === 'number') {
+    return waitForRpc(signal => requestOnConnection<T>(socketPath, request, signal), options);
+  }
+  return requestOnConnection<T>(socketPath, request, options?.signal);
+}
+
+function requestOnConnection<T extends RpcResponse>(
+  socketPath: string,
+  request: RpcRequest,
+  signal?: AbortSignal,
 ): Promise<T> {
   assertUnixSocketPath(socketPath);
   return new Promise<T>((resolve, reject) => {
+    signal?.throwIfAborted();
     const socket = net.createConnection(socketPath);
     let raw = '';
     let requestWritten = false;
+    let connected = false;
     let settled = false;
-    const clearTimer = () => {
-      if (timer) clearTimeout(timer);
-    };
-    const rejectOnce = (error: Error, destroy = true) => {
+    let connectionError: Error | undefined;
+    const onAbort = () => rejectOnce(signal!.reason);
+    const rejectOnce = (error: unknown, destroy = true) => {
       if (settled) return;
       settled = true;
-      clearTimer();
+      signal?.removeEventListener('abort', onAbort);
       if (destroy && !socket.destroyed) socket.destroy();
       reject(error);
     };
     const resolveOnce = (response: T) => {
       if (settled) return;
       settled = true;
-      clearTimer();
+      signal?.removeEventListener('abort', onAbort);
       resolve(response);
     };
     const transportFailure = (detail: string): Error => (
-      requestWritten ? new RpcOutcomeUnknownError(detail) : new DaemonUnavailableError()
+      requestWritten ? new RpcOutcomeUnknownError(detail) : connectionError ?? new Error(detail)
     );
-
-    const timer = setTimeout(() => {
-      rejectOnce(transportFailure(`daemon response timed out after ${timeoutMs}ms.`));
-    }, timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     socket.on('connect', () => {
+      if (settled) return;
+      connected = true;
       try {
         socket.write(JSON.stringify(request), (error) => {
           if (settled) return;
           if (error) {
-            rejectOnce(transportFailure(`daemon connection failed while sending the request: ${error.message}.`));
+            connectionError = error;
+            socket.destroy();
             return;
           }
           requestWritten = true;
         });
       } catch (error) {
-        rejectOnce(transportFailure(`daemon connection failed while sending the request: ${error instanceof Error ? error.message : String(error)}.`));
+        connectionError = error instanceof Error ? error : new Error(String(error));
+        socket.destroy();
       }
     });
     socket.on('data', (chunk) => { raw += chunk.toString('utf-8'); });
     socket.on('error', (error) => {
-      rejectOnce(transportFailure(`daemon connection failed before a complete response: ${error.message}.`));
+      connectionError = error;
+      if (!connected && isAbsentSocket(error)) rejectOnce(new DaemonUnavailableError());
+      // Other errors are not evidence of absence. A written request becomes
+      // unknown only when the connection actually closes without its answer.
     });
     socket.on('end', () => {
       if (settled) return;
@@ -257,12 +316,12 @@ export async function sendRpc<T extends RpcResponse = RpcResponse>(
           resolveOnce(parsed as T); // Previous daemon's unwrapped success.
         } else throw new Error('invalid legacy response');
       } catch {
-        rejectOnce(new RpcOutcomeUnknownError('daemon connection closed with an invalid response.'), false);
+        rejectOnce(transportFailure('daemon connection closed with an invalid response.'), false);
       }
     });
     socket.on('close', () => {
       if (!settled) {
-        rejectOnce(transportFailure('daemon connection closed before a complete response.'), false);
+        rejectOnce(transportFailure(`daemon connection closed before a complete response${connectionError ? `: ${connectionError.message}` : ''}.`), false);
       }
     });
   });
@@ -275,10 +334,12 @@ export async function startRpcServer(
 ): Promise<Server> {
   assertUnixSocketPath(socketPath);
   mkdirSync(dirname(socketPath), { recursive: true });
-  if (existsSync(socketPath)) {
+  if (fs.statSync(socketPath, { throwIfNoEntry: false })) {
     const live = await probeSocket(socketPath);
     if (live) throw new Error(`daemon socket already active: ${socketPath}`);
-    rmSync(socketPath, { force: true });
+    // A negative connect result cannot authorize a later unlink: another
+    // listener could bind between those operations. Leave cleanup to the owner.
+    throw new Error(`daemon socket needs inspection before removal: ${socketPath}`);
   }
 
   const server = net.createServer((socket) => {
@@ -327,21 +388,21 @@ export async function startRpcServer(
   return server;
 }
 
+function isAbsentSocket(error: NodeJS.ErrnoException): boolean {
+  return error.code === 'ENOENT' || error.code === 'ECONNREFUSED';
+}
+
 async function probeSocket(socketPath: string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+  return new Promise<boolean>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
-    const timer = setTimeout(() => {
-      socket.destroy();
-      resolve(false);
-    }, 300);
     socket.on('connect', () => {
-      clearTimeout(timer);
       socket.destroy();
       resolve(true);
     });
-    socket.on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
+    socket.on('error', (error) => {
+      socket.destroy();
+      if (isAbsentSocket(error)) resolve(false);
+      else reject(error);
     });
   });
 }

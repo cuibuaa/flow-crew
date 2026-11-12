@@ -7,6 +7,8 @@ export const EXIT_CODE = {
   briefQuestions: 3,
   /** No usable provider reply; rerunning starts a fresh call. */
   briefProviderFailure: 4,
+  /** A declared observation limit elapsed; the request is still in progress. */
+  inProgress: 5,
 } as const;
 
 // Status probes (daemon/dashboard status): 0 fresh, 1 unavailable/invalid usage,

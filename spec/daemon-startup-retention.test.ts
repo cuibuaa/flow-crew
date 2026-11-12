@@ -124,15 +124,15 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
         distDir: dist, stdout: stream as never, stderr: stream as never,
       }), output).toBe(0);
       expect(output).toContain('FRESH:');
-      expect(await sendRpc(socket, { cmd: 'hold' }, 1000)).toMatchObject({ ready: true });
-      expect(await sendRpc(socket, { cmd: 'continue' }, 1000)).toMatchObject({ released: true });
+      expect(await sendRpc(socket, { cmd: 'hold' })).toMatchObject({ ready: true });
+      expect(await sendRpc(socket, { cmd: 'continue' })).toMatchObject({ released: true });
       expect(existsSync(entered)).toBe(false);
       expect(() => lstatSync(danglingAlias)).toThrow(/ENOENT/);
       if (orphan) expect(readFileSync(join(orphan.path, 'payload.bin'), 'utf8')).toBe('orphan scratch for explicit clean');
       expect(readFileSync(join(archive, 'nested/retained.bin'), 'utf8')).toBe('durable history');
       expect(readFileSync(runRecordPath(run, 'stages/done/build/attempt_1/payload.bin'), 'utf8')).toBe('disposable work');
       expect(readFileSync(runRecordPath(run, 'scratch/nested/invocation.bin'), 'utf8')).toBe('old invocation scratch');
-      await sendRpc(socket, { cmd: 'stop' }, 1000);
+      await sendRpc(socket, { cmd: 'stop' });
       await exitWithin(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
       child = undefined;
     }
@@ -235,10 +235,10 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
     writeFileSync(release, 'release');
     expect(await pendingStart, output + errors).toBe(0);
     pendingStart = undefined;
-    const status = await sendRpc(socket, { cmd: 'status' }, 1000);
+    const status = await sendRpc(socket, { cmd: 'status' });
     expect(status).toMatchObject({ pid: children[0].pid, registry_tasks: 1 });
     expect(children.filter(child => child.exitCode === null && child.signalCode === null)).toHaveLength(1);
-    await sendRpc(socket, { cmd: 'stop' }, 1000);
+    await sendRpc(socket, { cmd: 'stop' });
     await exitWithin(children[0]);
   } finally {
     writeFileSync(release, 'release');

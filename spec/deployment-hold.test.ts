@@ -104,12 +104,16 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
     expect(first.ready).toBe(false);
     expect((await orchestrator.holdDeployment()).hold).toEqual(first.hold);
     const stdout = new PassThrough(), stderr = new PassThrough();
-    let diagnostic = ''; stderr.on('data', chunk => { diagnostic += chunk; });
-    expect(await cmdDaemon(['daemon', 'hold', '--timeout-ms', '0'], {
+    let result = ''; stdout.on('data', chunk => { result += chunk; });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const waiting = cmdDaemon(['daemon', 'hold', '--timeout-ms', '0'], {
       stdout: stdout as NodeJS.WriteStream, stderr: stderr as NodeJS.WriteStream,
       controls: { sendRpc: async () => orchestrator.holdDeployment() },
-    })).toBe(1);
-    expect(diagnostic).toContain('HOLD NOT SETTLED');
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await waiting).toBe(5);
+    vi.useRealTimers();
+    expect(JSON.parse(result)).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
     expect((await orchestrator.continueDeployment()).released).not.toBe(true);
     expect(deploymentHeld()).toBe(true);
     releaseA.resolve();

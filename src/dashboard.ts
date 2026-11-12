@@ -40,6 +40,7 @@ commandSocketPath,
 RpcRemoteError,
 RpcOutcomeUnknownError,
 sendRpc,
+RpcInProgress,
 type RegisterRpcResponse,
 type TaskListRpcResponse,
 type TaskShowEntry,
@@ -659,7 +660,7 @@ function rpcHttpStatus(error: unknown): number {
 
 type DashboardTaskRegistrar = (task: TaskCreateInput) => Promise<RegisterRpcResponse>;
 type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskShowEntry[]>;
-type DashboardRunCanceller = (runId: string) => Promise<CancellationResult>;
+type DashboardRunCanceller = (runId: string) => Promise<CancellationResult | RpcInProgress>;
 
 async function registerTaskWithDaemon(task: TaskCreateInput): Promise<RegisterRpcResponse> {
   return sendRpc<RegisterRpcResponse>(commandSocketPath(), { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
@@ -673,10 +674,9 @@ async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskShowEntr
 export async function cancelRunWithControlPlane(
   runId: string,
   options: CancellationClientOptions = {},
-): Promise<CancellationResult> {
+): Promise<CancellationResult | RpcInProgress> {
   return cancelRunThroughControlPlane(runId, undefined, {
     socketPath: commandSocketPath(),
-    rpcTimeoutMs: 5_000,
     ...options,
   });
 }
@@ -1191,7 +1191,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const { id } = req.params;
     if (!isSafeId(id)) return reply.code(400).send({ error: 'invalid task id' });
     try { readRunState(projectDir, id); } catch { return reply.code(404).send({ error: 'not found' }); }
-    let cancellation: CancellationResult;
+    let cancellation: CancellationResult | RpcInProgress;
     try {
       cancellation = await (options.cancelRun ?? cancelRunWithControlPlane)(id);
     } catch (error) {
@@ -1199,6 +1199,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(rpcHttpStatus(error)).send({ error: `could not request cancellation: ${detail}` });
     }
     invalidateTaskListCache();
+    if (cancellation instanceof RpcInProgress) return reply.code(202).send(cancellation);
     if (!cancellation.ok) {
       return reply.code(cancellation.status === 'outcome-unknown' ? 503 : 409).send({ error: cancellation.message, cancellation });
     }

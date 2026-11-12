@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cmdDaemon, mergeTaskWithRunState, type DaemonProcessControls } from '../src/cli-daemon.js';
+import { cmdDaemon, mergeTaskWithRunState } from '../src/cli-daemon.js';
 import {
   STALE_DAEMON_MESSAGE,
   computeBuildFingerprint,
@@ -47,7 +47,7 @@ describe('daemon status local diagnosis', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('falls back to owner, persisted build, disk build, and registry scale when a listener never replies', async () => {
+  it('reports local identity evidence after a listener closes without a reply', async () => {
     const socketPath = join(tempDir, 'daemon.sock');
     const distDir = createDist(tempDir, 'recorded build');
     const identity = createDaemonIdentity({
@@ -60,7 +60,7 @@ describe('daemon status local diagnosis', () => {
     writeFileSync(join(distDir, 'runtime.js'), 'export const build = "disk build";\n', 'utf-8');
     const diskBuild = computeBuildFingerprint(distDir);
     const registryBytes = seedRegistry(tempDir);
-    await listenSilently(socketPath);
+    await listenThenClose(socketPath);
 
     const output = new Capture();
     const code = await cmdDaemon(
@@ -69,12 +69,11 @@ describe('daemon status local diagnosis', () => {
         stdout: output.stdout as never,
         stderr: output.stderr as never,
         distDir,
-        controls: { sendRpc: shortRpc },
       },
     );
 
     expect(code, output.error()).toBe(2);
-    expect(output.output()).toContain('NONRESPONSIVE:');
+    expect(output.output()).toContain('UNVERIFIED:');
     expect(output.output()).toContain(`owner_pid: ${process.pid}`);
     expect(output.output()).toContain(`recorded_build: ${identity.build.hash}`);
     expect(output.output()).toContain(`disk_build: ${diskBuild.hash}`);
@@ -99,17 +98,33 @@ describe('daemon status local diagnosis', () => {
         stdout: output.stdout as never,
         stderr: output.stderr as never,
         distDir,
-        controls: { sendRpc: shortRpc },
       },
     );
 
     expect(code, output.error()).toBe(1);
     expect(output.output()).toContain('NO LISTENER:');
-    expect(output.output()).not.toContain('NONRESPONSIVE:');
+    expect(output.output()).not.toContain('status connection ended');
     expect(output.output()).toContain(`registry_bytes: ${registryBytes}`);
     expect(output.output()).toContain('registry_records: 3');
     expect(output.output()).toContain('registry_tasks: 2');
     expect(output.error()).toBe('');
+  });
+
+  it('keeps a connect error unverified when socket ownership is unobservable', async () => {
+    const socketPath = join(tempDir, 'daemon.sock');
+    const distDir = createDist(tempDir, 'unused build');
+    const output = new Capture();
+    const code = await cmdDaemon(['daemon', 'status', '--socket', socketPath], {
+      distDir, stdout: output.stdout as never, stderr: output.stderr as never,
+      controls: {
+        sendRpc: async () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); },
+        findSocketOwnerPid: () => undefined,
+      },
+    });
+    expect(code).toBe(2);
+    expect(output.output()).toContain('UNVERIFIED:');
+    expect(output.output()).not.toContain('NO LISTENER:');
+    expect(output.output()).not.toContain('daemon not running');
   });
 
   it('keeps responsive fresh and stale outcomes distinct while reporting registry scale', async () => {
@@ -173,7 +188,7 @@ describe('daemon status local diagnosis', () => {
     expect(output.output()).toContain('RESPONSIVE:');
     expect(output.output()).toContain(`socket owner pid=none does not match RPC pid=${process.pid}`);
     expect(output.output()).not.toContain('NO LISTENER:');
-    expect(output.output()).not.toContain('NONRESPONSIVE:');
+    expect(output.output()).not.toContain('status connection ended');
   });
 
   it('points corruption refusal to dry-run and apply registry repair without contacting a daemon', async () => {
@@ -342,12 +357,12 @@ describe('daemon status local diagnosis', () => {
     });
   });
 
-  async function listenSilently(socketPath: string): Promise<void> {
+  async function listenThenClose(socketPath: string): Promise<void> {
     const sockets = new Set<Socket>();
     const server = net.createServer((socket) => {
       sockets.add(socket);
       socket.on('close', () => sockets.delete(socket));
-      socket.on('data', () => { /* deliberately never reply */ });
+      socket.on('data', () => socket.end());
     });
     await listen(server, socketPath);
     trackedServers.push({ server, sockets });
@@ -390,10 +405,6 @@ function statusResponse(identity: DaemonIdentity): DaemonStatusRpcResponse {
     buildFiles: identity.build.files,
     buildNewestMtimeMs: identity.build.newestMtimeMs,
   };
-}
-
-function shortRpc(socketPath: string, request: Parameters<DaemonProcessControls['sendRpc']>[1]): Promise<RpcResponse> {
-  return sendRpc(socketPath, request, 100);
 }
 
 async function listen(server: Server, socketPath: string): Promise<void> {

@@ -245,7 +245,14 @@ build target, independently of the shell's current directory. Deployment request
 waits for settlement, checks restart safety, stops the daemon, publishes a complete build
 and starts the new daemon. It proves the RPC identity, Unix socket owner, `daemon.json`
 and published generation agree before continuing held runs. `--timeout-ms` bounds the
-hold wait; it does not cancel stages or impose a build deadline.
+hold observation, including waiting for its RPC replies; without it the client waits until settlement. Reaching a declared limit returns JSON `status: "in-progress"`, code `RPC_IN_PROGRESS`, exit 5. The hold remains active and deployment does not stop the daemon, build, or release the fence. Inspect `hold-status` and retry with the same state/socket/checkout. The limit does not cancel stages or impose a build deadline.
+
+Startup preserves every existing socket path. A refused connection can indicate a socket
+left by a crash, but cannot authorize a later unlink while another starter may bind it.
+For crash recovery, exclude concurrent starts, inspect the selected socket and its owner,
+confirm no listener remains, then explicitly remove only that abandoned socket before
+starting again. A slow reply, an inaccessible socket, or an unverified owner is no evidence
+that removal is safe. Normal graceful shutdown removes its owned socket.
 
 Builds publish real `dist/` and `ui/dist/` directories, including the hidden build
 manifest. Ordinary tar archives and npm packages therefore contain portable files.
@@ -283,10 +290,10 @@ There is no finite universal successful-hold bound: stage deadlines differ, grou
 several bounded attempts, and audit/validation cleanup may itself fail to settle. For a
 single running attempt, the wait includes its remaining immutable deadline, up to 5 seconds
 of termination grace, then owned command closure and settlement. Both `hold --timeout-ms N`
-and deploy's hold phase bound the settlement polling window (default 60 seconds), plus at
-most the initial 2-second RPC timeout. A missing response can report unknown delivery.
-Exit 1/2 or `ready: false` leaves the fence active: current work continues to its normal
-boundary, and no timeout fallback cancels it. Inspect `hold-status`, resolve any refusal,
+and deploy's hold phase use the same caller-declared observation limit. There is no
+default RPC reply deadline. An open connection keeps waiting; a connection that closes
+after the request was written and before a valid answer yields unknown outcome (exit 2).
+Exit 5 leaves the fence active: current work continues to its normal boundary. Inspect `hold-status`, resolve any refusal,
 and retry deploy with the same target. If abandoning the deployment before stopping the
 daemon, wait for settlement and use `continue` on the existing build.
 

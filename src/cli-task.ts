@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import {
   commandSocketPath,
   rpcErrorExitCode,
+  RpcInProgress,
   sendRpc,
   type RpcRequest,
   type RpcResponse,
@@ -65,9 +66,11 @@ export async function cmdTask(
       return 0;
     }
     const socketPath = commandSocketPath(opts.socketPath ?? parsed.values.get('--socket'));
-    const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
-      sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
-    );
+    const rpc = async <T extends RpcResponse = RpcResponse>(request: RpcRequest): Promise<T> => {
+      const result = await sendRpc<T>(socketPath, request, opts.rpcTimeoutMs);
+      if (result instanceof RpcInProgress) throw result;
+      return result;
+    };
     if (sub === 'list') {
       const status = parsed.values.get('--status') as TaskListStatus | undefined;
       const limitRaw = parsed.values.get('--limit');
@@ -100,6 +103,7 @@ export async function cmdTask(
         socketPath,
         rpcTimeoutMs: opts.rpcTimeoutMs,
       });
+      if (cancellation instanceof RpcInProgress) throw cancellation;
       if (!cancellation.ok) {
         if (cancellation.status === 'outcome-unknown') {
           stderr.write(`Cancellation outcome unknown; processes may still be running: ${cancellation.message}\n`);
@@ -137,7 +141,8 @@ export async function cmdTask(
     stderr.write(`${taskUsage()}\n`);
     return 1;
   } catch (err) {
-    stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    if (err instanceof RpcInProgress) stdout.write(`${JSON.stringify(err)}\n`);
+    else stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
     return rpcErrorExitCode(err);
   }
 }

@@ -1,15 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import net, { type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
 import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
-import { DaemonUnavailableError, type DaemonStatusRpcResponse } from '../src/orchestrator-rpc.js';
+import { DaemonUnavailableError, sendRpc, type DaemonStatusRpcResponse } from '../src/orchestrator-rpc.js';
 
 describe('daemon start owns and verifies its child', () => {
   let root: string;
   beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'fc-start-')); });
-  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true }); });
 
   function fixture() {
     const socket = join(root, 'daemon.sock');
@@ -60,6 +61,63 @@ describe('daemon start owns and verifies its child', () => {
     expect(f.controls.killProcess).not.toHaveBeenCalled();
   });
 
+  it.each(['answer', 'exit'] as const)('settles a held private readiness probe only on child %s', async outcome => {
+    const f = fixture();
+    let server: Server | undefined;
+    const peers = new Set<Socket>();
+    const received = deferred<Socket>();
+    const closed = deferred<void>();
+    f.controls.sendRpc = sendRpc;
+    f.controls.findSocketOwnerPid = () => f.identity.pid;
+    f.controls.spawnDaemon = () => {
+      server = net.createServer(peer => {
+        peers.add(peer);
+        peer.on('error', () => {});
+        peer.once('close', () => { peers.delete(peer); closed.resolve(); });
+        peer.once('data', () => received.resolve(peer));
+      });
+      server.listen(f.socket);
+      return { pid: f.identity.pid, exited: new Promise(done => { f.exit = done; }) };
+    };
+    // Wait for listen without a response timer or a real-time verdict.
+    const listening = deferred<void>();
+    f.controls.delay = async () => {
+      if (server?.listening) return;
+      await listening.promise;
+    };
+    const spawn = f.controls.spawnDaemon;
+    f.controls.spawnDaemon = (...args) => {
+      const child = spawn(...args);
+      server!.once('listening', () => listening.resolve());
+      return child;
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    let settled = false;
+    const pending = f.start();
+    void pending.then(() => { settled = true; });
+    try {
+      const peer = await received.promise;
+      await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+      expect(settled).toBe(false);
+      expect(f.output()).toBe('');
+      if (outcome === 'answer') {
+        peer.end(JSON.stringify({ ok: true, result: f.status }));
+        expect(await pending, f.output()).toBe(0);
+        expect(f.output()).toContain('daemon started');
+      } else {
+        f.exit('17');
+        expect(await pending).toBe(1);
+        await closed.promise;
+        expect(f.output()).toContain('child exited before readiness (17)');
+        expect(peer.destroyed).toBe(true);
+      }
+      expect(f.controls.killProcess).not.toHaveBeenCalled();
+    } finally {
+      for (const peer of peers) peer.destroy();
+      if (server?.listening) await new Promise<void>(done => server!.close(() => done()));
+    }
+  });
+
   it('reports its child exit instead of leaving a startup waiter', async () => {
     const f = fixture();
     f.controls.sendRpc = async () => { throw new DaemonUnavailableError(); };
@@ -108,3 +166,9 @@ describe('daemon start owns and verifies its child', () => {
     expect(f.controls.killProcess).not.toHaveBeenCalled();
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}

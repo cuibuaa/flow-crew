@@ -24,6 +24,7 @@ beforeEach(() => {
   mkdirSync(fcGlobalDir());
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   setFcGlobalDir(previousStore);
   rmSync(scratch, { recursive: true, force: true });
@@ -52,7 +53,7 @@ function fixture() {
     owner: oldPid as number | undefined,
     identity: createDaemonIdentity({ socketPath: socket, distDir: dist, pid: oldPid, startedAt: oldStartedAt }),
     events: [] as string[],
-    output: '', error: '', now: Date.now(),
+    output: '', error: '',
     pendingHold: 0,
     failBuild: false,
     failStart: false,
@@ -108,9 +109,8 @@ function fixture() {
       return { pid: newPid, exited: new Promise(() => {}) };
     },
     killProcess: () => { throw new Error('Deployment must not signal a consumer'); },
-    delay: async (ms) => { f.events.push('delay'); f.now += ms; f.onDelay(); },
+    delay: async () => { f.events.push('delay'); f.onDelay(); },
   };
-  vi.spyOn(Date, 'now').mockImplementation(() => f.now);
   const run = (timeout = 1000) => cmdDaemon(['daemon', 'deploy', '--socket', socket, '--timeout-ms', String(timeout)], {
     distDir: dist, controls,
     stdout: { write: (text: string) => { f.output += text; } } as never,
@@ -172,12 +172,12 @@ describe('daemon deployment through the durable hold', () => {
     expect(f.events).not.toContain('build');
   });
 
-  it('releases an unsettled hold without stopping or building on timeout', async () => {
+  it('returns in progress and preserves the unsettled hold at a declared limit', async () => {
     const f = fixture(); f.pendingHold = 1;
-    expect(await f.run(0)).toBe(1);
-    expect(f.error).toContain('Hold is not settled');
-    expect(f.error).toContain('launches remain possible');
-    expect(readDeploymentHold()?.releasedAt).toBeDefined();
+    expect(await expireHold(f, 0)).toBe(5);
+    expect(JSON.parse(f.output)).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
+    expect(f.error).toBe('');
+    expect(readDeploymentHold()?.releasedAt).toBeUndefined();
     expect(f.events).not.toContain('rpc:stop');
     expect(f.events).not.toContain('build');
   });
@@ -277,25 +277,26 @@ describe('daemon deployment through the durable hold', () => {
 });
 
 
-it('SI deploy wait expiry names the unsettled task and stage, avoids a shortened transport deadline and releases the fence', async () => {
-  const f = fixture(); f.pendingHold = 100;
-  const sendRpc = f.controls.sendRpc;
+it('declared deployment waiting covers a held reply without failure cleanup', async () => {
+  const f = fixture();
+  const send = f.controls.sendRpc;
+  const received = deferred<void>();
   f.controls.sendRpc = async (...args) => {
-    if (args[1].cmd === 'hold-status' && args[2] !== undefined && args[2] < 500)
-      throw new RpcOutcomeUnknownError(`daemon response timed out after ${args[2]}ms`);
-    const response = await sendRpc(...args);
-    return ['hold', 'hold-status'].includes(args[1].cmd) ? { ...response, tasks: [
-      { id: 17, runId: 'fixture-run', status: 'running', settled: false, stages: ['review_full'], detail: 'run=running' },
-    ] } : response;
+    const response = await send(...args);
+    if (args[1].cmd !== 'hold') return response;
+    received.resolve();
+    return new Promise((_, reject) => args[2]!.signal!.addEventListener('abort', () => reject(args[2]!.signal!.reason), { once: true }));
   };
-  expect(await f.run(1000), f.error).toBe(1);
-  expect(f.error).toContain('Hold is not settled');
-  expect(f.error).toContain('task #17');
-  expect(f.error).toContain('stage review_full');
-  expect(f.error).not.toContain('response timed out');
-  expect(f.error).toContain('launches remain possible');
-  expect(readDeploymentHold()?.releasedAt).toBeDefined();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const pending = f.run(1000);
+  await received.promise;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await pending).toBe(5);
+  expect(JSON.parse(f.output)).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
+  expect(f.error).toBe('');
+  expect(readDeploymentHold()?.releasedAt).toBeUndefined();
   expect(f.owner).toBe(oldPid);
+  expect(f.events).not.toContain('rpc:continue');
   expect(f.events).not.toContain('rpc:stop');
   expect(f.events).not.toContain('build');
 });
@@ -319,17 +320,17 @@ it('SI a pre-existing stopped recovery hold survives a later wait timeout', asyn
   const requested = requestDeploymentHold();
   markDeploymentStopping(requested);
   const hold = readDeploymentHold();
-  expect(await f.run(0)).toBe(1);
+  expect(await expireHold(f, 0)).toBe(5);
   expect(readDeploymentHold()).toEqual(hold);
   expect(f.events).not.toContain('rpc:continue');
 });
 
 
-it('SI an earlier unsettled hold can be abandoned before any stop request', async () => {
+it('a declared limit preserves an earlier unsettled hold before any stop request', async () => {
   const f = fixture(); f.pendingHold = 100;
   requestDeploymentHold();
-  expect(await f.run(0)).toBe(1);
-  expect(readDeploymentHold()?.releasedAt).toBeDefined();
+  expect(await expireHold(f, 0)).toBe(5);
+  expect(readDeploymentHold()?.releasedAt).toBeUndefined();
   expect(f.events).not.toContain('rpc:stop');
 });
 
@@ -338,8 +339,27 @@ it('SI a legacy hold with unknown stop status preserves its recovery fence', asy
   const f = fixture(); f.pendingHold = 100;
   const { stopRequestedAt: _unknown, ...legacy } = requestDeploymentHold();
   writeFileSync(join(fcGlobalDir(), 'deployment-hold.json'), JSON.stringify(legacy));
-  expect(await f.run(0)).toBe(1);
+  expect(await expireHold(f, 0)).toBe(5);
   expect(readDeploymentHold()).toEqual(legacy);
   expect(f.events).not.toContain('rpc:continue');
   expect(f.events).not.toContain('rpc:stop');
 });
+
+async function expireHold(f: ReturnType<typeof fixture>, limit: number) {
+  const waiting = deferred<void>();
+  f.controls.delay = async (_ms, signal) => {
+    waiting.resolve();
+    return new Promise((_, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+  };
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const pending = f.run(limit);
+  await waiting.promise;
+  await vi.advanceTimersByTimeAsync(limit);
+  return pending;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}

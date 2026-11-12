@@ -5,6 +5,7 @@ import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { setTimeout as wait } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
   STALE_DAEMON_MESSAGE,
@@ -21,10 +22,13 @@ import { createDaemonReconciler } from './daemon-reconciliation.js';
 import {
   DaemonUnavailableError,
   RpcOutcomeUnknownError,
+  RpcInProgress,
   commandSocketPath,
   rpcErrorExitCode,
   sendRpc as sendRpcRequest,
   startRpcServer,
+  waitForRpc,
+  type RpcWaitOptions,
   type DaemonStatusRpcResponse,
   type RpcHandlerError,
   type RegisterRpcResponse,
@@ -45,14 +49,14 @@ import { assertDistFresh, buildProjectRoot, pinBuildRuntime } from './build-mani
 import { processIsAlive } from './process-liveness.js';
 import { resolveRunStatus, taskDisplayStatus } from './lifecycle-status.js';
 
-type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
+type RpcSender = (socketPath: string, request: RpcRequest, options?: RpcWaitOptions) => Promise<RpcResponse>;
 
 export interface DaemonProcessControls {
   sendRpc: RpcSender;
   findSocketOwnerPid: (socketPath: string) => number | undefined;
   spawnDaemon: (socketPath: string, logPath: string) => { pid?: number; exited: Promise<string> };
   killProcess: (pid: number, signal: NodeJS.Signals) => void;
-  delay: (ms: number) => Promise<void>;
+  delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   processAlive: (pid: number) => boolean;
   build: (projectRoot: string) => Promise<void>;
 }
@@ -87,7 +91,7 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
       return pinned.cmdDaemon(args, { ...opts, distDir: runtime });
     }
     const controls: DaemonProcessControls = {
-      sendRpc: (path, request, timeoutMs) => sendRpcRequest(path, request, timeoutMs),
+      sendRpc: sendRpcRequest,
       findSocketOwnerPid: findUnixSocketOwnerPid,
       spawnDaemon: (path, log) => spawnDetachedDaemon(path, log, distDir),
       killProcess: (pid, signal) => process.kill(pid, signal),
@@ -102,11 +106,10 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     }
 
     if (sub === 'hold' || sub === 'hold-status' || sub === 'continue') {
-      const timeoutMs = Number(parsed.values.get('--timeout-ms') ?? '60000');
-      const result = sub === 'hold' ? await holdAndWait(socketPath, timeoutMs, controls)
-        : deploymentStatus(await controls.sendRpc(socketPath, { cmd: sub }));
+      const result = sub === 'hold' ? await holdAndWait(socketPath, declaredWait(parsed), controls)
+        : await waitForRpc(async signal => deploymentStatus(await controls.sendRpc(socketPath, { cmd: sub }, { signal })), declaredWait(parsed));
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      if (sub === 'hold' && !result.ready) stderr.write('HOLD NOT SETTLED: timeout/refusal; hold remains active. Do not deploy. No running attempt was killed.\n');
+      if (result instanceof RpcInProgress) return rpcErrorExitCode(result);
       return sub === 'continue' ? (result.released && !result.errors.length ? 0 : 1) : result.ready ? 0 : 1;
     }
 
@@ -406,15 +409,22 @@ function deploymentStatus(response: RpcResponse): DeploymentStatus {
   return result;
 }
 
-async function holdAndWait(socketPath: string, timeoutMs: number, controls: DaemonProcessControls): Promise<DeploymentStatus> {
-  const deadline = Date.now() + timeoutMs;
-  let result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold' }));
-  while (!result.ready && Date.now() < deadline) {
-    await controls.delay(Math.min(200, Math.max(1, deadline - Date.now())));
-    if (Date.now() >= deadline) break;
-    result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold-status' }, 2000));
-  }
-  return result;
+function declaredWait(parsed: ReturnType<typeof parseCommandArgs>): number | undefined {
+  const value = parsed.values.get('--timeout-ms');
+  return value === undefined ? undefined : Number(value);
+}
+
+async function holdAndWait(socketPath: string, waitMs: number | undefined, controls: DaemonProcessControls): Promise<DeploymentStatus | RpcInProgress> {
+  return waitForRpc(async signal => {
+    let request: RpcRequest = { cmd: 'hold' };
+    while (true) {
+      signal.throwIfAborted();
+      const result = deploymentStatus(await controls.sendRpc(socketPath, request, { signal }));
+      if (result.ready) return result;
+      await controls.delay(200, signal);
+      request = { cmd: 'hold-status' };
+    }
+  }, waitMs);
 }
 
 async function deployDaemon(
@@ -426,15 +436,14 @@ async function deployDaemon(
   const priorHold = readDeploymentHold();
   let stopRequested = Boolean(priorHold && !priorHold.releasedAt && priorHold.stopRequestedAt !== null);
   try {
-    const timeoutMs = Number(parsed.values.get('--timeout-ms') ?? '60000');
     if (parsed.flags.has('--force')) throw new Error('Deployment cannot bypass safety checks with --force');
     if (checkRestartSafety(dirname(socketPath), false, stderr, 'start') !== 0) throw new Error('Daemon start safety check refused');
     // The durable hold is the only recovery record. After an interrupted build,
     // start the last published generation and ask it to settle that same hold.
     if (controls.findSocketOwnerPid(socketPath) === undefined) await startDetachedAndWait(socketPath, logPath, controls);
-    const held = await holdAndWait(socketPath, timeoutMs, controls);
+    const held = await holdAndWait(socketPath, declaredWait(parsed), controls);
     stdout.write(`${JSON.stringify(held, null, 2)}\n`);
-    if (!held.ready) throw new Error(`Hold is not settled: ${held.tasks.filter(task => !task.settled).map(task => `task #${task.id} run ${task.runId ?? 'unbound'} stage ${task.stages?.join(', ') || 'unknown'} (${task.detail ?? task.status})`).join('; ') || held.errors.join('; ') || 'no settled acknowledgement'}`);
+    if (held instanceof RpcInProgress) return rpcErrorExitCode(held);
     const hold = readDeploymentHold();
     if (!hold || hold.releasedAt || hold.id !== held.hold?.id) throw new Error('Daemon hold does not match this FC_HOME');
     const previous = await verifiedDaemonStatus(socketPath, controls);
@@ -626,13 +635,13 @@ function reportStatusRpcFailure(
     return 2;
   }
 
-  if (ownerPid === undefined) {
+  if (ownerPid === undefined && error instanceof DaemonUnavailableError) {
     stdout.write(`NO LISTENER: no process owns the Unix socket ${socketPath}.\n`);
     reportRegistryScale(dirname(socketPath), stdout);
     return 1;
   }
 
-  stdout.write('NONRESPONSIVE: a process owns the Unix socket but did not answer the status RPC.\n');
+  stdout.write('UNVERIFIED: the status connection ended without a verified daemon answer.\n');
   stdout.write(`owner_pid: ${ownerPid}\n`);
   stdout.write(`socketPath: ${socketPath}\n`);
   stdout.write(`rpc_error: ${statusRpcFailureSummary(error)}\n`);
@@ -776,29 +785,30 @@ async function startDetachedAndWait(
 ): Promise<DaemonStatusRpcResponse> {
   const child = controls.spawnDaemon(socketPath, logPath);
   let ready = false;
-  let waiting = true;
   let childExited = false;
+  const probe = new AbortController();
+  void child.exited.then(reason => {
+    childExited = true;
+    probe.abort(new Error(`daemon child exited before readiness (${reason}); see ${logPath}`));
+  });
   try {
-    const exited = child.exited.then(reason => { childExited = true; throw new Error(`daemon child exited before readiness (${reason}); see ${logPath}`); });
-    const status = await Promise.race([exited, (async () => {
-      while (waiting) {
-        try {
-          const response = await controls.sendRpc(socketPath, { cmd: 'status' }, 300);
-          // A competing listener is never evidence that our child started.
-          const verified = await verifiedDaemonStatus(socketPath, controls, response);
-          if (verified.pid !== child.pid) throw new Error('Daemon socket belongs to a different child');
-          return verified;
-        } catch (error) {
-          if (!(error instanceof DaemonUnavailableError) && !(error instanceof RpcOutcomeUnknownError)) throw error;
-        }
-        await controls.delay(100);
+    while (true) {
+      probe.signal.throwIfAborted();
+      try {
+        const response = await controls.sendRpc(socketPath, { cmd: 'status' }, { signal: probe.signal });
+        // A competing listener is never evidence that our child started.
+        const verified = await verifiedDaemonStatus(socketPath, controls, response);
+        probe.signal.throwIfAborted();
+        if (verified.pid !== child.pid) throw new Error('Daemon socket belongs to a different child');
+        ready = true;
+        return verified;
+      } catch (error) {
+        if (!(error instanceof DaemonUnavailableError) && !(error instanceof RpcOutcomeUnknownError)) throw error;
       }
-      throw new Error('Daemon startup ended');
-    })()]);
-    ready = true;
-    return status;
+      await controls.delay(100, probe.signal);
+    }
   } finally {
-    waiting = false;
+    probe.abort(new Error('Daemon startup observation ended'));
     if (!ready && !childExited && child.pid !== undefined && controls.processAlive(child.pid)) {
       controls.killProcess(child.pid, 'SIGKILL');
       await child.exited;
@@ -877,6 +887,6 @@ function readNumber(value: RpcResponse, key: string): number | undefined {
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : undefined;
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return wait(ms, undefined, { signal });
 }

@@ -1,6 +1,6 @@
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import fs, { existsSync, linkSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import net, { type Server, type Socket } from 'node:net';
@@ -8,9 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { cmdTask } from '../src/cli-task.js';
-import { createDaemonRpcErrorLogger } from '../src/cli-daemon.js';
+import { cmdDaemon, createDaemonRpcErrorLogger } from '../src/cli-daemon.js';
 import {
-  DEFAULT_RPC_TIMEOUT_MS,
+  RpcInProgress,
   DaemonUnavailableError,
   RpcOutcomeUnknownError,
   RpcRemoteError,
@@ -20,6 +20,7 @@ import {
   startRpcServer,
   type RegisterRpcResponse,
 } from '../src/orchestrator-rpc.js';
+import { cancelTaskThroughControlPlane } from '../src/cancellation-client.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 // The daemon loads stage integrity, whose publication observer sees the socket removal.
@@ -42,16 +43,52 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server!.close(() => resolve()));
   }
   server = undefined;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   rmSync(tempDir, { recursive: true, force: true });
 });
 
 describe('sendRpc delivery truth', () => {
-  it('keeps the compatibility default timeout at 2000ms', () => {
-    expect(DEFAULT_RPC_TIMEOUT_MS).toBe(2_000);
+  it.each(['status', 'cancel', 'hold', 'continue', 'resume'] as const)(
+    'waits for a live %s answer regardless of clock advancement', async cmd => {
+      const received = deferred<Socket>();
+      await listen(socket => socket.once('data', () => received.resolve(socket)));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      let settled = false;
+      const pending = sendRpc(socketPath, cmd === 'cancel' || cmd === 'resume' ? { cmd, id: 8 } : { cmd });
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      const peer = await received.promise;
+      await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+      expect(settled).toBe(false);
+      peer.end(JSON.stringify({ ok: true, result: { ok: true } }));
+      expect(await pending).toEqual({ ok: true });
+    },
+  );
+
+  it('keeps cancellation waiting without local fallback until the daemon answers', async () => {
+    const received = deferred<Socket>();
+    await listen(socket => socket.once('data', () => received.resolve(socket)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const local = { cancel: vi.fn(), cancelRun: vi.fn() };
+    let settled = false;
+    const pending = cancelTaskThroughControlPlane(8, { socketPath, localControl: local });
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    const peer = await received.promise;
+    await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+    expect(settled).toBe(false);
+    expect(local.cancel).not.toHaveBeenCalled();
+    const answer: CancellationResult = {
+      ok: true, status: 'cancelled', taskId: 8, message: 'cancelled',
+      observation: { unit: null, unitState: { kind: 'absent' }, runReadable: false,
+        schedulerPid: null, schedulerAlive: false, launchInFlight: false },
+    };
+    peer.end(JSON.stringify({ ok: true, result: answer }));
+    expect(await pending).toEqual(answer);
+    expect(local.cancel).not.toHaveBeenCalled();
   });
 
   it('reports a pre-write connection failure as daemon unavailable', async () => {
-    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }, 100));
+    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }));
 
     expect(error).toBeInstanceOf(DaemonUnavailableError);
     expect(error.name).toBe('DaemonUnavailableError');
@@ -60,22 +97,71 @@ describe('sendRpc delivery truth', () => {
     expect(error.message).toBe('daemon not running. Start with: flowcrew daemon start');
   });
 
-  it('reports an accepted and written request with no response as outcome unknown', async () => {
-    let received = '';
-    await listen((socket) => {
-      socket.on('data', (chunk) => { received += chunk.toString('utf-8'); });
+  it('reports a real refused socket as unavailable', async () => {
+    const previous = net.createServer();
+    const previousPath = join(tempDir, 'previous.sock');
+    await new Promise<void>(done => previous.listen(previousPath, done));
+    linkSync(previousPath, socketPath);
+    await new Promise<void>(done => previous.close(() => done()));
+    expect(await rejectionOf(sendRpc(socketPath, { cmd: 'status' }))).toBeInstanceOf(DaemonUnavailableError);
+  });
+
+  it.each(['rpc', 'cancellation'] as const)('returns one in-progress result for a declared %s wait', async caller => {
+    const received = deferred<Socket>();
+    await listen(socket => socket.once('data', () => received.resolve(socket)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const local = { cancel: vi.fn(), cancelRun: vi.fn() };
+    const pending = caller === 'rpc' ? sendRpc(socketPath, { cmd: 'status' }, 100)
+      : cancelTaskThroughControlPlane(8, { socketPath, rpcTimeoutMs: 100, localControl: local });
+    await received.promise;
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await pending;
+    expect(result).toBeInstanceOf(RpcInProgress);
+    expect(result).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
+    expect(rpcErrorExitCode(result)).toBe(5);
+    expect(local.cancel).not.toHaveBeenCalled();
+  });
+
+  it('applies a declared cancellation API limit to an injected sender without fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const local = { cancel: vi.fn(), cancelRun: vi.fn() };
+    const pending = cancelTaskThroughControlPlane(8, {
+      socketPath, rpcTimeoutMs: 100, localControl: local, sendRequest: () => new Promise(() => {}),
     });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBeInstanceOf(RpcInProgress);
+    expect(local.cancel).not.toHaveBeenCalled();
+  });
 
-    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'cancel', id: 1825 }, 100));
-
-    expect(JSON.parse(received)).toEqual({ cmd: 'cancel', id: 1825 });
-    expect(error).toBeInstanceOf(RpcOutcomeUnknownError);
-    expect((error as RpcOutcomeUnknownError).exitCode).toBe(2);
-    expect(rpcErrorExitCode(error)).toBe(2);
-    expect(error.message).toContain('may already have been delivered and taken effect');
-    expect(error.message).toContain('flowcrew task list');
-    expect(error.message).toContain('flowcrew daemon status');
-    expect(error.message).not.toContain('daemon not running');
+  it.each(['hold', 'hold-status', 'continue'] as const)('daemon %s waits by default and returns in progress only at a declared limit', async cmd => {
+    const received = deferred<Socket>();
+    let onRequest = (socket: Socket) => received.resolve(socket);
+    await listen(socket => socket.once('data', () => onRequest(socket)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const output = new Capture();
+    const args = ['daemon', cmd, '--socket', socketPath];
+    const opts = { distDir: tempDir, stdout: output.stdout as never, stderr: output.stderr as never };
+    let settled = false;
+    const pending = cmdDaemon(args, opts);
+    void pending.then(() => { settled = true; });
+    const peer = await received.promise;
+    await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+    expect(settled).toBe(false);
+    expect(output.outputText()).toBe('');
+    expect(output.errorText()).toBe('');
+    peer.end(JSON.stringify({ ok: true, result: { ready: true, released: true, tasks: [], errors: [] } }));
+    expect(await pending).toBe(0);
+    const second = deferred<void>();
+    onRequest = () => second.resolve();
+    const limitedOutput = new Capture();
+    const limited = cmdDaemon([...args, '--timeout-ms', '100'], {
+      ...opts, stdout: limitedOutput.stdout as never, stderr: limitedOutput.stderr as never,
+    });
+    await second.promise;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await limited).toBe(5);
+    expect(JSON.parse(limitedOutput.outputText())).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
+    expect(limitedOutput.errorText()).toBe('');
   });
 
   it('passes through a daemon-declared error unchanged', async () => {
@@ -83,7 +169,7 @@ describe('sendRpc delivery truth', () => {
       socket.once('data', () => socket.end(JSON.stringify({ error: 'daemon-declared-error' })));
     });
 
-    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }, 100));
+    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }));
 
     expect(error).toBeInstanceOf(RpcRemoteError);
     expect((error as RpcRemoteError).code).toBe('RPC_REFUSED');
@@ -135,7 +221,7 @@ describe('sendRpc delivery truth', () => {
       });
     });
 
-    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'cancel', id: 7 }, 100));
+    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'cancel', id: 7 }));
 
     expect(JSON.parse(received)).toEqual({ cmd: 'cancel', id: 7 });
     expect(error).toBeInstanceOf(RpcOutcomeUnknownError);
@@ -160,9 +246,10 @@ describe('sendRpc delivery truth', () => {
       .mockReturnValue(fakeSocket as unknown as Socket);
 
     try {
-      const pending = sendRpc('/controlled-socket', { cmd: 'cancel', id: 8 }, 1_000);
+      const pending = sendRpc('/controlled-socket', { cmd: 'cancel', id: 8 });
       fakeSocket.emit('connect');
       fakeSocket.emit('error', new Error('peer reset'));
+      fakeSocket.emit('close');
       const error = await rejectionOf(pending);
 
       expect(error).toBeInstanceOf(RpcOutcomeUnknownError);
@@ -175,29 +262,79 @@ describe('sendRpc delivery truth', () => {
     }
   });
 
-  it('maps task CLI connection failure to 1 and post-write timeout to 2', async () => {
-    const missing = new Capture();
-    const missingCode = await cmdTask(
-      ['task', 'list', '--socket', socketPath],
-      { stdout: missing.stdout as any, stderr: missing.stderr as any, rpcTimeoutMs: 100 },
-    );
+  it.each(['ENOENT', 'ECONNREFUSED', 'EACCES', 'EAGAIN', 'EMFILE'])('classifies connect %s only from its evidence', async code => {
+    const peer = fakeSocket();
+    vi.spyOn(net, 'createConnection').mockReturnValue(peer as unknown as Socket);
+    const pending = rejectionOf(sendRpc(socketPath, { cmd: 'status' }));
+    const failure = Object.assign(new Error('connect failed'), { code });
+    peer.emit('error', failure);
+    peer.emit('close');
+    const error = await pending;
+    if (code === 'ENOENT' || code === 'ECONNREFUSED') expect(error).toBeInstanceOf(DaemonUnavailableError);
+    else {
+      expect(error).toBe(failure);
+      expect(error).not.toBeInstanceOf(DaemonUnavailableError);
+      expect(error).not.toBeInstanceOf(RpcOutcomeUnknownError);
+      const local = { cancel: vi.fn(), cancelRun: vi.fn() };
+      const cancellation = rejectionOf(cancelTaskThroughControlPlane(8, { socketPath, localControl: local }));
+      peer.emit('error', failure);
+      peer.emit('close');
+      expect(await cancellation).toBe(failure);
+      expect(local.cancel).not.toHaveBeenCalled();
+    }
+  });
 
-    expect(missingCode).toBe(1);
+  it('does not call a written request unknown while its connection remains open after an error', async () => {
+    const peer = fakeSocket();
+    vi.spyOn(net, 'createConnection').mockReturnValue(peer as unknown as Socket);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    let settled = false;
+    const pending = rejectionOf(sendRpc(socketPath, { cmd: 'status' }));
+    void pending.then(() => { settled = true; });
+    peer.emit('connect');
+    peer.emit('error', new Error('reset'));
+    await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+    expect(settled).toBe(false);
+    peer.emit('close');
+    expect(await pending).toBeInstanceOf(RpcOutcomeUnknownError);
+  });
+
+  it('maps CLI absence, declared wait, remote refusal and broken delivery to distinct results', async () => {
+    const missing = new Capture();
+    expect(await cmdTask(['task', 'list', '--socket', socketPath], {
+      stdout: missing.stdout as never, stderr: missing.stderr as never,
+    })).toBe(1);
     expect(missing.errorText()).toContain('daemon not running');
 
-    await listen((socket) => {
-      socket.on('data', () => {});
+    const received = deferred<Socket>();
+    let mode: 'held' | 'closed' | 'refused' = 'held';
+    await listen(socket => socket.once('data', () => {
+      if (mode === 'closed') socket.end();
+      else if (mode === 'refused') socket.end(JSON.stringify({ error: 'refused' }));
+      else received.resolve(socket);
+    }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const held = new Capture();
+    const pending = cmdTask(['task', 'cancel', '7', '--socket', socketPath], {
+      stdout: held.stdout as never, stderr: held.stderr as never, rpcTimeoutMs: 100,
     });
-    const silent = new Capture();
-    const silentCode = await cmdTask(
-      ['task', 'cancel', '7', '--socket', socketPath],
-      { stdout: silent.stdout as any, stderr: silent.stderr as any, rpcTimeoutMs: 100 },
-    );
-
-    expect(silentCode).toBe(2);
-    expect(silent.errorText()).toContain('may already have been delivered and taken effect');
-    expect(silent.errorText()).toContain('flowcrew daemon status');
-    expect(silent.errorText()).not.toContain('daemon not running');
+    await received.promise;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBe(5);
+    expect(JSON.parse(held.outputText())).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
+    expect(held.errorText()).toBe('');
+    mode = 'closed';
+    const closed = new Capture();
+    expect(await cmdTask(['task', 'list', '--socket', socketPath], {
+      stdout: closed.stdout as never, stderr: closed.stderr as never,
+    })).toBe(2);
+    expect(closed.errorText()).toContain('may already have been delivered');
+    mode = 'refused';
+    const refused = new Capture();
+    expect(await cmdTask(['task', 'list', '--socket', socketPath], {
+      stdout: refused.stdout as never, stderr: refused.stderr as never,
+    })).toBe(1);
+    expect(refused.errorText()).toContain('refused');
   });
 
   it('returns and formats the daemon pid and loaded build on registration', async () => {
@@ -330,13 +467,116 @@ class Capture {
     this.stderr.on('data', (chunk) => this.stderrChunks.push(Buffer.from(chunk)));
   }
 
+  outputText(): string {
+    return Buffer.concat(this.stdoutChunks).toString('utf-8');
+  }
+
   errorText(): string {
     return Buffer.concat(this.stderrChunks).toString('utf-8');
   }
 }
 
 describe('startRpcServer after an unclean daemon exit', () => {
-  it('replaces the socket a killed daemon left behind', async () => {
+  it('preserves a listener even when connection establishment is held beyond all former limits', async () => {
+    await listen(socket => socket.once('data', () => socket.end(JSON.stringify({ ok: true }))));
+    const inode = statSync(socketPath).ino;
+    const peer = fakeSocket();
+    const connect = vi.spyOn(net, 'createConnection').mockReturnValue(peer as unknown as Socket);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    let settled = false;
+    const starting = rejectionOf(startRpcServer(socketPath, () => ({ ok: true })));
+    void starting.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+    expect(settled).toBe(false);
+    expect(statSync(socketPath).ino).toBe(inode);
+    peer.emit('connect');
+    expect((await starting).message).toContain('already active');
+    connect.mockRestore();
+    expect(statSync(socketPath).ino).toBe(inode);
+    expect(await sendRpc(socketPath, { cmd: 'status' })).toEqual({ ok: true });
+  });
+
+  it('refuses to displace an established listener that never sends an answer', async () => {
+    await listen(() => {});
+    const inode = statSync(socketPath).ino;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const starting = rejectionOf(startRpcServer(socketPath, () => ({ ok: true })));
+    await vi.advanceTimersByTimeAsync(1_000_000_000_000);
+    expect((await starting).message).toContain('already active');
+    expect(statSync(socketPath).ino).toBe(inode);
+    expect(server!.listening).toBe(true);
+  });
+
+  it.each(['EACCES', 'EAGAIN', 'EMFILE'])('does not unlink on probe %s', async code => {
+    await listen(() => {});
+    const inode = statSync(socketPath).ino;
+    const peer = fakeSocket();
+    vi.spyOn(net, 'createConnection').mockReturnValue(peer as unknown as Socket);
+    const starting = rejectionOf(startRpcServer(socketPath, () => ({ ok: true })));
+    const failure = Object.assign(new Error('probe failed'), { code });
+    peer.emit('error', failure);
+    expect(await starting).toBe(failure);
+    expect(statSync(socketPath).ino).toBe(inode);
+  });
+
+  it('preserves a new listener when a negative result for an old socket is held', async () => {
+    const previous = net.createServer();
+    const previousPath = join(tempDir, 'previous.sock');
+    await new Promise<void>(done => previous.listen(previousPath, done));
+    linkSync(previousPath, socketPath);
+    await new Promise<void>(done => previous.close(() => done()));
+    const peer = fakeSocket();
+    const connect = vi.spyOn(net, 'createConnection').mockReturnValue(peer as unknown as Socket);
+    const starting = rejectionOf(startRpcServer(socketPath, () => ({ ok: true })));
+    rmSync(socketPath);
+    await listen(socket => socket.once('data', () => socket.end(JSON.stringify({ ok: true }))));
+    const inode = statSync(socketPath).ino;
+    peer.emit('error', Object.assign(new Error('old connect refused'), { code: 'ECONNREFUSED' }));
+    expect((await starting).message).toContain('needs inspection');
+    connect.mockRestore();
+    expect(statSync(socketPath).ino).toBe(inode);
+    expect(await sendRpc(socketPath, { cmd: 'status' })).toEqual({ ok: true });
+  });
+
+  it.each(['refused', 'missing'] as const)('preserves a listener published immediately after the %s socket stat snapshot', async state => {
+    if (state === 'refused') {
+      const previous = net.createServer();
+      const previousPath = join(tempDir, 'previous.sock');
+      await new Promise<void>(done => previous.listen(previousPath, done));
+      linkSync(previousPath, socketPath);
+      await new Promise<void>(done => previous.close(() => done()));
+    }
+    const replacementPath = join(tempDir, 'replacement.sock');
+    const live = net.createServer(socket => {
+      peerSockets.add(socket);
+      socket.on('error', () => {});
+      socket.on('close', () => peerSockets.delete(socket));
+      socket.once('data', () => socket.end(JSON.stringify({ ok: true, result: { ok: true } })));
+    });
+    await new Promise<void>(done => live.listen(replacementPath, done));
+    const nativeStat = fs.statSync;
+    let interleaved = false;
+    const inspect = vi.spyOn(fs, 'statSync').mockImplementation(((path, options) => {
+      const snapshot = nativeStat(path, options);
+      if (path === socketPath && options?.throwIfNoEntry === false && !interleaved) {
+        renameSync(replacementPath, socketPath);
+        interleaved = true;
+      }
+      return snapshot;
+    }) as typeof statSync);
+    try {
+      await expect(startRpcServer(socketPath, () => ({ ok: true }))).rejects.toThrow();
+      expect(interleaved).toBe(true);
+      expect(live.listening).toBe(true);
+      expect(await sendRpc(socketPath, { cmd: 'status' })).toEqual({ ok: true });
+    } finally {
+      inspect.mockRestore();
+      for (const socket of peerSockets) socket.destroy();
+      await new Promise<void>(done => live.close(() => done()));
+    }
+  });
+
+  it('leaves a refused socket for explicit owner cleanup after an unclean exit', async () => {
     // A second name for a listening socket survives the listener's close, like a socket left by SIGKILL.
     const previous = net.createServer();
     const previousPath = join(tempDir, 'previous.sock');
@@ -344,7 +584,22 @@ describe('startRpcServer after an unclean daemon exit', () => {
     linkSync(previousPath, socketPath);
     await new Promise<void>(resolve => previous.close(() => resolve()));
     expect(existsSync(socketPath)).toBe(true);
-    server = await startRpcServer(socketPath, () => ({ ok: true, data: 'pong' }) as never);
-    expect(server.listening).toBe(true);
+    const inode = statSync(socketPath).ino;
+    await expect(startRpcServer(socketPath, () => ({ ok: true }))).rejects.toThrow('needs inspection');
+    expect(statSync(socketPath).ino).toBe(inode);
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function fakeSocket() {
+  return Object.assign(new EventEmitter(), {
+    destroyed: false,
+    write(_payload: string, callback: (error?: Error | null) => void) { callback(); return true; },
+    destroy() { this.destroyed = true; return this; },
+  });
+}

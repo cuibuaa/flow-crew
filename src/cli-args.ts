@@ -25,7 +25,7 @@ const socket = values('socket');
 const session = values('session session-key payload-arg store-root engine-root');
 const ledger = { ...session, 'max-entries': { integer: 1 } };
 const count = (defaultValue: string): Option => ({ integer: 0, default: defaultValue });
-const timeout: Option = { integer: 0, max: 86_400_000, default: '60000' };
+const timeout: Option = { integer: 0, max: 86_400_000 };
 export const CLI_COMMANDS: Record<string, Command> = {
   init: command(),
   adapter: command({}, '[auto|codex|claude]', 1),

@@ -28,6 +28,7 @@ import {
   readDaemonIdentity,
 } from './daemon-identity.js';
 import {
+  DaemonUnavailableError,
   commandSocketPath,
   sendRpc,
   type DaemonStatusRpcResponse,
@@ -532,7 +533,7 @@ async function probeRunningDaemon(distDir: string): Promise<DaemonLoadedBuildPro
   try {
     response = await sendRpc(socketPath, { cmd: 'status' });
   } catch (error) {
-    return { state: 'unavailable', diskBuild, reason: errorMessage(error) };
+    return { state: error instanceof DaemonUnavailableError ? 'unavailable' : 'unverified', diskBuild, reason: errorMessage(error) };
   }
   const status = daemonStatus(response);
   if (!status) return { state: 'unverified', diskBuild, reason: 'Daemon returned an incomplete status identity' };

@@ -31,7 +31,7 @@ import { loadEngineDefaults } from '../src/config.js';
 import { createArchivedPathVerifier } from '../src/declared-output-archive.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { routePendingOperatorGuidanceToStage } from '../src/guidance.js';
-import { CANCELLATION_RPC_TIMEOUT_MS, RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
+import { RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
 import { rehearseBriefIsolated } from './test-support/rehearse.js';
 
 import type {
@@ -318,7 +318,6 @@ describe('engine behaviour contracts', () => {
         throw new RpcOutcomeUnknownError('response lost after delivery.');
       },
     }).catch((error: unknown) => error);
-    expect(CANCELLATION_RPC_TIMEOUT_MS).toBeGreaterThan(1_500);
     expect(requests).toEqual(['cancel']);
     expect(result).toBeInstanceOf(RpcOutcomeUnknownError);
   });

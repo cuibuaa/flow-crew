@@ -2,9 +2,11 @@ import { dirname, join } from 'node:path';
 import { Orchestrator } from './orchestrator.js';
 import {
   DaemonUnavailableError,
-  CANCELLATION_RPC_TIMEOUT_MS,
+  RpcInProgress,
   commandSocketPath,
   sendRpc,
+  waitForRpc,
+  type RpcWaitOptions,
   type RpcRequest,
   type RpcResponse,
 } from './orchestrator-rpc.js';
@@ -24,7 +26,7 @@ export interface LocalCancellationControl {
 export interface CancellationClientOptions {
   socketPath?: string;
   rpcTimeoutMs?: number;
-  sendRequest?: (request: RpcRequest) => Promise<RpcResponse>;
+  sendRequest?: (request: RpcRequest, options?: RpcWaitOptions) => Promise<RpcResponse>;
   localControl?: LocalCancellationControl;
 }
 
@@ -69,21 +71,15 @@ export function isCancellationResult(
 }
 
 function clientRuntime(options: CancellationClientOptions): {
-  request: (request: RpcRequest) => Promise<RpcResponse>;
+  request: (request: RpcRequest) => Promise<RpcResponse | RpcInProgress>;
   local: () => LocalCancellationControl;
   runsDirectory: string;
 } {
   const socketPath = commandSocketPath(options.socketPath);
-  const request = options.sendRequest ?? ((rpcRequest: RpcRequest) => (
-    sendRpc<RpcResponse>(
-      socketPath,
-      rpcRequest,
-      options.rpcTimeoutMs ?? CANCELLATION_RPC_TIMEOUT_MS,
-    )
-  ));
+  const send = options.sendRequest ?? ((request: RpcRequest, wait?: RpcWaitOptions) => sendRpc(socketPath, request, wait));
   let localControl = options.localControl;
   return {
-    request,
+    request: request => waitForRpc(signal => send(request, { signal }), options.rpcTimeoutMs),
     runsDirectory: join(dirname(socketPath), 'runs'),
     local: () => {
       if (!localControl) {
@@ -98,11 +94,21 @@ function clientRuntime(options: CancellationClientOptions): {
   };
 }
 
+export function cancelRunThroughControlPlane(
+  runId: string,
+  unit?: string,
+  options?: CancellationClientOptions & { rpcTimeoutMs?: undefined },
+): Promise<CancellationResult>;
+export function cancelRunThroughControlPlane(
+  runId: string,
+  unit: string | undefined,
+  options: CancellationClientOptions,
+): Promise<CancellationResult | RpcInProgress>;
 export async function cancelRunThroughControlPlane(
   runId: string,
   unit?: string,
   options: CancellationClientOptions = {},
-): Promise<CancellationResult> {
+): Promise<CancellationResult | RpcInProgress> {
   const runtime = clientRuntime(options);
   runId = canonicalRunId(runtime.runsDirectory, runId);
   return requestCancellation(
@@ -116,8 +122,8 @@ async function requestCancellation(
   expected: { runId?: string; taskId?: number },
   runtime: ReturnType<typeof clientRuntime>,
   fallback: () => Promise<CancellationResult>,
-): Promise<CancellationResult> {
-  let response: RpcResponse;
+): Promise<CancellationResult | RpcInProgress> {
+  let response: RpcResponse | RpcInProgress;
   try {
     response = await runtime.request(request);
   } catch (error) {
@@ -126,13 +132,21 @@ async function requestCancellation(
   }
   // A complete legacy reply has a known delivery outcome; local cancellation is
   // idempotent. An ambiguous transport failure above must remain unknown.
-  return isCancellationResult(response, expected) ? response : fallback();
+  return response instanceof RpcInProgress || isCancellationResult(response, expected) ? response : fallback();
 }
 
+export function cancelTaskThroughControlPlane(
+  taskId: number,
+  options?: CancellationClientOptions & { rpcTimeoutMs?: undefined },
+): Promise<CancellationResult>;
+export function cancelTaskThroughControlPlane(
+  taskId: number,
+  options: CancellationClientOptions,
+): Promise<CancellationResult | RpcInProgress>;
 export async function cancelTaskThroughControlPlane(
   taskId: number,
   options: CancellationClientOptions = {},
-): Promise<CancellationResult> {
+): Promise<CancellationResult | RpcInProgress> {
   const runtime = clientRuntime(options);
   return requestCancellation(
     { cmd: 'cancel', id: taskId }, { taskId }, runtime,

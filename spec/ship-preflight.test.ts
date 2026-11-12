@@ -3,6 +3,7 @@ import './test-support/policy-runtime.js';
 import {
   mkdirSync,
   existsSync,
+  linkSync,
   mkdtempSync,
   realpathSync,
   readFileSync,
@@ -13,6 +14,8 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import net, { type Socket } from 'node:net';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -87,6 +90,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(fixture.root, { recursive: true, force: true });
 });
 
@@ -356,6 +360,64 @@ describe('ship-preflight campaign hygiene fact', () => {
 });
 
 describe('ship-preflight daemon and build freshness fact', () => {
+  it.each(['close', 'refusal'] as const)('keeps a live listener %s unverified in the native probe', async mode => {
+    mkdirSync(fixture.stateRoot, { recursive: true });
+    const peers = new Set<Socket>();
+    let received = false;
+    const listener = net.createServer(socket => {
+      peers.add(socket);
+      socket.on('error', () => {});
+      socket.on('close', () => peers.delete(socket));
+      socket.once('data', data => {
+        expect(JSON.parse(data.toString())).toEqual({ cmd: 'status' });
+        received = true;
+        socket.end(mode === 'close' ? undefined : JSON.stringify({ ok: false, code: 'STATUS_REFUSED', message: 'status refused' }));
+      });
+    });
+    await new Promise<void>(done => listener.listen(join(fixture.stateRoot, 'daemon.sock'), done));
+    try {
+      const result = await collectShipPreflight(['ship-preflight'], commonDeps({ probeDaemon: undefined }));
+      expect(received).toBe(true);
+      expect(listener.listening).toBe(true);
+      expect(result.report.daemonFreshness.daemonToDist).toMatchObject({
+        state: 'unverified', diskBuild: expect.any(String),
+        reason: expect.stringContaining(mode === 'close' ? 'may already have been delivered' : 'status refused'),
+      });
+    } finally {
+      for (const peer of peers) peer.destroy();
+      await new Promise<void>(done => listener.close(() => done()));
+    }
+  });
+
+  it.each(['EACCES', 'EAGAIN', 'EMFILE'])('keeps native connect %s evidence unverified', async code => {
+    const peer = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      destroy() { this.destroyed = true; return this; },
+    });
+    vi.spyOn(net, 'createConnection').mockImplementation(() => {
+      queueMicrotask(() => {
+        peer.emit('error', Object.assign(new Error('connect failed'), { code }));
+        peer.emit('close');
+      });
+      return peer as unknown as Socket;
+    });
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({ probeDaemon: undefined }));
+    expect(result.report.daemonFreshness.daemonToDist).toMatchObject({ state: 'unverified', reason: 'connect failed' });
+  });
+
+  it.each(['missing', 'refused'] as const)('reports native %s connection evidence as unavailable', async mode => {
+    if (mode === 'refused') {
+      mkdirSync(fixture.stateRoot, { recursive: true });
+      const listener = net.createServer();
+      const path = join(fixture.stateRoot, 'old.sock');
+      await new Promise<void>(done => listener.listen(path, done));
+      linkSync(path, join(fixture.stateRoot, 'daemon.sock'));
+      await new Promise<void>(done => listener.close(() => done()));
+    }
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({ probeDaemon: undefined }));
+    expect(result.report.daemonFreshness.daemonToDist).toMatchObject({ state: 'unavailable' });
+  });
+
   it('reports matching daemon/dist and current paired source outputs', async () => {
     const result = await collectShipPreflight(['ship-preflight'], commonDeps());
     expect(result.report.daemonFreshness.daemonToDist.state).toBe('fresh');

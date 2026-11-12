@@ -113,9 +113,13 @@ describe('declarative command grammar', () => {
     for (const [name, flag, value] of [
       ['clean', '--keep', '5'], ['list', '--limit', '10'], ['events', '--limit', '100'],
       ['watch', '--poll', '45'], ['daemon logs', '--tail', '100'],
-      ['task tail', '--tail', '100'], ['daemon deploy', '--timeout-ms', '60000'],
+      ['task tail', '--tail', '100'],
     ]) expect(parseCommandArgs(name, []).values.get(flag)).toBe(value);
     expect(parseCommandArgs('task list', []).values.get('--limit')).toBeUndefined();
+    for (const name of ['daemon deploy', 'daemon hold', 'daemon hold-status', 'daemon continue']) {
+      expect(parseCommandArgs(name, []).values.get('--timeout-ms')).toBeUndefined();
+      expect(parseCommandArgs(name, ['--timeout-ms', '100']).values.get('--timeout-ms')).toBe('100');
+    }
     for (const value of ['abc', '-1', '1.5', '1e2', '9007199254740992']) {
       expect(() => parseCommandArgs('clean', [`--keep=${value}`])).toThrow(/integer/);
     }

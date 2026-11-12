@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
-import { RpcRemoteError, RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
+import { RpcRemoteError, RpcOutcomeUnknownError, RpcInProgress } from '../src/orchestrator-rpc.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import { Orchestrator } from '../src/orchestrator.js';
 
@@ -276,6 +276,17 @@ describe('dashboard E13 cancellation delegation', () => {
     const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/cancel` });
     expect(response.statusCode).toBe(503);
     expect(response.json().cancellation).toMatchObject({ ok: false, status: 'outcome-unknown' });
+    expect(snapshotTree(runPath)).toEqual(before);
+  });
+
+  it('returns a structured 202 when a caller-declared cancellation wait is still in progress', async () => {
+    const runId = 'cancel-waiting-limit';
+    const runPath = writeRun(runId, RUN_STATUS.RUNNING);
+    const before = snapshotTree(runPath);
+    cancelRun.mockResolvedValueOnce(new RpcInProgress());
+    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/cancel` });
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toMatchObject({ status: 'in-progress', code: 'RPC_IN_PROGRESS' });
     expect(snapshotTree(runPath)).toEqual(before);
   });
 
