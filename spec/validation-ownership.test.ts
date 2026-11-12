@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { engineValidation } from '../src/engine-validation.js';
-import { runProjectCommand, projectValidationResult, type ValidationCommand } from '../src/project-validation.js';
+import { runProjectCommand, projectValidationResult, parseBriefValidationCommands, parseValidationCommands, type ValidationCommand } from '../src/project-validation.js';
 import * as validationOwner from '../src/project-validation.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { runDir, fcGlobalDir, readStageStatus } from '../src/store.js';
@@ -322,5 +322,133 @@ describe('scheduler owns validation after author settlement', () => {
     const resumed = await engineering(root, adapter, parked.runId);
     expect(resumed.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
     expect(resumed.stages.implement.attempts).toHaveLength(1); expect(resumed.stages.repair.attempts ?? []).toHaveLength(0);
+  });
+});
+
+describe('the project declares its validation limits', () => {
+  // Engine defaults are made small so a half-second script exceeds them; the
+  // declaration, not the engine, grants the time.
+  const slow = (code = 0) => {
+    const f = fixture();
+    writeFileSync(join(f.root, 'check.cjs'), `require('node:fs').appendFileSync(${JSON.stringify(f.counter)},'x');setTimeout(()=>process.exit(${code}),1200);`);
+    return f;
+  };
+  const killed = () => {
+    const f = fixture();
+    f.input.commands[0] = { role: 'test', command: '/bin/sh', args: ['-c', 'printf x >> "$1"; kill -s KILL $$', 'declared-check', f.counter], display: 'declared check' };
+    return f;
+  };
+  const brief = (validation: string) => `---\nvalidation: ${validation}\n---\nDeliver the value.`;
+  const command = '{test: {command: node, args: [check.cjs]}}';
+
+  it('declared-limits: a command needing longer than the engine default completes under a larger declared timeout', async () => {
+    setEngineDefaults({ validation_timeout_ms: 500, validation_attempts: 1 });
+    const f = slow(3);
+    const record = await engineValidation({ ...f.input, limits: { timeoutMs: 20_000 } });
+    expect(record.resourceState).toBe('complete'); expect(record.pass).toBe(false);
+    expect(record.executions.map(execution => execution.commands[0].exitCode)).toEqual([3]);
+    expect(record.limits).toEqual({ timeoutMs: 20_000, attempts: 1 }); expect(record.spentMs).toBe(20_000);
+  });
+
+  it('declared-limits: the same command is unfinished without the declaration', async () => {
+    setEngineDefaults({ validation_timeout_ms: 500, validation_attempts: 1 });
+    const f = slow();
+    const record = await engineValidation(f.input);
+    expect(record.resourceState).toBe('unfinished'); expect(record.pass).toBe(false);
+    expect(record.executions.map(execution => execution.commands[0])).toEqual([expect.objectContaining({ exitCode: null, unfinished: true })]);
+    expect(record.limits).toEqual({ timeoutMs: 500, attempts: 1 });
+  });
+
+  it.skipIf(process.platform !== 'linux')('declared-limits: declared attempts bound the retries in either direction', async () => {
+    setEngineDefaults({ validation_attempts: 3 });
+    const fewer = killed();
+    const two = await engineValidation({ ...fewer.input, limits: { attempts: 2 } });
+    expect(two.executions).toHaveLength(2); expect(readFileSync(fewer.counter, 'utf8')).toBe('xx');
+    setEngineDefaults({ validation_attempts: 1 });
+    const more = killed();
+    const four = await engineValidation({ ...more.input, limits: { attempts: 4 } });
+    expect(four.executions).toHaveLength(4); expect(readFileSync(more.counter, 'utf8')).toBe('xxxx');
+    expect(four.limits.attempts).toBe(4);
+  });
+
+  it.skipIf(process.platform !== 'linux')('declared-limits: identity is decided by the numbers in the record', async () => {
+    const f = killed(), request = (limits: { timeoutMs?: number; attempts?: number }) => engineValidation({ ...f.input, limits });
+    const executed = () => readFileSync(f.counter, 'utf8').length;
+    const first = await request({ timeoutMs: 1000, attempts: 1 });
+    expect(first.executions).toHaveLength(1); expect(first.spentMs).toBe(1000);
+    // The same, a smaller and an equal allowance of other shape spend nothing more.
+    for (const limits of [{ timeoutMs: 1000, attempts: 1 }, { timeoutMs: 500, attempts: 1 }, { timeoutMs: 250, attempts: 4 }]) {
+      expect((await request(limits)).executions).toHaveLength(1);
+    }
+    expect(executed()).toBe(1);
+    // A larger allowance runs again until the record has spent it, then stops.
+    const second = await request({ timeoutMs: 1000, attempts: 2 });
+    expect(second.executions).toHaveLength(2); expect(second.spentMs).toBe(2000); expect(second.limits).toEqual({ timeoutMs: 1000, attempts: 2 });
+    expect(executed()).toBe(2);
+    expect((await request({ timeoutMs: 1000, attempts: 2 })).executions).toHaveLength(2);
+    const third = await request({ timeoutMs: 5000, attempts: 1 });
+    expect(third.executions).toHaveLength(3); expect(third.spentMs).toBe(7000); expect(executed()).toBe(3);
+    // Spent time stays charged: the earlier, smaller numbers no longer reopen the record.
+    expect((await request({ timeoutMs: 1000, attempts: 3 })).executions).toHaveLength(3);
+  });
+
+  it('declared-limits: a completed record is never executed again under other limits', async () => {
+    const f = fixture(7);
+    const done = await engineValidation({ ...f.input, limits: { timeoutMs: 1000, attempts: 1 } });
+    expect(done.resourceState).toBe('complete');
+    for (const limits of [{ timeoutMs: 600_000, attempts: 50 }, { timeoutMs: 10, attempts: 1 }, undefined]) {
+      const again = await engineValidation({ ...f.input, limits, runCommand: () => { throw Error('completed tree executed again'); } });
+      expect(again).toEqual(done);
+    }
+    expect(readFileSync(f.counter, 'utf8')).toBe('x');
+  });
+
+  it.each([
+    ['timeoutMs: "slow"', 'timeoutMs'], ['timeoutMs: 0', 'timeoutMs'], ['timeoutMs: -5', 'timeoutMs'], ['timeoutMs: 1.5', 'timeoutMs'],
+    ['timeoutMs: 9999999999999', 'timeoutMs'], ['attempts: "3"', 'attempts'], ['attempts: 0', 'attempts'], ['attempts: -1', 'attempts'],
+    ['attempts: 2.5', 'attempts'], ['attempts: null', 'attempts'], ['retries: 2', 'retries'],
+  ])('declared-limits: refuses %s by field name', (field, name) => {
+    const parsed = parseBriefValidationCommands(brief(`{commands: ${command}, ${field}}`), 'brief.md');
+    expect(parsed.error).toContain('Invalid validation declaration'); expect(parsed.error).toContain(name);
+    expect(parsed.commands).toEqual([]);
+  });
+
+  it('declared-limits: accepts the two limits and reports only what was declared', () => {
+    expect(parseBriefValidationCommands(brief(`{commands: ${command}, timeoutMs: 900000, attempts: 2}`), 'brief.md').limits).toEqual({ timeoutMs: 900000, attempts: 2 });
+    expect(parseBriefValidationCommands(brief(`{commands: ${command}, attempts: 2}`), 'brief.md').limits).toEqual({ attempts: 2 });
+    const none = parseBriefValidationCommands(brief(`{commands: ${command}}`), 'brief.md');
+    expect(none.error).toBeUndefined(); expect(none.limits).toBeUndefined();
+    // The project's own declaration file states commands only.
+    expect(parseValidationCommands({ commands: { test: { command: 'node', args: [] } }, timeoutMs: 5 }, 'config/validation.json', true).error).toContain('timeoutMs');
+  });
+
+  it.each(['concurrency: 8', 'priority: 0', 'validation_concurrency: 8', 'validation_priority: 0'])('declared-limits: a brief cannot set %s', field => {
+    const parsed = parseBriefValidationCommands(brief(`{commands: ${command}, timeoutMs: 1000, ${field}}`), 'brief.md');
+    expect(parsed.error).toContain(field.split(':')[0]); expect(parsed.commands).toEqual([]); expect(parsed.limits).toBeUndefined();
+  });
+
+  it('declared-limits: the scheduler carries the declaration to the engine record; without it the run parks', async () => {
+    setEngineDefaults({ validation_timeout_ms: 600, validation_attempts: 1 });
+    const run = async (limits: string) => {
+      const root = project();
+      // Content identity is shared across projects: distinct text keeps the two runs on distinct trees.
+      writeFileSync(join(root, 'check.cjs'), `// ${JSON.stringify(limits)}\nconst fs=require('node:fs');setTimeout(()=>process.exit(fs.readFileSync('value.txt','utf8')==='good'?0:9),1200);`);
+      const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
+      const declaration = `validation: {commands: {test: {command: ${JSON.stringify(process.execPath)}, args: [check.cjs]}}${limits}}\n`;
+      const final = await runWorkflow(config, raw, root, { async run(_prompt, _role, opts) {
+        if (opts.stageId === 'review') return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        writeFileSync(join(root, 'value.txt'), 'good');
+        return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
+      } }, new Map(), undefined, resolve('config/agents'), undefined,
+        `---\ncriteria: [{id: value, text: Deliver a reviewed value}]\noutputs: [value.txt]\n${declaration}---\nDeliver the value.`, true);
+      return { final, root };
+    };
+    const declared = await run(', timeoutMs: 20000');
+    expect(declared.final.status, declared.final.failureReason).toBe('complete');
+    const record = readEvidence(runDir(declared.root, declared.final.runId)).find(entry => entry.kind === 'validation') as ValidationFact & { limits: unknown };
+    expect(record.limits).toEqual({ timeoutMs: 20000, attempts: 1 });
+    const undeclared = await run('');
+    expect(undeclared.final.status).toBe('parked');
+    expect(undeclared.final.stages.implement.attempts).toHaveLength(1);
   });
 });

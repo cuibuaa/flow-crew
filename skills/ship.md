@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 43 -->
+<!-- flowcrew-skill-revision: 44 -->
 
 # Ship a conversation to FlowCrew
 
@@ -53,6 +53,8 @@ write. Authors finish their deliverables and related tests, then end their invoc
 operator reports consume the tree-bound engine record; authors neither rerun the full suite nor wait
 for that record. A report written before settlement references the engine's final projection rather
 than inventing future exits or changing the validated tree to insert them.
+A suite that needs longer than the engine default declares `validation.timeoutMs` (and, if needed,
+`validation.attempts`) in the brief; see the [validation declaration](../guide/brief-contract.md#inputs-outputs-and-validation).
 For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
 `within_expected_range` and `method_was_not_adjusted_to_match_expectation` explicitly. The engine does not detect expectations or inject these obligations.
 Use the [evidence authoring policy](../guide/brief-contract.md#evidence-authoring-policy) for

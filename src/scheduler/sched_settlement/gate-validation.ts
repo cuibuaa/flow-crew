@@ -14,7 +14,7 @@ import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js
 import { readStageStatus, readRunState, updateRunState, runDir, RUN_STATUS, STAGE_STATUS, type GateVerdict } from '../../store.js';
 import {
   reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, projectValidationResult, evaluateValidationDelta, runProjectCommand,
-  type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationDeltaResult, type ValidationCommand,
+  type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationLimits, type ValidationDeltaResult, type ValidationCommand,
 } from '../../project-validation.js';
 import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, validationBatch, validationForTree, VALIDATION_FACT_VERSION, type ValidationFact } from '../../evidence-ledger.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
@@ -24,6 +24,8 @@ export interface RunValidationBaselineArtifact {
   capturedAt: string;
   source: 'ship-setup-ready-record' | 'project-declarations' | 'model-selection';
   baseCommit?: string;
+  /** The brief's declared validation limits; absent fields use the engine defaults. */
+  limits?: ValidationLimits;
   baseline: ProjectValidationBaseline;
 }
 export interface GateValidationExecutionIdentity {
@@ -92,7 +94,7 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
   if (baseline.discovery.state === 'unknown' && declaration.commands.length) throw new Error(baseline.discovery.reason ?? 'Validation declarations conflict');
   const baseCommit = projectCommit(projectDir);
   const artifact: RunValidationBaselineArtifact = { version: 1, capturedAt: new Date().toISOString(),
-    source: admitted ? 'ship-setup-ready-record' : 'project-declarations', baseCommit,
+    source: admitted ? 'ship-setup-ready-record' : 'project-declarations', baseCommit, ...(declaration.limits ? { limits: declaration.limits } : {}),
     // Historical setup measurements are retained for audit, but never decide a new attempt.
     baseline };
   writeFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`);
@@ -146,7 +148,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     && execution.treeHash === treeHash && execution.treeAfterHash === treeHash
     && validationPlanIdentity(execution.commands) === validationPlanIdentity(plan.baseline.discovery.commands)
     && execution.commands.every(result => Number.isInteger(result.exitCode) && !result.unfinished)) : undefined;
-  const record = previous?.validationVersion === VALIDATION_FACT_VERSION && previous.resourceState === 'complete' ? previous : await engineValidation({ projectDir, treeHash, commands: plan.baseline.discovery.commands, completed, run: { projectDir, runId },
+  const record = previous?.validationVersion === VALIDATION_FACT_VERSION && previous.resourceState === 'complete' ? previous : await engineValidation({ projectDir, treeHash, commands: plan.baseline.discovery.commands, limits: plan.limits, completed, run: { projectDir, runId },
     treeAfter: () => captureProjectTree(projectDir, briefAt(base), base).hash, ...dependencies });
   if (record.resourceState === 'complete' && validationPlanIdentity(record.executions.at(-1)!.commands) !== validationPlanIdentity(plan.baseline.discovery.commands)) {
     throw new Error(`VALIDATION_DECLARATION_CONFLICT: requested commands differ from completed engine record ${record.recordPath}; this tree cannot execute another validation`);

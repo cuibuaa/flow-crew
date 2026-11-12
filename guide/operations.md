@@ -61,10 +61,14 @@ All zero command exits accept validation; any completed nonzero exit rejects and
 Reporter totals, logs, timing and load are evidence for readers, never verdict inputs.
 There are no candidate confirmations, automatic subset reruns or gate-requested base suites.
 
-Unfinished executions retry within the numeric `validation_attempts` and
-`validation_timeout_ms` engine limits. Exhaustion parks the run without spending another
-author attempt, review verdict or repair round. Increase the declared resource allowance
-before resuming an exhausted tree. Completed nonzero records are retained on resume.
+Unfinished executions retry within the brief's declared `validation.attempts` and
+`validation.timeoutMs`, which default to the engine's `validation_attempts` and
+`validation_timeout_ms`. The record keeps the limits in force and the allowance spent
+(`spentMs`, each execution charged its full `timeoutMs`). Exhaustion parks the run without
+spending another author attempt, review verdict or repair round. A completed record is reused
+whatever limits ask for it. An unfinished record runs again only when the requesting
+allowance (`timeoutMs × attempts`) is larger than its `spentMs`; declare a larger allowance
+in the brief before relaunching an exhausted tree. Completed nonzero records are retained on resume.
 The shared store FIFO bounds daemon scheduler processes with `validation_concurrency`;
 `validation_priority` sets the Unix niceness adjustment. Dead controller requests release
 queue ownership. Configuration is engine-owned, and no project-specific load policy applies.

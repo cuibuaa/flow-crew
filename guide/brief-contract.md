@@ -150,16 +150,26 @@ still apply.
 
 `validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
 `{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
-extra fields and control characters refuse parsing. Without declarations, setup discovers
+extra fields and control characters refuse parsing. The block may also state the validation
+limits, both optional positive integers: `timeoutMs` (the time one execution of the whole
+batch may take, shared among its commands; at most 2147483647) and `attempts` (the executions
+of an unfinished batch). A non-number, a non-positive or fractional value, or any other field
+refuses parsing with its name. Absent fields use the engine's `validation_timeout_ms` and
+`validation_attempts`. Concurrency and priority are not brief fields. Without declarations, setup discovers
 commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
 command selection semantics. Do not replace the full configured suite with a subset.
 The engine validates settled author and repair trees outside author budgets. One completed
 record per content hash supplies every review and gate with direct exits and structured
 reporter totals. All zero exits accept validation; any nonzero exit rejects. Unfinished
-executions retry within engine `validation_attempts` and `validation_timeout_ms` limits;
-exhaustion parks the run without spending a review or repair round. The store-wide FIFO
-uses engine `validation_concurrency` and `validation_priority` (niceness), across daemon
-scheduler processes. Resume reuses completed records and preserves spent resource attempts.
+executions retry within the declared `attempts` and `timeoutMs` (engine defaults when absent);
+exhaustion parks the run without spending a review or repair round. A suite that needs longer
+than the engine default declares its own `timeoutMs`; the record shows the limits in force. The
+store-wide FIFO uses engine `validation_concurrency` and `validation_priority` (niceness),
+across daemon scheduler processes. Resume reuses completed records and preserves spent resource allowance.
+A completed record is reused under any limits and is never executed again. The record's
+allowance is `timeoutMs × attempts`; each execution is charged its full `timeoutMs`. An
+unfinished record runs again only while its spent total is below the requesting declaration's
+allowance, so the same or a smaller allowance never reopens an exhausted record.
 Authors run related tests and end their invocation; they never run or poll full validation.
 
 Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/cli-ship-setup.ts),

@@ -8,7 +8,7 @@ import { checkpointConsumers } from './checkpoint-liveness.js';
 import { loadEngineDefaults } from './config.js';
 import { processLiveness, processStartToken, type ProcessStartToken } from './process-liveness.js';
 import { VALIDATION_FACT_VERSION, type ValidationExecution } from './evidence-ledger.js';
-import { runProjectValidationBaseline, runValidationCommand, type ValidationCommand, type ProjectValidationDependencies } from './project-validation.js';
+import { runProjectValidationBaseline, runValidationCommand, type ValidationCommand, type ValidationLimits, type ProjectValidationDependencies } from './project-validation.js';
 
 export interface EngineValidationRecord {
   validationVersion: number;
@@ -16,6 +16,10 @@ export interface EngineValidationRecord {
   resourceState: 'complete' | 'unfinished';
   recordPath: string;
   executions: ValidationExecution[];
+  /** The numbers in force for the latest execution: the declaration, else the engine defaults. */
+  limits: Required<ValidationLimits>;
+  /** Allowance consumed: each execution is charged the full time limit it ran under. */
+  spentMs: number;
   pass: boolean;
 }
 interface Ticket { id: string; tree: string; pid: number; start?: ProcessStartToken; active: boolean; run?: { projectDir: string; runId: string } }
@@ -28,13 +32,23 @@ interface Queue { tickets: Ticket[] }
 export async function engineValidation(input: ProjectValidationDependencies & {
   projectDir: string; treeHash: string; commands: readonly ValidationCommand[];
   treeAfter: () => string | null;
+  /** Declared by the brief; absent fields use the engine defaults. */
+  limits?: ValidationLimits;
   completed?: ValidationExecution;
   run?: Ticket['run'];
 }): Promise<EngineValidationRecord> {
   const defaults = loadEngineDefaults();
+  const limits: Required<ValidationLimits> = { timeoutMs: input.limits?.timeoutMs ?? defaults.validation_timeout_ms,
+    attempts: input.limits?.attempts ?? defaults.validation_attempts };
+  // The allowance is the declared time of one execution times the declared executions.
+  // A record is exhausted when that allowance is no larger than what it already spent.
+  const allowance = limits.timeoutMs * limits.attempts;
+  const exhausted = (record: EngineValidationRecord): boolean => !(record.spentMs < allowance);
   const root = join(fcGlobalDir(), 'validation');
   mkdirSync(root, { recursive: true });
   const queuePath = join(root, 'queue.json'), recordPath = join(root, `${input.treeHash}.json`);
+  const empty = (): EngineValidationRecord => ({ validationVersion: VALIDATION_FACT_VERSION, treeHash: input.treeHash,
+    resourceState: 'unfinished', recordPath, executions: [], limits, spentMs: 0, pass: false });
   const ticket: Ticket = { id: randomUUID(), tree: input.treeHash, pid: process.pid, start: processStartToken(process.pid), active: false, run: input.run };
   const readRecord = (): EngineValidationRecord | undefined => existsSync(recordPath)
     ? JSON.parse(readFileSync(recordPath, 'utf8')) as EngineValidationRecord : undefined;
@@ -58,12 +72,12 @@ export async function engineValidation(input: ProjectValidationDependencies & {
       const state = transaction(queue => {
         record = readRecord();
         if (!record && input.completed) {
-          record = { validationVersion: VALIDATION_FACT_VERSION, treeHash: input.treeHash,
-            resourceState: 'complete', recordPath, executions: [input.completed],
+          record = { ...empty(), resourceState: 'complete', executions: [input.completed],
             pass: input.completed.commands.every(command => command.exitCode === 0) };
           atomicWrite(recordPath, JSON.stringify(record));
         }
-        if (record?.resourceState === 'complete') return 'cached';
+        // A completed record is never executed again, whatever limits ask for it.
+        if (record && (record.resourceState === 'complete' || exhausted(record))) return 'cached';
         if (input.abortSignal?.aborted) return 'cancelled';
         if (!queue.tickets.some(entry => entry.id === ticket.id)) queue.tickets.push(ticket);
         const active = queue.tickets.filter(entry => entry.active);
@@ -79,27 +93,27 @@ export async function engineValidation(input: ProjectValidationDependencies & {
         return own.active ? 'execute' : 'queued';
       });
       if (state === 'cached') return record!;
-      if (state === 'cancelled') return record ?? { validationVersion: VALIDATION_FACT_VERSION,
-        treeHash: input.treeHash, resourceState: 'unfinished', recordPath, executions: [], pass: false };
+      if (state === 'cancelled') return record ?? empty();
       if (state === 'execute') break;
       await delay(50);
     }
-    record ??= { validationVersion: VALIDATION_FACT_VERSION, treeHash: input.treeHash,
-      resourceState: 'unfinished', recordPath, executions: [], pass: false };
-    // Resource attempts are persisted and bounded independently of author and
-    // repair attempts. Resuming cannot silently reset the numeric allowance.
-    while (record.executions.length < defaults.validation_attempts && !input.abortSignal?.aborted) {
+    record ??= empty();
+    // Spent allowance is persisted and bounded independently of author and repair
+    // attempts. Resuming cannot silently reset it; only a larger declared allowance
+    // than the record has spent admits another execution.
+    while (!exhausted(record) && !input.abortSignal?.aborted) {
       // A ticket binds content at admission, not when it joined the queue.
       // Refuse changed/unreadable content without executing it under an old hash.
       if (input.treeAfter() !== input.treeHash) break;
       const execution: ValidationExecution = { target: 'attempt', cwd: input.projectDir,
         treeHash: input.treeHash, treeAfterHash: null, commands: [] };
       record.executions.push(execution);
+      record.limits = limits; record.spentMs += limits.timeoutMs;
       atomicWrite(recordPath, JSON.stringify(record));
       const measured = await runProjectValidationBaseline(input.projectDir, { ...input,
         commands: input.commands, skipExecution: false, remainingMs: undefined,
         runCommand: input.runCommand ?? runValidationCommand,
-        timeoutMs: defaults.validation_timeout_ms, priority: defaults.validation_priority });
+        timeoutMs: limits.timeoutMs, priority: defaults.validation_priority });
       const after = input.treeAfter();
       execution.treeAfterHash = after;
       execution.commands = measured.results.map(result => ({ ...result, command: result.command!, args: result.args! }));

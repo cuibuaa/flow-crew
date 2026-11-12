@@ -137,7 +137,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '43', digest: '0a2ea99ad38d' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '44', digest: 'da7f661ef981' });
   });
 
   it('contains no private measured case studies', () => {
@@ -158,7 +158,6 @@ describe('public autonomous launch documentation', () => {
     expect(setup).toBeDefined();
     for (const option of ['--brief', '--target', '--base', '--branch']) expect(setup).toContain('`' + option + '`');
     expect(normalized.toLowerCase()).toContain('target-owned');
-    expect(normalized).toContain('Exit 127 is not universally a refusal');
     expect(normalized).toContain('untracked and ignored paths');
     expect(normalized).toContain('proven regenerable outputs are counted');
     expect(normalized).toContain('symlink items are named');

@@ -24,9 +24,6 @@ Thumbs.db
 *.tsbuildinfo
 ui/*.d.ts.map
 docs/*
-!docs/validation-ownership/
-docs/validation-ownership/*
-!docs/validation-ownership/report.md
 tests/
 ui/tests/
 design/*

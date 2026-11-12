@@ -66,8 +66,13 @@ export interface BriefValidationCommand {
   evidencePath: string;
 }
 
+/** Time one execution of the whole batch may take (shared among its commands) and the
+ * number of executions of an unfinished batch. Absent fields use the engine defaults. */
+export interface ValidationLimits { timeoutMs?: number; attempts?: number }
+
 export interface ValidationParseResult {
   commands: BriefValidationCommand[];
+  limits?: ValidationLimits;
   error?: string;
 }
 
@@ -83,15 +88,21 @@ const commandDeclaration = z.object({
   report: z.object({ format: z.literal('vitest-json'), path: argument.refine(value => value.length > 0
     && !isAbsolute(value) && !value.split('/').includes('..'), 'must be a project-relative file').optional() }).strict().optional(),
 }).strict();
-const validationDeclaration = z.object({ commands: z.object({
+const commandsDeclaration = z.object({ commands: z.object({
   build: commandDeclaration.optional(), test: commandDeclaration.optional(), lint: commandDeclaration.optional(),
 }).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') }).strict();
+// Only a brief states limits; the project's own declaration file stays commands-only.
+// The timeout bound is the largest delay a timer can carry.
+const validationDeclaration = commandsDeclaration.extend({
+  timeoutMs: z.number().int().positive().max(2 ** 31 - 1).optional(),
+  attempts: z.number().int().positive().optional(),
+});
 
 const projectCommandDeclaration = commandDeclaration.extend({ rerun: z.object({
   command: argument.refine(value => value.trim().length > 0), args: z.array(argument),
   timeoutMs: z.number().int().positive().optional(),
 }).strict().optional() });
-const projectValidationDeclaration = validationDeclaration.extend({ commands: z.object({
+const projectValidationDeclaration = commandsDeclaration.extend({ commands: z.object({
   build: projectCommandDeclaration.optional(), test: projectCommandDeclaration.optional(), lint: projectCommandDeclaration.optional(),
 }).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') });
 
@@ -102,6 +113,10 @@ export const ValidationSelectionSchema = z.object({ commands: z.object({
 }).strict(), reason: z.string().min(1).max(4096) }).strict();
 export const VALIDATION_SELECTION_JSON_SCHEMA = z.toJSONSchema(ValidationSelectionSchema) as unknown as Schema;
 
+const declaredLimits = ({ timeoutMs, attempts }: ValidationLimits): { limits?: ValidationLimits } =>
+  timeoutMs === undefined && attempts === undefined ? {}
+    : { limits: { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(attempts !== undefined ? { attempts } : {}) } };
+
 export function parseValidationCommands(validation: unknown, evidencePathRoot: string, project = false): ValidationParseResult {
   if (validation === undefined) return { commands: [] };
   const parsed = (project ? projectValidationDeclaration : validationDeclaration).safeParse(validation);
@@ -111,7 +126,7 @@ export function parseValidationCommands(validation: unknown, evidencePathRoot: s
   return { commands: ROLES.flatMap(role => {
     const command = parsed.data.commands[role];
     return command ? [{ role, ...command, evidencePath: `${evidencePathRoot}#validation.commands.${role}` }] : [];
-  }) };
+  }), ...(project ? {} : declaredLimits(parsed.data as ValidationLimits)) };
 }
 
 /** The same declaration parser serves setup and low-level author entry points. */
