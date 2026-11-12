@@ -90,6 +90,12 @@ it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
 
 async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], stages = [stage()]) {
   let calls = 0, aborts = 0;
+  // These cases measure write admission/rollback, not elapsed time. An 8s
+  // stage warns after 1.7s; host contention must not inject a wrap-up turn.
+  // Command bounds and the outer test timeout still use the real clock.
+  const startedAt = Date.now();
+  const deadlineClock = { monotonicNow: () => 0, wallNow: () => startedAt,
+    setTimer: () => ({}) as ReturnType<typeof setTimeout>, clearTimer: () => {} };
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls++;
     opts.abortSignal?.addEventListener('abort', () => { aborts++; }, { once: true });
@@ -98,7 +104,7 @@ async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], st
   } };
   await runScopeSafeStageGroup(stages, project, runId, 1, (s, settlementBoundary) => runStage(adapter, {
     stageId: s.id, role, dependsOn: [], promptTemplate: 'Complete the required project work.',
-    projectDir: project, runId, runDir: directory, retries: 0, timeout_ms: 8_000,
+    projectDir: project, runId, runDir: directory, retries: 0, timeout_ms: 8_000, deadlineClock,
      artifactContract: fixtureArtifactContract(s.id), settlementBoundary,
   }));
   return { calls, aborts, status: readStageStatus(project, runId, stages[0].id),

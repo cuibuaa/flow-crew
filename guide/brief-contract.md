@@ -105,6 +105,21 @@ reported by parse/preflight before execution.
 
 ## Inputs, outputs and validation
 
+`input_limit_chars` optionally lowers the engine's model-input ceiling. Declare a positive
+safe integer in leading frontmatter; a larger value or any other type refuses admission,
+reporting the declared value and the engine ceiling. The engine records the admitted number
+as `inputLimitChars` in `run.json`. It measures system instructions plus the assembled user
+input in UTF-16 characters before invocation input capture or any adapter call. Fitting inputs
+are sent unchanged; an oversized input returns typed `input_too_large` with numeric
+`measuredLength` and `limit`, and is never automatically replayed.
+
+Each send uses the smaller of the admitted ceiling and the actual selected adapter's
+configured ceiling, including per-role overrides. Review routing and inline evidence use
+that same owner-resolved number. Brief authorship applies its actual adapter's ceiling and
+any lower declaration before writing input evidence. Resume reads the recorded number;
+legacy admissions without it use the engine's configured number, without reinterpreting
+the archived brief. Status, watch, listing and UI readers require no migration.
+
 One strict schema reads only the leading top-level `inputs`, `outputs` and `criteria`
 fields. Other frontmatter contracts have their own readers; arbitrary nested metadata is
 never searched for paths. Inputs are an array of path strings or `{path, frozen?, type?, sha256?}` entries.

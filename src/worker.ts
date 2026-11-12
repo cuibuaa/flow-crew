@@ -23,7 +23,7 @@ import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './a
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
 import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext } from './evidence-ledger.js';
-import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
+import { adapterInputLimit, adapterInputLength, INPUT_RESERVE_CHARS, runAdapter } from './adapter-input.js';
 import { createHash } from 'node:crypto';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
@@ -803,7 +803,7 @@ export async function runStage(
     // stays bound to the attempt that preceded this execution, not its children.
     const rest = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${previousInvocation ? `# Previous invocation record\n${JSON.stringify(previousInvocation)}\n\n` : ''}${deadlineContext()}\n\n${stateContext}`;
     const currentEvidence = opts.isolatedInput ? '' : evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null,
-      adapterInputLimit(selectedAdapter) - INPUT_RESERVE_CHARS - rest.length);
+      adapterInputLimit(selectedAdapter, runState?.inputLimitChars) - INPUT_RESERVE_CHARS - adapterInputLength(invocationRole.prompt, rest));
     const effectiveInvocationPrompt = `${currentEvidence ? `${currentEvidence}\n\n` : ''}${rest}`;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
@@ -950,10 +950,7 @@ export async function runStage(
         const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment and a maximum 60-second bound, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
         const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
         try {
-        if (!selectedAdapter.capturesInvocationInput) {
-          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt }, 'adapter');
-        }
-        return await selectedAdapter.run(recordedPrompt, invocationRole, {
+        return await runAdapter(selectedAdapter, recordedPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
@@ -967,6 +964,8 @@ export async function runStage(
           onCommandLifecycle,
           onInvocationInput: (input) => captureInput(input, 'model'),
           outputSchema: opts.outputSchema,
+        }, runState?.inputLimitChars, () => {
+          if (!selectedAdapter.capturesInvocationInput) captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt }, 'adapter');
         });
         } finally { await recorder?.close(); }
       }).then(

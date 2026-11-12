@@ -1010,6 +1010,7 @@ async function cmdQuick(preview = false) {
     console.error(written.outcome === 'blocking_questions'
       ? `Brief needs answers:\n${written.questions.map(q => `- ${q}`).join('\n')}`
       : written.outcome === 'provider_error' ? `Brief provider call failed; rerun to try again:\n${written.reasons.join('\n')}`
+      : written.outcome === 'input_too_large' ? written.reasons.join('\n')
       : `Brief writing stopped after at most two retries:\n${written.reasons.join('\n')}`);
     process.exitCode = written.outcome === 'blocking_questions' ? EXIT_CODE.briefQuestions
       : written.outcome === 'provider_error' ? EXIT_CODE.briefProviderFailure : EXIT_CODE.failed;

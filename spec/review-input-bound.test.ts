@@ -3,12 +3,14 @@ import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapters/failure.js';
 import { providerFailureFromEvent } from '../src/provider-result.js';
-import { adapterInputLimit, INPUT_RESERVE_CHARS, loadEngineDefaults } from '../src/config.js';
+import { loadEngineDefaults } from '../src/config.js';
+import { adapterInputLimit, INPUT_RESERVE_CHARS } from '../src/adapter-input.js';
 import { decisionInput } from '../src/decision-context.js';
 import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
 import { decisionSchema, POST_AUTHOR_PROMPT } from '../src/decision-graph.js';
@@ -71,8 +73,7 @@ function gateVerdict(opts: RunOpts) {
 }
 
 beforeEach(() => {
-  mkdirSync(join(process.cwd(), 'tmp'), { recursive: true });
-  root = mkdtempSync(join(process.cwd(), 'tmp/review-input-'));
+  root = mkdtempSync(join(tmpdir(), 'review-input-'));
   project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   git('init', '-q');

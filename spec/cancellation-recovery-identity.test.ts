@@ -38,7 +38,11 @@ function checkpoint() {
 const cancelChild = `
 import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url'; import {syncBuiltinESMExports} from 'node:module';
 const [runtime,fc,id,canonical,ack,queued]=process.argv.slice(1);const lock=path.join(fc,'runs',canonical,'engine','.run-state.lock');const open=fs.openSync;
-fs.openSync=function(file,...args){try{return open(file,...args)}catch(e){if(String(file)===lock&&e.code==='EEXIST')fs.writeFileSync(queued,'queued');throw e}};syncBuiltinESMExports();
+// This fixture measures publication ordering, not lock-wait duration. Freeze
+// only the lock-wait clock while the parent deliberately holds publication;
+// restore it on acquisition. The parent's real timeout still bounds deadlocks.
+const now=Date.now;let waitingAt;Date.now=()=>waitingAt??now();
+fs.openSync=function(file,...args){try{const fd=open(file,...args);if(String(file)===lock)waitingAt=undefined;return fd}catch(e){if(String(file)===lock&&e.code==='EEXIST'){waitingAt??=now();fs.writeFileSync(queued,'queued')}throw e}};syncBuiltinESMExports();
 const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);
 const {RunCancellationCoordinator}=await load('run-control');const c=new RunCancellationCoordinator({registry:{list:()=>[]},units:{isActive:async()=>({kind:'absent'}),stopUnit:async()=>{}},runsDir:path.join(fc,'runs')});
 const result=await c.cancelRun(id);const dir=path.join(fc,'runs',canonical);
@@ -52,13 +56,13 @@ const raceChild = `
 import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {pathToFileURL} from 'node:url';import {syncBuiltinESMExports} from 'node:module';
 const [runtime,fc,project,id,point]=process.argv.slice(1);const dir=path.join(fc,'runs',id),ack=path.join(fc,'ack.json'),queued=path.join(fc,'queued');
 const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);const recovery=await load('restart-recovery');
-const rename=fs.renameSync;let hit=false,early=false,child;const sleep=()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
+const rename=fs.renameSync;let hit=false,early=false,child,childError='';const sleep=()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
 fs.renameSync=function(from,to){let boundary;try{const v=JSON.parse(fs.readFileSync(from,'utf8'));if(String(to)===path.join(dir,'engine','stages/work/status.json')&&v.status==='failed')boundary='closed_ledger_before';else if(String(to)===path.join(dir,'run.json'))boundary=v.recoveryIntent?.phase==='committed'?'commit_before':v.stages?.work?.status==='failed'?'closed_projection_before':undefined}catch{}
-if(!hit&&boundary===point){hit=true;child=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,'accepted_alias',id,ack,queued],{stdio:'ignore'});const deadline=Date.now()+8000;while(!fs.existsSync(ack)&&!fs.existsSync(queued)){if(Date.now()>deadline)throw new Error('lock/ack boundary not reached');sleep()}early=fs.existsSync(ack)}return rename(from,to)};syncBuiltinESMExports();
+if(!hit&&boundary===point){hit=true;child=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,'accepted_alias',id,ack,queued],{stdio:['ignore','ignore','pipe']});child.stderr.setEncoding('utf8').on('data',chunk=>{childError+=chunk});const deadline=Date.now()+8000;while(!fs.existsSync(ack)&&!fs.existsSync(queued)){if(Date.now()>deadline)throw new Error('lock/ack boundary not reached');sleep()}early=fs.existsSync(ack)}return rename(from,to)};syncBuiltinESMExports();
 try {
  recovery.reconcileHostInterruptedRun(project,id,{currentBootId:'new-boot',currentGeneration:'fixture-generation'});
  fs.renameSync=rename;syncBuiltinESMExports();
- if(child)await new Promise((done,fail)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');fail(new Error('canceller did not settle'))},8000);child.once('close',()=>{clearTimeout(timer);done()})});
+ if(child)await new Promise((done,fail)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');fail(new Error('canceller did not settle'))},8000);child.once('error',error=>{clearTimeout(timer);fail(error)});child.once('close',code=>{clearTimeout(timer);if(code!==0)fail(new Error('canceller exited '+code+': '+childError));else done()})});
  const receipt=JSON.parse(fs.readFileSync(ack,'utf8'));console.log(JSON.stringify({hit,early,queued:fs.existsSync(queued),result:receipt.result.status,rawPreserved:receipt.raw===fs.readFileSync(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===fs.readFileSync(path.join(dir,'engine','stages/work/status.json'),'utf8'),status:store.readRunState(project,id).status}));
 } finally {fs.renameSync=rename;syncBuiltinESMExports();if(child&&child.exitCode===null)child.kill('SIGKILL')}
 `;

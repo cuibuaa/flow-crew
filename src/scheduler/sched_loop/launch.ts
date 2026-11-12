@@ -1,4 +1,5 @@
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
+import { adapterInputLimit, admitInputLimit } from '../../adapter-input.js';
 import { runRecordPath, assertSeparatedRunLayout } from '../../run-layout.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
@@ -43,7 +44,7 @@ export function workflowContinuation(state: StoreState, projectDir: string, runI
 
 export function prepareWorkflowLaunch(
   workflow: WorkflowConfig, workflowYaml: string, projectDir: string,
-  existingRunId?: string, taskDescription?: string, briefAdmission?: BriefAdmissionRecord,
+  existingRunId?: string, taskDescription?: string, briefAdmission?: BriefAdmissionRecord, engineInputLimit = adapterInputLimit(),
 ): { kind: 'settled'; state: StoreState } | {
   kind: 'ready'; runId: string; runDirPath: string; launchIntentOwned: boolean;
   maxIterations: number; baseStages: StageConfig[]; workflowYaml: string;
@@ -73,6 +74,8 @@ export function prepareWorkflowLaunch(
   }
   // First admission validates declarations before claiming resources; execution
   // resumption and its recovery/cancellation fences retain their existing path.
+  const inputLimitChars = launchState?.inputLimitChars ?? (briefWasAdmitted
+    ? engineInputLimit : admitInputLimit(taskDescription ?? '', engineInputLimit));
   if (taskDescription !== undefined && !briefWasAdmitted) {
     parseBriefDeclarations(taskDescription);
     const verified = verifyDeclaredBriefInputs(taskDescription, projectDir);
@@ -150,6 +153,7 @@ export function prepareWorkflowLaunch(
       if (hasRunState) return { kind: 'settled', state: readRunState(projectDir, runId) };
       initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
       const blocked = readRunState(projectDir, runId);
+      blocked.inputLimitChars = inputLimitChars;
       if (taskDescription) blocked.taskDescription = taskDescription;
       if (briefAdmission) blocked.briefAdmission = briefAdmission;
       if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
@@ -164,6 +168,7 @@ export function prepareWorkflowLaunch(
       initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
       const state = readRunState(projectDir, runId);
       state.briefConfigured = false;
+      state.inputLimitChars = inputLimitChars;
       writeRunState(projectDir, runId, state);
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
@@ -200,6 +205,7 @@ export function prepareWorkflowLaunch(
     }
     if (!resumingExistingRun && !reservation) {
       state.status = 'running';
+      state.inputLimitChars ??= inputLimitChars;
       state.workflowName = workflow.name;
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
@@ -231,6 +237,7 @@ export function prepareWorkflowLaunch(
     initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
     const state = readRunState(projectDir, runId);
     state.briefConfigured = false;
+    state.inputLimitChars = inputLimitChars;
     writeRunState(projectDir, runId, state);
     if (taskDescription) state.taskDescription = taskDescription;
     if (briefAdmission) state.briefAdmission = briefAdmission;
@@ -331,6 +338,7 @@ export function prepareWorkflowLaunch(
         current.stages[stageId] = pending;
       }
       current.status = 'running';
+      current.inputLimitChars ??= inputLimitChars;
       current.workflowName = workflow.name;
       current.maxIterations = maxIterations;
       current.currentIteration = resumeAtIteration;

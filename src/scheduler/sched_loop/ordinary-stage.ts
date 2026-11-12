@@ -2,7 +2,7 @@ import { runRecordPath } from '../../run-layout.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { decisionSchema } from '../../decision-graph.js';
 import { decisionInput, focusedReviewInput } from '../../decision-context.js';
-import { adapterInputLimit } from '../../config.js';
+import { adapterInputLimit } from '../../adapter-input.js';
 import { buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
 // Boundary: Prepare and execute one ordinary stage with admitted prompt/context, shared attempt budgets, session rules and a supplied live write guard.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
@@ -141,9 +141,11 @@ export async function executeOrdinaryStage(
       const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
       if (reviewDecision) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}${reviewDecision.decision?.successors[1] === stage.id ? '\nPerform the full independent review; these risks do not narrow coverage.' : ''}`;
       const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
-        ? decisionInput(stage, projectDir, runDirPath, state, adapterInputLimit(stageAdapter))
+        ? decisionInput(stage, projectDir, runDirPath, state, adapterInputLimit(stageAdapter, state.inputLimitChars))
         : undefined;
-      const result = await runStage(isolatedInput?.adapter ?? stageAdapter, {
+      // A code-decided substitute retains the configured identity used to size its input.
+      const executionAdapter = isolatedInput?.adapter ? { ...isolatedInput.adapter, sessionKind: stageAdapter.sessionKind } : stageAdapter;
+      const result = await runStage(executionAdapter, {
         stageId: stage.id,
         role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,
         dependsOn: stage.depends_on ?? [],

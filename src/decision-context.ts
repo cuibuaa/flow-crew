@@ -6,7 +6,7 @@ import type { StoreState } from './store.js';
 import { POST_AUTHOR_PROMPT, CHOOSER_PROMPT } from './decision-graph.js';
 import type { StageConfig } from './scheduler/sched_admission/configuration.js';
 import { captureProjectTree, projectValidationFact, readEvidence, stagePredecessor, validationForTree } from './evidence-ledger.js';
-import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
+import { adapterInputLimit, INPUT_RESERVE_CHARS } from './adapter-input.js';
 import type { Adapter } from './adapters/base.js';
 
 const MAX_BUFFER = 8_000_000;

@@ -1,6 +1,6 @@
 import { normalizedProjectPath } from '../scheduler/sched_admission/scope-services.js';
 import { isSessionUuid } from '../adapter-session.js';
-import { nativeDiagnostic, providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
+import { nativeDiagnostic, providerFailureFromEvent, type NativeProviderFailure, type ProviderFailure } from '../provider-result.js';
 import type { CommandContext } from './base.js';
 import { isAbsolute } from 'node:path';
 
@@ -38,7 +38,7 @@ function filePaths(value: unknown, out: string[]): void {
 }
 
 /** Translate native envelopes once, before settlement, lifecycle and presentation. */
-export function normalizeNativeEvent(event: RecordValue, provider?: ProviderFailure['provider']): NativeEvent {
+export function normalizeNativeEvent(event: RecordValue, provider?: NativeProviderFailure['provider']): NativeEvent {
   const result: NativeEvent = { commands: [], tools: [], results: [], writes: [] };
   const nativeId = event.type === 'thread.started' ? event.thread_id
     : event.type === 'result' || (event.type === 'system' && event.subtype === 'init') ? event.session_id : undefined;

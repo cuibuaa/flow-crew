@@ -15,6 +15,8 @@ import { engineConfigDir, loadEngineDefaults } from './config.js';
 import { parseAgent } from './scheduler/sched_admission/configuration.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { fcGlobalDir } from './store.js';
+import { adapterInputLimit, admitInputLimit, runAdapter } from './adapter-input.js';
+import type { InputLimitRefusal } from './provider-result.js';
 
 // The transport and local validation derive from this single schema.
 const strings = z.array(z.string().min(1));
@@ -46,7 +48,8 @@ const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringi
 export interface WrittenBrief {
   brief: string;
   digest: string;
-  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error';
+  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error' | 'input_too_large';
+  refusal?: InputLimitRefusal;
   questions: string[];
   reasons: string[];
   evidenceDir?: string;
@@ -74,12 +77,11 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   // Configuration errors are refusals, not failed provider attempts. Resolve
   // before creating invocation evidence or entering the provider-error catch.
   const adapter = options.adapterInstance ?? await loadAdapterByName(adapterName);
+  const inputLimit = admitInputLimit(original, adapterInputLimit(adapter));
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
-  const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA]));
+  const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA, inputLimit]));
   const root = join(fcGlobalDir(), 'brief-writing');
   const evidenceDir = join(root, identity);
-  mkdirSync(evidenceDir, { recursive: true });
-  atomicWrite(join(evidenceDir, 'original.txt'), original, { durability: 'durable' });
   const defaults = loadEngineDefaults();
   let reasons: string[] = [];
   const finish = (brief: string, outcome: WrittenBrief['outcome'], questions: string[]): WrittenBrief => {
@@ -88,7 +90,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     return { brief, digest, outcome, questions, reasons, evidenceDir };
   };
   // Incomplete attempts are evidence, never a task reservation or a consumed retry.
-  const prior = (options.replay === false ? [] : readdirSync(evidenceDir)).filter(name => {
+  const prior = (options.replay === false || !existsSync(evidenceDir) ? [] : readdirSync(evidenceDir)).filter(name => {
     if (!name.endsWith('.reply.json')) return false;
     const stem = name.slice(0, -'.reply.json'.length);
     if (existsSync(join(evidenceDir, `${stem}.registered.json`))
@@ -112,18 +114,26 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     else {
       const prompt = `Read the repository to resolve the task. Return exactly the supplied JSON schema.\nOriginal task (JSON string, authoritative):\n${JSON.stringify(original)}\n`
         + `Previous validation reasons: ${JSON.stringify(reasons)}`;
-      save(file('invocation.json'), { role: reader, adapter: role.adapter ?? options.adapter,
-        prompt, replay: options.replay !== false, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
       try {
-        result = await adapter.run(prompt, reader, {
+        result = await runAdapter(adapter, prompt, reader, {
           workDir: project, runDir: evidenceDir, stageId: `brief_writer_${attempt}`,
           timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA,
           onInvocationInput: input => save(file(`native-${randomUUID()}.json`), input),
           onRequestEvidence: record => save(file(`requests-${randomUUID()}.json`), record),
+        }, inputLimit, () => {
+          mkdirSync(evidenceDir, { recursive: true });
+          atomicWrite(join(evidenceDir, 'original.txt'), original, { durability: 'durable' });
+          save(file('invocation.json'), { role: reader, adapter: adapterName,
+            prompt, replay: options.replay !== false, inputLimitChars: inputLimit,
+            outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
         });
       } catch (error) {
         result = { output: '', exitCode: 1, duration_ms: 0, friendlyError: String(error) };
       }
+      if (result.providerFailure?.source === 'input_limit') return {
+        brief: original, digest: hash(original), outcome: 'input_too_large', questions: [],
+        reasons: [result.providerFailure.reason], refusal: result.providerFailure,
+      };
       if (result.exitCode !== 0) {
         reasons = [`Adapter exit ${result.exitCode}: ${result.friendlyError ?? result.output}`];
         save(file('failure.json'), result);

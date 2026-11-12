@@ -11,7 +11,7 @@ export interface ProviderTerminalDiagnostic {
   resetAt?: unknown;
 }
 
-export interface ProviderFailure {
+export interface NativeProviderFailure {
   kind: ProviderFailureKind;
   /** Provider-owned reset instant; never extracted from diagnostic prose. */
   resetAt?: string;
@@ -23,6 +23,20 @@ export interface ProviderFailure {
   /** Hash of the original diagnostic; bounding/redaction does not change identity. */
   diagnosticSha256: string;
 }
+
+/** Engine refusal shares the existing non-replayable size-failure policy. */
+export interface InputLimitRefusal {
+  kind: 'input_too_large';
+  provider: 'engine';
+  source: 'input_limit';
+  eventType: 'input_limit';
+  measuredLength: number;
+  limit: number;
+  reason: string;
+  diagnosticSha256: string;
+  resetAt?: never;
+}
+export type ProviderFailure = NativeProviderFailure | InputLimitRefusal;
 
 export function nativeDiagnostic(event: Record<string, any>): string | undefined {
   const primary = [event.message, typeof event.error === 'string' ? event.error : event.error?.message, event.item?.message]
@@ -60,7 +74,7 @@ export function providerFailureFromDiagnostic(diagnostic: ProviderTerminalDiagno
 }
 
 /** Read root event diagnostics only. Nested tool/probe output is not authority. */
-export function providerFailureFromEvent(provider: ProviderFailure['provider'], value: unknown): ProviderFailure | undefined {
+export function providerFailureFromEvent(provider: ProviderTerminalDiagnostic['provider'], value: unknown): ProviderFailure | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const event = value as Record<string, unknown>;
   const type = event.type;

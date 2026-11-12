@@ -1,4 +1,5 @@
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
+import { adapterInputLimit } from '../../adapter-input.js';
 import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
 import { runResearchLoop, researchStages } from '../sched_policy/research.js';
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
@@ -45,7 +46,7 @@ export async function runWorkflow(
   const declared = taskDescription ? parseBriefFrontmatter(taskDescription) : undefined;
   if (declared?.research) workflow = { ...workflow, name: 'research', stages: researchStages(declared.research), dispatch: undefined };
   let launch;
-  try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission); }
+  try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission, adapterInputLimit(adapter)); }
   catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const policyRefusal = reason.startsWith('Deployment hold is active') || reason.startsWith('Cannot resume: iteration budget exhausted');

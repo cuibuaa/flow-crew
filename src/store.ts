@@ -459,6 +459,8 @@ export interface StoreState {
   briefConfigured?: boolean;
   /** Exact brief identity and recorded preflight findings admitted before launch. */
   briefAdmission?: BriefAdmissionRecord;
+  /** Admitted model-input ceiling; absent on historical records (use engine configuration). */
+  inputLimitChars?: number;
   currentIteration?: number;
   gateRetryRound?: { iteration: number; round: number };
   maxIterations?: number;
