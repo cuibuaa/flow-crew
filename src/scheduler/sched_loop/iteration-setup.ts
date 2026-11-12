@@ -62,7 +62,7 @@ export async function prepareWorkflowIteration(
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
     // written by a PRIOR iteration (or present at start). Takes precedence
     // Floor-unmet writes a hint and falls through.
-    const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
+    const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, stages: baseStages });
     if (terminalTop.decision === 'matched') return { kind: 'settled', state: terminalTop.state };
 
     // Archive the shared scheduler/operator ledger between iterations so the

@@ -36,7 +36,7 @@ export function listProjectFiles(
           if (options.complete) files.push(relative);
           if (!options.skipDirectory?.(relative)) walk(absolute, relative);
         }
-        else if (stat.isFile()) files.push(relative);
+        else if (stat.isFile() || options.complete) files.push(relative);
       } catch (error) { if (options.complete) throw error; /* file changed while being enumerated */ }
     }
   };

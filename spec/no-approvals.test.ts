@@ -144,11 +144,14 @@ describe('nothing waits for a person after launch', () => {
     expect(fixture.prompts[0]).not.toContain('missing_author_facts');
     expect(state.decisionGraph?.records[0].outcome).toBe('chosen');
   });
-  it('corrects a stale metric_search chooser reply without demanding research facts from an engineering declaration', async () => {
+  it.each([
+    { shape: 'declared missing facts', missing: ['research.baseline', 'research.policy', 'research.stop'] },
+    { shape: 'empty missing facts', missing: [] },
+  ])('corrects a stale metric_search reply with $shape without changing engineering mode', async ({ missing }) => {
     const fixture = adapter(); let choices = 0;
     const state = await execute({ async run(prompt, role, opts) {
       if (opts.stageId === 'choose' && ++choices === 1) return { output: JSON.stringify({ ...choose,
-        metric_search: true, missing_author_facts: ['research.measurement', 'research.stop'] }), exitCode: 0, duration_ms: 1 };
+        metric_search: true, missing_author_facts: missing }), exitCode: 0, duration_ms: 1 };
       return fixture.implementation.run(prompt, role, opts);
     } }, '---\ninputs: []\noutputs: []\n---\n# Improve a measured metric\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n');
     expect(state.status, state.failureReason).toBe('complete'); expect(state.research).toBeUndefined();

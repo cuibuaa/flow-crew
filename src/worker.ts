@@ -167,7 +167,11 @@ function diffScopedArtifacts(
   const changed: string[] = [];
   const absent: ContentIdentity = { state: 'absent' };
   for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (compareContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
+    const prior = before.get(path) ?? absent;
+    const current = after.get(path) ?? absent;
+    // Unavailable content cannot prove equality across a state transition.
+    // Nominate it for settlement without inventing a restorable preimage.
+    if (compareContentIdentities(prior, current) !== 'different' && prior.state === current.state) continue;
     changed.push(relative(projectDir, path).replace(/\\/g, '/'));
   }
   return changed.sort();
@@ -1472,6 +1476,7 @@ export async function runStage(
     if (result.exitCode !== 0) result.continuation = undefined;
     result.terminationCause = settled?.terminationCause ?? 'exit';
     result.endingCause = settled?.endingCause;
+    if (settled?.engineVoid) result.friendlyError ??= final.error;
     recordRunEvent(opts.projectDir, opts.runId, {
       type: result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
       runId: opts.runId,

@@ -30,22 +30,20 @@ function structuredBrief(body: string): string {
 }
 
 describe('skill-consolidation release contract', () => {
-  it('enforces write, ownership, criterion and routing protections without numbered planner rules', () => {
+  it('enforces criterion and routing protections without numbered planner rules', () => {
     expect(plannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
     const stage = (id: string, extra = {}) => StageConfigSchema.parse({
       id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',
       artifact_contract:{version:1,produces:[],reads:[]},...extra,
     });
     const admit = (stages: ReturnType<typeof stage>[], extra = {}) => inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan',...extra});
-    const terminalStates = {complete:{paths:['docs/final.md']}};
-    expect(admit([stage('first'),stage('second')],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('expected exactly one final producer, found 2');
     const criteria = extractBriefCriteria('# Task\n## Acceptance Criteria\n1. The report must preserve independently verified evidence.\n');
     expect(criteria.criteria.length).toBeGreaterThan(0);
     const work = stage('work',{criterion_refs:criteria.criteria.map((criterion)=>criterion.id)});
     const uncovered = admit([work],{criteria});
     expect(uncovered.pass).toBe(false);
     expect(uncovered.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
-    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('unknown stage research');
+    expect(admit([stage('owner',{condition:'research.decision == continue'})]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('unknown stage research');
   });
 
   it('retires terminal-path prose inference for level-two sections and declarations', () => {

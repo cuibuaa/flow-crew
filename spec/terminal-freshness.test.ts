@@ -185,7 +185,7 @@ terminal_states:
     expect(adapter.calls.map(call => call.stageId)).toEqual(['plan', 'deliver']);
   }, 60_000);
 
-  it('accepts an admitted owner regenerating a preexisting terminal artifact with identical bytes', async () => {
+  it('rejects a preexisting terminal artifact rewritten with identical bytes', async () => {
     const projectDir = project();
     const artifact = join(projectDir, 'docs/task_summary.md');
     const content = '# unchanged but regenerated terminal result\n';
@@ -202,7 +202,7 @@ terminal_states:
       regenerate: { projectFiles: { 'docs/task_summary.md': content } },
     });
 
-    expect(state.status, state.failureReason).toBe('shipped');
+    expect(state.status, state.failureReason).toBe('incomplete');
     expect(readFileSync(artifact, 'utf8')).toBe(content);
     expect(state.stages.regenerate?.status).toBe('complete');
     expect(state.stages.regenerate?.attempts?.at(-1)?.writes).toContain('docs/task_summary.md');
@@ -255,46 +255,7 @@ terminal_states:
     expect(state.status).toBe('shipped');
     expect(state.stages.execute_work?.status).toBe('complete');
     expect(adapter.calls.some((call) => call.stageId === 'execute_work')).toBe(true);
-    expect(guidance).toContain('requires at least one non-plan stage to complete during this run');
   }, 60_000);
-
-  it.each(['attempt', 'retired'] as const)('accepts a completed admitted owner write from %s evidence when its current stage is pending', async (kind) => {
-    const projectDir = project();
-    const path = 'docs/task_summary.md';
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['plan', 'finalize']);
-    mkdirSync(join(projectDir, 'docs'), { recursive: true });
-    writeFileSync(join(projectDir, path), '# attributed terminal result\n');
-    writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-      pass: true, terminalOwners: { [path]: 'finalize' },
-    }));
-    const state: StoreState = {
-      runId: created.runId, workflowName: 'fixture', projectDir, status: 'running', terminalArtifactBaselines: {},
-      startedAt: new Date(Date.now() - 1000).toISOString(),
-      stages: { plan: { status: 'complete', retries: 0 }, finalize: { status: 'pending', retries: 0 } },
-      terminalStates: { shipped: { paths: [path] } },
-    };
-    const completedWrite = {
-      index: 1, status: 'complete' as const, startedAt: state.startedAt,
-      completedAt: new Date().toISOString(), writes: [path],
-      duration_ms: 1, exitCode: 0, tokenUsage: 'unknown' as const,
-    };
-    const evaluate = () => scheduler.tryTerminateOnTerminalState(state, {
-      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
-      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) },
-    });
-
-    expect((await evaluate()).decision).toBe('deferred');
-    expect(state.status).toBe('running');
-    writeFileSync(join(projectDir, path), '# attributed terminal result\n');
-    if (kind === 'attempt') state.stages.finalize.attempts = [completedWrite];
-    else state.stageEvidence = [{
-      stageId: 'finalize', iteration: 1, status: { status: 'complete', retries: 0, attempts: [completedWrite] },
-      statusPath: 'iterations/1/stages/finalize/status.json', attemptOutputPaths: [],
-    }];
-
-    expect((await evaluate()).decision).toBe('matched');
-    expect(state.status).toBe('shipped');
-  });
 
   it.each([
     { label: 'inferred', stageGlobLine: '', verdictDir: 'docs', verdictName: (i: number) => `stage_${i}_verdict.md` },

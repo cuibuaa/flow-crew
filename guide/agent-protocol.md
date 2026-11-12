@@ -24,9 +24,10 @@ rejects unknown fields, and offers these optional stage keys:
 | `dynamic_dispatch` | Runtime plan expansion |
 | `artifact_contract` | Versioned rooted output/read locations |
 
-Whole-plan admission checks roles, graph, scope syntax, criterion coverage, terminal
-ownership and read reachability before execution. Ordinary authors need downstream independent
-gates. Existing-work audits can consist of read-only gates with separate repairs. A malformed
+Whole-plan admission checks roles, graph, scope syntax, criterion coverage and
+read reachability before execution. Ordinary authors need downstream independent
+gates. Gates are read-only in both static and dispatched graphs; product changes belong to authors
+and repairs. Existing-work audits can consist of read-only gates with separate repairs. A malformed
 proposal is diagnosed rather than executed partially. `plan-check` uses the same proposal
 inspector; its synthetic brief mode cannot supply earlier run artifacts. Scope estimates
 do not grant or forbid writes; stages sharing a mutable project tree execute serially.

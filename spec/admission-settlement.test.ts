@@ -109,7 +109,7 @@ describe('terminal outcome waits for required settlement', () => {
     writeFileSync(join(project, 'report.md'), 'fresh result');
     const freshAt = (Date.parse(state.startedAt) + 100) / 1000;
     utimesSync(join(project, 'report.md'), freshAt, freshAt);
-    const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 1, adapter: new ScriptedAdapter({}) });
+    const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 1, stages: [] });
     expect(result.decision).toBe('matched');
     expect(state.status).toBe('complete');
   });
@@ -132,7 +132,7 @@ describe('terminal outcome waits for required settlement', () => {
     const freshAt = (Date.parse(state.startedAt) + 100) / 1000;
     utimesSync(join(project, 'report.md'), freshAt, freshAt);
     if (disposition === 'rejected') writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'The required dedicated audit work artifact is absent.' }));
-    const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: runDir(project, created.runId), iteration: 1, adapter: new ScriptedAdapter({}) });
+    const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: runDir(project, created.runId), iteration: 1, stages: [] });
     expect(result.decision).toBe('deferred');
     expect(state.status).toBe('running');
     expect(state.stages.review.status).not.toBe('skipped');

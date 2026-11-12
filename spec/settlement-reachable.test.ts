@@ -191,14 +191,15 @@ describe('criterion discharge boundary', () => {
   };
 
   it('admits settlement-only coverage only with a matching engine discharge', () => {
-    const stages = [...settlementStages().map((entry) => ({ ...entry, condition: entry.id === 'write_ceiling' ? 'audit_terminal.pass == true' : entry.condition, criterion_refs: ['other'] })),
+    // The report follows ordinary criterion review now: its gate is downstream.
+    const stages = [...settlementStages().map((entry) => ({ ...entry, condition: undefined,
+      depends_on: entry.is_gate ? ['write_ceiling'] : [], dependency_reasons: {}, criterion_refs: ['other'] })),
       stage({ id: 'repair_terminal', depends_on: ['audit_terminal'], retry_to: ['audit_terminal'],
         dependency_reasons: { audit_terminal: 'Correct rejected terminal evidence.' }, scope: [], criterion_refs: [] })];
     const input = {
       dispatched: stages,
       baseStages: [],
       dispatchStageId: 'plan',
-      terminalStates: recorded.terminalStates,
       criteria: {
         version: 1 as const,
         briefDigest: recorded.briefDigest,
@@ -316,7 +317,6 @@ describe('admitted check reuse boundary', () => {
       markdown: checks,
       projectDir,
       stages: [],
-      terminalStates: recorded.terminalStates,
     });
     expect(errors).toHaveLength(2);
     expect(errors.every((error) => error.includes('REALITY_READ_DECLARATION_REQUIRED'))).toBe(true);

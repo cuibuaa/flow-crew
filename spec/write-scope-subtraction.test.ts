@@ -1,7 +1,7 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execWithStdin, type Adapter, type RunOpts } from '../src/adapters/base.js';
@@ -52,6 +52,42 @@ function create(brief = 'Complete the required project work.', stages = [stage()
   writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   return stages;
 }
+
+it('preserves unknown preimages below a read-only alias', () => {
+  write('.gitignore', 'hidden/\n');
+  write('hidden/operator.txt', 'operator content');
+  symlinkSync('hidden', join(project, 'alias'));
+  commit();
+  const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: [] });
+  create('Review without changing project content.', [gate]);
+  const context = createScopeBatchContext(project, [gate], undefined, runId);
+  const result = settleProjectWrites({
+    projectDir: project, snapshot: context.snapshot, readOnly: true,
+    rawWrites: ['alias/operator.txt'], definiteWrites: new Set(['alias/operator.txt']),
+  });
+  expect(result.violations).toHaveLength(1);
+  expect(result.rollbackFailures).toEqual(['alias/operator.txt']);
+  expect(result.rolledBackWrites).toEqual([]);
+  expect(readFileSync(join(project, 'hidden/operator.txt'), 'utf8')).toBe('operator content');
+});
+
+it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
+  write('.gitignore', 'operator.pipe\n');
+  isolatedProjectCommand('mkfifo', ['operator.pipe'], project, root);
+  git('init', '-q');
+  const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: [] });
+  create('Review without changing project entries.', [gate]);
+  const context = createScopeBatchContext(project, [gate], undefined, runId);
+  const result = settleProjectWrites({
+    projectDir: project, snapshot: context.snapshot, readOnly: true,
+    rawWrites: ['operator.pipe'], definiteWrites: new Set(['operator.pipe']),
+  });
+  expect(result.violations).toHaveLength(1);
+  expect(result.rollbackFailures).toEqual(['operator.pipe']);
+  expect(result.rolledBackWrites).toEqual([]);
+  expect(lstatSync(join(project, 'operator.pipe')).isFIFO()).toBe(true);
+});
+
 async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], stages = [stage()]) {
   let calls = 0, aborts = 0;
   const adapter: Adapter = { async run(_prompt, _role, opts) {

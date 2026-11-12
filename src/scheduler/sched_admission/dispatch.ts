@@ -1,20 +1,29 @@
 import { runRecordPath } from '../../run-layout.js';
-/** Whole-proposal admission, terminal/criterion topology and role/workflow loaders. Declared-input conflict policy is supplied by its owner. */
+/** Whole-proposal admission, criterion topology and role/workflow loaders. Declared-input conflict policy is supplied by its owner. */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { parseCondition } from '../../condition.js';
 import { join } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
-import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
+import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type ResearchConfig } from '../../store.js';
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
-import { finiteStatusConditionDomainError, assessTerminalConditionCoverage } from './condition-coverage.js';
 import { normalizedProjectPath, scopeMatchesProjectPath, scopeIntersectsProjectTree } from './scope-services.js';
 import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
+
+function finiteStatusConditionDomainError(
+  stageId: string,
+  parsed: ReturnType<typeof parseCondition>,
+): string | undefined {
+  if (parsed.field !== 'status') return undefined;
+  const allowed = new Set<string>(Object.values(STAGE_STATUS));
+  if (typeof parsed.value === 'string' && allowed.has(parsed.value)) return undefined;
+  return `${stageId}.condition: status literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...allowed].join(', ')}`;
+}
 
 export function loadWorkflow(yamlPath: string, recorded = false): { config: WorkflowConfig; raw: string } {
   const raw = readFileSync(yamlPath, 'utf-8');
@@ -145,11 +154,8 @@ export interface DispatchAdmissionReport {
   errors: DispatchAdmissionError[];
   warnings: string[];
   proposalDigest?: string;
-  terminalOwners: Record<string, string>;
-  /** Declared finalizer capability that may be touched for validation but may not leave a durable delta. */
   criteriaDigest?: string;
   criterionGateRefs?: Record<string, string[]>;
-  criterionTerminalRefs?: Record<string, string[]>;
   /** Engine-derived prior work/gate proofs used by this admission. */
   dischargedCriteria?: CriterionDischargeRecord[];
 }
@@ -219,7 +225,6 @@ export function createDispatchAdmission() {
     dispatched: StageConfig[];
     baseStages: StageConfig[];
     dispatchStageId: string;
-    terminalStates?: TerminalStatesConfig;
     research?: ResearchConfig;
     criteria?: BriefCriteriaArtifact;
     criterionDischarges?: CriterionDischargeRecord[];
@@ -271,46 +276,6 @@ export function createDispatchAdmission() {
       }
     }
 
-    const terminalOwners: Record<string, string> = {};
-    const ownerIds = new Set<string>();
-    const terminalDeclarations = Object.entries(input.research ? {} : input.terminalStates ?? {})
-      .flatMap(([status, entry]) => entry.paths.map((path) => ({ status, path })));
-    const declarationsByPath = new Map<string, Array<{ status: string; path: string }>>();
-    for (const declaration of terminalDeclarations) {
-      const normalized = normalizedProjectPath(declaration.path) ?? declaration.path;
-      const pathRows = declarationsByPath.get(normalized) ?? [];
-      pathRows.push(declaration);
-      declarationsByPath.set(normalized, pathRows);
-    }
-    for (const [path, declarations] of declarationsByPath) {
-      if (declarations.length > 1) {
-        errors.push(admissionError('terminal_owner', `terminal_states path ${path}: declared more than once (${declarations.map((item) => item.status).join(', ')}); one path cannot encode multiple outcomes`, `terminal_states.${path}`));
-      }
-    }
-    for (const declaration of terminalDeclarations) {
-      const rawPath = declaration.path;
-        const writers = input.dispatched.filter((stage) => !stage.is_gate && !stage.retry_to?.length && stageScopeOwnsPath(stage, rawPath));
-        const owners = writers.filter((stage) => !writers.some((other) => other.id !== stage.id && transitivelyDependsOn(other.id, stage.id, byId)));
-        if (owners.length !== 1) {
-          errors.push(admissionError('terminal_owner', `terminal_states path ${rawPath}: expected exactly one final producer, found ${owners.length}${owners.length ? ` (${owners.map((stage) => stage.id).join(', ')})` : ''}`, `terminal_states.${rawPath}`));
-          continue;
-        }
-        const owner = owners[0];
-        terminalOwners[rawPath] = owner.id;
-        ownerIds.add(owner.id);
-
-    }
-
-    if (terminalDeclarations.length > 0 && Object.keys(terminalOwners).length === terminalDeclarations.length) {
-      const coverage = assessTerminalConditionCoverage(all, [...ownerIds]);
-      if (coverage.checked && coverage.coversOrdinaryQuiescence === false) {
-        const assignment = Object.entries(coverage.uncoveredAssignment ?? {})
-          .map(([stageId, status]) => `${stageId}.status=${status}`)
-          .join(', ');
-        errors.push(admissionError('terminal_owner', `terminal owner conditions do not cover ordinary quiescence${assignment ? ` (${assignment})` : ''}; add a mutually exclusive owner condition that is true after successful required work`, 'terminal_states'));
-      }
-    }
-
     const criteria = input.criteria?.criteria ?? [];
     if (input.criteria && criteria.length === 0) {
       errors.push(admissionError('criteria_missing', 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage', 'criteria'));
@@ -331,11 +296,8 @@ export function createDispatchAdmission() {
         if (!criterionIds.has(ref)) errors.push(admissionError('stage_criterion_refs', `${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`, `criterion_refs.${ref}`, stage.id));
       }
     }
-    const criterionTerminalRefs = new Map<string, string[]>();
     for (const criterion of criteria) {
       const workers = input.dispatched.filter((stage) => !stage.is_gate && !stage.retry_to?.length && stage.criterion_refs.includes(criterion.id));
-      const terminalWorkers = workers.filter((stage) => ownerIds.has(stage.id));
-      const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
       const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
       if (workers.length === 0 && gates.length === 0 && !discharged.has(criterion.id)) {
         errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: not assigned to a work stage or gate`, `${criterion.id}`));
@@ -345,21 +307,16 @@ export function createDispatchAdmission() {
       if (workers.length === 0 && gates.some((gate) => gate.scope?.length)) {
         errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: product-writing gate requires an independent work stage`, `${criterion.id}`));
       }
-      for (const owner of terminalWorkers) {
-        const refs = criterionTerminalRefs.get(owner.id) ?? [];
-        refs.push(criterion.id);
-        criterionTerminalRefs.set(owner.id, refs);
-      }
-      if (ordinaryWorkers.length > 0 && gates.length === 0) {
+      if (workers.length > 0 && gates.length === 0) {
         const emptyDownstreamGates = input.dispatched.filter((stage) => (
           stage.is_gate && stage.criterion_refs.length === 0
-          && ordinaryWorkers.some((worker) => transitivelyDependsOn(stage.id, worker.id, byId))
+          && workers.some((worker) => transitivelyDependsOn(stage.id, worker.id, byId))
         ));
         const hint = emptyDownstreamGates.length === 1
           ? `; downstream ${emptyDownstreamGates[0].id}.criterion_refs is empty — assign this criterion there if that gate is responsible`
           : '';
         errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: not assigned to a gate${hint}`, `${criterion.id}`));
-      } else if (ordinaryWorkers.length > 0 && !gates.some((gate) => ordinaryWorkers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
+      } else if (workers.length > 0 && !gates.some((gate) => workers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
         errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`, `${criterion.id}`));
       }
     }
@@ -370,13 +327,11 @@ export function createDispatchAdmission() {
       checkedAt: new Date().toISOString(),
       errors,
       warnings,
-      terminalOwners,
       criterionGateRefs: Object.fromEntries(
         input.dispatched
           .filter((stage) => stage.is_gate && stage.criterion_refs.length > 0)
           .map((stage) => [stage.id, [...stage.criterion_refs]]),
       ),
-      criterionTerminalRefs: Object.fromEntries(criterionTerminalRefs),
       dischargedCriteria: [...discharged.values()],
       ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
     };

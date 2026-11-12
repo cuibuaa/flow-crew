@@ -479,10 +479,24 @@ promises that a model will obey. Keep the detailed contract above authoritative.
 
 `terminal_states` maps a known terminal run status to a path string, path list or object with
 `paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
-with diagnostics. For engineering each terminal path has one final ordinary producer; ordered authors and
-repairs may share its write scope. Admission checks the producer's mandatory gate and criterion
-ancestors. Intermediate reports belong in outputs,
-not terminal declarations.
+with diagnostics. Engineering terminal acceptance belongs to the terminal evaluator: the artifact must
+be present with content different from its launch baseline, required work must settle, and the
+effective independent gate outcomes must pass. Authorized authors, repairs and other authorized
+stages can produce it; a stage's write ledger does not prove publication. Touching or rewriting
+identical launch bytes does not count. A gate's study-completion verdict follows the same evaluation.
+Existing frozen-input, read-only review and engine-record
+protections still refuse unauthorized writes. Criterion review uses the same admission rules for
+terminal reports and other work. Intermediate reports belong in outputs, not terminal declarations.
+Passing independent review must follow the product changes it accepts; a dependency edge does not
+substitute for that execution order. Read-only execution preserves ignored-file preimages for rollback;
+special filesystem entries retain unknown preimages, which never authorize destructive restoration.
+If a refused write leaves an unrestored file or topology, the existing integrity disposition stops
+the run before a retry can adopt that content. Unsupported special entries remain untouched and
+cannot qualify as terminal files.
+An archived engine snapshot remains reader evidence; it does not substitute for an absent declared
+project artifact at settlement. Multiple fresh outcomes are ambiguous and cannot terminate the run.
+Historical records without a
+content baseline retain their original timestamp interpretation for readers and continuation.
 
 An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
 (entry-level wins over floor-level). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
@@ -501,7 +515,7 @@ recorded without turning the already committed terminal into a live run. Treat i
 execution authority and review it before launch.
 
 Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts),
-[terminal admission](../src/scheduler/sched_admission/dispatch.ts),
+[criterion admission](../src/scheduler/sched_admission/dispatch.ts),
 [terminal settlement](../src/scheduler/sched_policy/terminal.ts).
 
 ## Deterministic checks

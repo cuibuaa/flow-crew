@@ -18,35 +18,38 @@ const makeStage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
 
 describe('independent dispatch-admission QA probes', () => {
 
-  it('rejects duplicate ownership independently for each terminal path', () => {
+  it('admits multiple authorized stages without choosing a terminal owner', () => {
     const first = makeStage({
       id: 'first', role: 'writer', scope: ['docs/final.md'], depends_on: [], dependency_reasons: {},
     });
     const second = makeStage({
       id: 'second', role: 'writer', scope: ['docs/final.md'], depends_on: [], dependency_reasons: {},
     });
-    const report = inspectDispatchAdmission({
-      dispatched: [first, second], baseStages: [], dispatchStageId: 'plan',
+    const legacyProposal = {
       terminalStates: { complete: { paths: ['docs/final.md'] } },
-    });
-    expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('expected exactly one final producer, found 2');
+      dispatched: [first, second], baseStages: [], dispatchStageId: 'plan',
+    };
+    const report = inspectDispatchAdmission(legacyProposal);
+    expect(report.pass, JSON.stringify(report.errors)).toBe(true);
+    expect(report).not.toHaveProperty('terminalOwners');
   });
 
-  it('transports a terminal-only criterion without requiring an impossible downstream gate', () => {
+  it('requires the same independent criterion review for a terminal report as for other work', () => {
     const criterion = 'criterion_terminal_1_deadbeef';
     const owner = makeStage({
       id: 'finalize', role: 'writer', scope: ['docs/final.md'], depends_on: [],
       dependency_reasons: {}, criterion_refs: [criterion],
     });
-    const report = inspectDispatchAdmission({
-      dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
+    const legacyProposal = {
       terminalStates: { complete: { paths: ['docs/final.md'] } },
-      criteria: { version: 1, briefDigest: 'qa', criteria: [
+      dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
+      criteria: { version: 1 as const, briefDigest: 'qa', criteria: [
         { id: criterion, text: 'Choose the truthful terminal path.', line: 1, section: 'Report' },
       ] },
-    });
-    expect(report.pass, report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
-    expect(report.criterionTerminalRefs).toEqual({ finalize: [criterion] });
+    };
+    const report = inspectDispatchAdmission(legacyProposal);
+    expect(report.pass).toBe(false);
+    expect(report.errors.map(error => error.message).join('\n')).toContain('not assigned to a gate');
   });
 
   it('accepts audit-only coverage while refusing ungated ordinary work', () => {

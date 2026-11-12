@@ -199,7 +199,7 @@ describe('declaration-owned research loop', () => {
   });
   it('constructs an admissible independent property review with no terminal owner', () => {
     const rc = parseBriefFrontmatter(brief()).research!; const stages = researchStages(rc);
-    expect(admitResearchStages(rc, stages, project, root)).toMatchObject({ pass: true, terminalOwners: {} });
+    expect(admitResearchStages(rc, stages, project, root)).toMatchObject({ pass: true });
     expect(stages.map(s => ({ role: s.role, gate: s.is_gate, dynamic: s.dynamic_dispatch, condition: s.condition })))
       .toEqual([{ role: 'coder', gate: false, dynamic: false, condition: undefined }, { role: 'qa', gate: true, dynamic: false, condition: undefined }]);
   });

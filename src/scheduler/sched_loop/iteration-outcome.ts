@@ -191,7 +191,7 @@ export async function concludeWorkflowIteration(
       const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
         state,
         sorted,
-        { projectDir, runId, runDirPath, iteration, adapter },
+        { projectDir, runId, runDirPath, iteration, stages: sorted },
         'max_iterations',
       );
       if (terminalConclusion) return { kind: 'settled', state: terminalConclusion };
@@ -229,7 +229,7 @@ export async function completePlainWorkflow(
   iteration: number, adapter: Adapter, source: 'gate_pass' | 'base_all_done',
 ): Promise<StoreState> {
   const terminalConclusion = await concludeDeclaredTerminalAtQuiescence(
-    state, stages, {projectDir, runId, runDirPath, iteration, adapter}, source,
+    state, stages, {projectDir, runId, runDirPath, iteration, stages}, source,
   );
   if (terminalConclusion) return terminalConclusion;
   if (!archiveDeclaredOutputsBeforePlainCompletion(

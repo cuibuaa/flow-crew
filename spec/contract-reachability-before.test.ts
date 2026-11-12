@@ -101,61 +101,6 @@ afterAll(() => {
 
 describe('research ingestion and planner refusal evidence', () => {
 
-  it('enumerates terminal-owner cardinalities zero, one, and three through admission', () => {
-    const terminalPaths = ['artifacts/ship.md', 'artifacts/ceiling.md', 'artifacts/escalation.md'];
-    const stage = (id: string, scope: string[]): StageConfig => ({ artifact_contract: artifacts([], [], []),
-      id,
-      role: 'worker',
-      depends_on: [],
-      dependency_reasons: {},
-      scope,
-      prompt_template: `produce ${id}`,
-      skills: [],
-      dynamic_dispatch: false,
-      is_gate: false,
-      criterion_refs: [],
-    });
-    const terminalStates = {
-      shipped: { paths: [terminalPaths[0]] },
-      ceiling_hit: { paths: [terminalPaths[1]] },
-      escalated: { paths: [terminalPaths[2]] },
-    };
-    const zero = inspectDispatchAdmission({
-      dispatched: [stage('execute_round', ['artifacts/round.json'])],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates,
-    });
-    const one = inspectDispatchAdmission({
-      dispatched: [stage('write_terminal', terminalPaths)],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates,
-    });
-    const many = inspectDispatchAdmission({
-      dispatched: [
-        stage('execute_round', terminalPaths),
-        stage('repair_round', terminalPaths),
-        stage('write_ship', terminalPaths),
-      ],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates,
-    });
-
-    expect(zero.errors.filter((error) => error.message.includes('expected exactly one final producer, found 0')))
-      .toHaveLength(3);
-    expect(one).toMatchObject({ pass: true, errors: [] });
-    expect(many.errors.filter((error) => (
-      error.message.includes('expected exactly one final producer, found 3 (execute_round, repair_round, write_ship)')
-    ))).toHaveLength(3);
-    expect([zero, one, many].reduce<Record<string, number>>((counts, report) => {
-      const disposition = report.pass ? 'admitted' : 'refused';
-      counts[disposition] = (counts[disposition] ?? 0) + 1;
-      return counts;
-    }, {})).toEqual({ refused: 2, admitted: 1 });
-  });
-
   it('refuses a reality check whose run-store path has no admitted producer', () => {
     const root = temporaryRoot('unowned-check');
     const errors = inspectRealityCheckReachability({
@@ -280,9 +225,11 @@ describe('research ingestion and planner refusal evidence', () => {
       expect.stringContaining('1/2'),
       expect.stringContaining('2/2'),
     ]);
-    expect(retryState.attempts[0].unsatisfied.filter((item: Record<string, unknown>) => (
-      String(item.detail).includes('expected exactly one final producer, found 3')
-    ))).toHaveLength(3);
+    expect(retryState.attempts[0].unsatisfied).toEqual([
+      expect.objectContaining({
+        id: 'reality_check_invalid:reality_checks', detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
+      }),
+    ]);
     expect(retryState.attempts[1].unsatisfied).toEqual([
       expect.objectContaining({
         id:'reality_check_invalid:reality_checks',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
@@ -294,7 +241,6 @@ describe('research ingestion and planner refusal evidence', () => {
       }),
     ]);
     expect(final.failureReason).toContain('reality_check_invalid:reality_checks');
-    expect(final.failureReason).not.toContain('terminal_owner:terminal_states.artifacts/ship.md');
   }, 60_000);
 });
 

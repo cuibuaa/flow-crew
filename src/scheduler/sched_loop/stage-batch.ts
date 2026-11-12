@@ -41,7 +41,7 @@ export async function executeReadyBatch(
         if (!met) {
           // A later conditional skip is a scheduling decision, not evidence
           // that an earlier completed execution never happened. Preserve its
-          // immutable attempts so terminal ownership and audit attribution
+          // immutable attempts so review evidence and audit attribution
           // remain provable across research iterations.
           skipOrdinaryStage(stage, state, projectDir, runId);
           log.info({ stage: stage.id }, 'Skipped (condition not met)');
@@ -184,7 +184,7 @@ export async function executeReadyBatch(
       return { kind: 'continue', state };
     }
 
-    const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
+    const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, stages: sorted });
     if (terminalEager.decision === 'matched') return { kind: 'settled', state: terminalEager.state };
 
     if (failed) {

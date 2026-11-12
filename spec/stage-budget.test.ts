@@ -760,7 +760,7 @@ describe('durable bounded continuation', () => {
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
     writeFileSync(join(project, 'report.md'), 'Unfinished terminal document.');
     updateRunState(project, created.runId, state => { state.terminalStates = { complete: { paths: ['report.md'] } }; state.stages.work = { status: 'complete', retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } }; });
-    const result = await tryTerminateOnTerminalState(readRunState(project, created.runId), { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 2, adapter: { async run() { throw new Error('No terminal execution is authorized yet'); } } });
+    const result = await tryTerminateOnTerminalState(readRunState(project, created.runId), { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 2, stages: [] });
     expect(result).toEqual({ decision: 'deferred', reasons: ['retained stage budget work must continue before terminal settlement'] });
     expect(readRunState(project, created.runId).status).toBe('running');
   });

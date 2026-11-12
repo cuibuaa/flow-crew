@@ -273,7 +273,7 @@ describe('engine behaviour contracts', () => {
     }));
     const result = await tryTerminateOnTerminalState(state, {
       projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
-      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 0 }) },
+      stages: [],
     });
     const archivedPath = runRecordPath(created.runDirPath, 'declared_outputs', outputPath);
     const manifest = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };

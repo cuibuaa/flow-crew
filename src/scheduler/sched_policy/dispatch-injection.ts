@@ -49,7 +49,6 @@ export function inspectDispatchProposal(
       errors: [admissionError('dispatch_yaml_invalid', `dispatch.yaml could not be parsed as YAML (${error instanceof Error ? error.message : String(error)})`, 'dispatch.yaml')],
       warnings: [],
       proposalDigest,
-      terminalOwners: {},
     };
     return finish(report, [], undefined);
   }
@@ -120,7 +119,6 @@ export function inspectDispatchProposal(
       errors: [...skippedReasons, ...schemaReasons, admissionError('brief_criteria_invalid', error instanceof Error ? error.message : String(error), 'criteria')],
       warnings: [],
       proposalDigest,
-      terminalOwners: {},
     };
     return finish(report, [], undefined);
   }
@@ -134,7 +132,6 @@ export function inspectDispatchProposal(
     dispatched,
     baseStages: sorted,
     dispatchStageId,
-    terminalStates: state.terminalStates,
     research: state.research,
     criteria: effectiveCriteria,
     criterionDischarges: validatedCriterionDischarges(runDirPath, state, effectiveCriteria?.briefDigest),
@@ -232,8 +229,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         reason: state.decisionGraph!.replan!.reason,
         stages: candidate.map(stage => prior.find(old => old.id === stage.id && JSON.stringify(old) === JSON.stringify(stage)) ?? stage),
       }, parseStage: parseDispatchedStageConfig, admit: (stages, latest) => {
-        const report = services.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId,
-          terminalStates: latest.terminalStates, research: latest.research, projectDir, runDir: runDirPath,
+        const report = services.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId, research: latest.research, projectDir, runDir: runDirPath,
           criteria: readBriefCriteriaForAdmission(runDirPath),
         });
         return { pass: report.pass, errors: report.errors.map(error => error.message) };

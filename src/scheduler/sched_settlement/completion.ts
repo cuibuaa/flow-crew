@@ -96,8 +96,9 @@ export async function recoverTerminalStudyCompletion(
   projectDir: string, runId: string, state: StoreState,
   writeCampaignEntry: (projectDir: string, state: StoreState) => void = () => {},
 ): Promise<StoreState | null> {
-  // Recover an already authored gate terminal contract from its settled
-  // evidence; terminal-file selection has its own required-settlement barrier.
+  // Declared terminal outcomes belong to the terminal evaluator, including
+  // study completion. Recovery applies only to plain completion contracts.
+  if (state.terminalStates) return null;
   const gateIds = orderedGateIdsForState(projectDir, state);
   for (const gateId of gateIds) {
     const evidence = readTerminalStudyCompletionEvidence(projectDir, runId, gateId);

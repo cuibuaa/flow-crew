@@ -441,60 +441,10 @@ describe('independent engine-remediation verification', () => {
       runId: created.runId,
       runDirPath: created.runDirPath,
       iteration: 5,
-      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 0 }) },
+      stages: [],
     });
     expect(result).toMatchObject({ decision: 'matched' });
     expect(state).toMatchObject({ status: 'complete', currentIteration: 5, maxIterations: 5 });
-  });
-
-  it('quarantines a non-owner terminal file and accepts a later owner-attributed replacement', async () => {
-    const root = temporaryRoot();
-    const projectDir = join(root, 'project');
-    mkdirSync(projectDir);
-    setFcGlobalDir(join(root, 'fc-home'));
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer']);
-    const terminalPath = 'docs/final.md';
-    const state = readRunState(projectDir, created.runId);
-    state.startedAt = new Date(Date.now() - 1_000).toISOString();
-    state.status = 'running';
-    state.terminalStates = { complete: { paths: [terminalPath] } };
-    writeRunState(projectDir, created.runId, state);
-    write(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-      version: 1,
-      pass: true,
-      checkedAt: new Date().toISOString(),
-      errors: [],
-      terminalOwners: { [terminalPath]: 'finalizer' },
-    }));
-    write(join(projectDir, terminalPath), 'written by non-owner\n');
-
-    const context = {
-      projectDir,
-      runId: created.runId,
-      runDirPath: created.runDirPath,
-      iteration: 1,
-      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 0 }) },
-    };
-    const rejected = await tryTerminateOnTerminalState(state, context);
-    expect(rejected.decision).toBe('deferred');
-    expect(existsSync(join(projectDir, terminalPath))).toBe(false);
-    expect(readRunEvents(projectDir, created.runId).some((event) => event.type === 'terminal_candidate_quarantined')).toBe(true);
-
-    write(join(projectDir, terminalPath), 'written by finalizer\n');
-    const ownerState = readRunState(projectDir, created.runId);
-    ownerState.stages.finalizer = {
-      status: 'complete',
-      retries: 0,
-      attempts: [{
-        index: 1,
-        status: 'complete',
-        startedAt: new Date().toISOString(),
-        writes: [terminalPath],
-      }],
-    };
-    writeRunState(projectDir, created.runId, ownerState);
-    const accepted = await tryTerminateOnTerminalState(ownerState, context);
-    expect(accepted.decision).toBe('matched');
   });
 
   it('publishes campaign phase progress without synthesizing a principal metric', () => {

@@ -125,12 +125,15 @@ describe('terminal production preserves reviewed product bytes', () => {
     expect(final.status).toBe('complete');
     const completedAt = new Date(Date.now() + 1000).toISOString();
     const owner = final.stages.finalize;
-    owner.attempts!.push({ index: 2, startedAt: completedAt, completedAt, status: 'complete', writes: ['report.md', 'value.json'] });
+    const auditPath = 'stages/finalize/constraint_audit_attempt_2.json';
+    writeFileSync(runRecordPath(runDir(project, final.runId), auditPath), JSON.stringify({ appliedWrites: ['report.md', 'value.json'] }));
+    owner.attempts!.push({ index: 2, startedAt: completedAt, completedAt, status: 'complete', writes: ['report.md', 'value.json'],
+      constraintAudit: { ...owner.attempts!.at(-1)!.constraintAudit!, path: auditPath } });
     owner.completedAt = completedAt;
     final.status = 'running';
     writeFileSync(join(project, 'value.json'), '{"value":"changed again"}\n');
     const result = await tryTerminateOnTerminalState(final, {
-      projectDir: project, runId: final.runId, runDirPath: runDir(project, final.runId), iteration: 1, adapter: new ScriptedAdapter({}),
+      projectDir: project, runId: final.runId, runDirPath: runDir(project, final.runId), iteration: 1, stages: [],
     });
     expect(result.decision).toBe('deferred');
     expect(final.status).toBe('running');

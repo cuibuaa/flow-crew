@@ -76,25 +76,6 @@ describe('engine generalization binding contracts', () => {
     expect(admission([stage({ id: 'work' }), { ...repair, depends_on: ['work'], retry_to: ['work'] }]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('work is not declared is_gate: true');
   });
 
-  it('keeps terminal production with an ordinary finalizer rather than a gate or repair', () => {
-    const work = stage({ id: 'work', role: 'coder', scope: ['src/work.ts'] });
-    const review = stage({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'] });
-    const repair = stage({ id: 'repair', scope: ['src/work.ts'], depends_on: ['review'], retry_to: ['review'] });
-    const finish = stage({ id: 'finish', scope: ['docs/final.md'], depends_on: ['work', 'review'] });
-    const terminalStates = { complete: { paths: ['docs/final.md'] } };
-    const ordinary = admission([work, review, repair, finish], { terminalStates });
-    expect(ordinary.pass, ordinary.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toBe(true);
-    expect(ordinary.terminalOwners).toEqual({ 'docs/final.md': 'finish' });
-    for (const owner of [
-      stage({ ...finish, role: 'qa', is_gate: true }),
-      { ...finish, retry_to: ['review'] },
-    ]) {
-      const rejected = admission([work, review, repair, owner], { terminalStates });
-      expect(rejected.pass).toBe(false);
-      expect(rejected.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('expected exactly one final producer, found 0');
-    }
-  });
-
   it('derives canonical gate production for static, dynamic and retry-promoted gates while requiring the published verdict', () => {
     const empty = { version: 1, produces: [], reads: [], groups: [] };
     const dynamic = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: empty });
@@ -181,7 +162,7 @@ describe('engine generalization binding contracts', () => {
     })).toEqual([]);
   });
 
-  it('5 — rejects terminal condition sets that omit ordinary successful quiescence', () => {
+  it('admits terminal conditions without predicting publication, but rejects impossible status literals', () => {
     const work = stage({ id: 'work' });
     const failed = stage({
       id: 'on_failed', scope: ['docs/failure.md'], condition: 'work.status == failed',
@@ -191,29 +172,15 @@ describe('engine generalization binding contracts', () => {
       id: 'on_skipped', scope: ['docs/skipped.md'], condition: 'work.status == skipped',
       depends_on: ['work'], dependency_reasons: { work: 'Reports a skipped worker.' },
     });
-    const incomplete = admission([work, failed, skipped], {
-      terminalStates: {
-        failed: { paths: ['docs/failure.md'] },
-        escalated: { paths: ['docs/skipped.md'] },
-      },
-    });
+    const incomplete = admission([work, failed, skipped]);
     const complete = stage({
       id: 'on_complete', scope: ['docs/complete.md'], condition: 'work.status == complete',
       depends_on: ['work'], dependency_reasons: { work: 'Reports successful work.' },
     });
-    const covering = admission([work, failed, skipped, complete], {
-      terminalStates: {
-        failed: { paths: ['docs/failure.md'] },
-        escalated: { paths: ['docs/skipped.md'] },
-        complete: { paths: ['docs/complete.md'] },
-      },
-    });
-    const impossible = admission([work, { ...complete, condition: 'work.status == invented' }], {
-      terminalStates: { complete: { paths: ['docs/complete.md'] } },
-    });
+    const covering = admission([work, failed, skipped, complete]);
+    const impossible = admission([work, { ...complete, condition: 'work.status == invented' }]);
 
-    expect(incomplete.pass).toBe(false);
-    expect(incomplete.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('do not cover ordinary quiescence (work.status=complete)');
+    expect(incomplete.pass).toBe(true);
     expect(covering.pass, covering.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(impossible.pass).toBe(false);
     expect(impossible.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('status literal "invented" cannot occur');

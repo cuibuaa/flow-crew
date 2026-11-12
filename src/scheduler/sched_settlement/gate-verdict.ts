@@ -254,7 +254,6 @@ export function deriveCriterionDischarges(input: {
   if (!admission.pass || !admission.criteriaDigest) return [];
 
   const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
-  const terminalOwnerIds = new Set(Object.values(admission.terminalOwners));
   const contract = input.state.research?.measurement ? null : loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
   const records = new Map<string, CriterionDischargeRecord>();
   for (const gate of input.stages) {
@@ -285,7 +284,6 @@ export function deriveCriterionDischarges(input: {
       const worker = input.stages.find((stage) =>
         !stage.is_gate
         && !stage.retry_to?.length
-        && !terminalOwnerIds.has(stage.id)
         && stage.criterion_refs.includes(criterionId)
         && input.state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE
         && transitivelyDependsOn(gate.id, stage.id, byId));

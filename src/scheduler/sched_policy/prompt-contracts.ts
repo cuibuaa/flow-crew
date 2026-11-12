@@ -53,7 +53,7 @@ export function appendPlannerAdmissionContract(
     entry.paths.map((path) => ({ status, path }))
   ));
   const rows = terminalPaths.length > 0
-    ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — one final ordinary producer; ordered writers and repairs may share its scope`).join('\n')
+    ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — changed launch content plus passing independent gates; any authorized author or repair may produce it`).join('\n')
     : '- none declared';
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
     + `Put compiler output and caches in $TMPDIR; project scope covers source edits. Scratch is retired at run termination. Declare required deliverables in artifact_contract.produces at paths their stage owns under its admitted write contract. Put evidence in the structured result. `

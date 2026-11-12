@@ -32,8 +32,15 @@ export function settleProjectWrites(input: {
     const path = normalizedProjectPath(rawPath)!;
     const taskFrozen = frozenPaths.has(path);
     const frozen = taskFrozen || input.readOnly === true;
+    // Read-only batches inventory the complete tree. Preserve uncertainty below
+    // aliases/file replacements; elsewhere an inventory miss is observed absence.
+    const opaqueAncestor = input.readOnly && path.split('/').slice(0, -1).some((_, index, parts) => {
+      const image = input.snapshot.files.get(parts.slice(0, index + 1).join('/'));
+      return image !== undefined && image.type !== 'directory';
+    });
     const before = taskFrozen ? baseline.frozenImages.get(path) ?? { exists: false, provenance: 'observed' as const }
-      : input.snapshot.files.get(path) ?? baselineImage(baseline, path);
+      : input.snapshot.files.get(path) ?? (input.readOnly && !opaqueAncestor
+        ? { exists: false, provenance: 'observed' as const } : baselineImage(baseline, path));
     const current = readRollbackCurrentImage(baseline, input.projectDir, path, before);
     const comparison = compareRepairFileContents(before, current);
     if (comparison === 'equal') continue;

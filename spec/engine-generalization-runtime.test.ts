@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { appendResearchPathContract, ensureTerminalArtifactValidation, findGateRecoveryStages, inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryTerminateOnTerminalState, type GateRecoveryFact, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { appendResearchPathContract, findGateRecoveryStages, inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryTerminateOnTerminalState, type GateRecoveryFact, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { validationPathImpacts } from './test-support/validation-path-impacts.js';
 import {
   runProjectValidationBaseline,
@@ -369,23 +369,6 @@ describe('engine generalization runtime bindings', () => {
     expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
   });
 
-  it('requires an attempt-bound ledger fact and never launches terminal validation', async () => {
-    const { projectDir } = seedProject('terminal-receipt');
-    const created = createRun(projectDir, 'fixture', 'name: fixture', []);
-    const baseline = await configuredBaseline(projectDir);
-    writeValidationSnapshot(created.runDirPath, baseline, false);
-    const input = { projectDir, runId: created.runId, runDirPath: created.runDirPath,
-      state: readRunState(projectDir, created.runId), ownerStageId: 'author', terminalPath: 'docs/final.md',
-      artifactMtimeMs: Date.now() - 1000,
-      dependencies: { runCommand: () => { throw Error('Terminal decisions cannot execute configured validation'); } } };
-    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed' });
-    seedAttemptValidation(projectDir, created.runId, baseline.results);
-    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'author' });
-    writeFileSync(join(projectDir, 'later.ts'), 'later source change');
-    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed' });
-    expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_terminal_author.json'))).toBe(false);
-  });
-
   it.each([undefined, 99, VALIDATION_FACT_VERSION])('uses supported receipt semantics before terminal completion without rerunning validation (version=%s)', async (version) => {
     const { projectDir } = seedProject('terminal-receipt-version');
     const terminalPath = 'docs/final.md';
@@ -408,26 +391,13 @@ describe('engine generalization runtime bindings', () => {
     else fact.validationVersion = version;
     const receiptBytes = `${JSON.stringify(fact)}\n`;
     writeFileSync(ledgerPath, receiptBytes);
-    let validationCalls = 0;
-    const dependencies: ProjectValidationDependencies = { runCommand: () => {
-      validationCalls++;
-      throw new Error('Terminal receipt consumption must not execute configured validation');
-    } };
     const accepted = true;
-    for (let decision = 0; decision < 2; decision++) {
-      expect(await ensureTerminalArtifactValidation({
-        projectDir, runId: created.runId, runDirPath: created.runDirPath, state,
-        ownerStageId: 'finalizer', terminalPath, artifactMtimeMs: Date.now() - 1000, dependencies,
-      })).toMatchObject({ required: true, pass: accepted, disposition: accepted ? 'already_blessed' : 'rejected' });
-    }
     const result = await tryTerminateOnTerminalState(state, {
       projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
-      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) },
-      validationDependencies: dependencies,
+      stages: [],
     });
     expect(result.decision).toBe(accepted ? 'matched' : 'deferred');
     expect(state.status).toBe(accepted ? 'complete' : 'running');
-    expect(validationCalls).toBe(0);
     expect(readFileSync(ledgerPath, 'utf8')).toBe(receiptBytes);
     expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
   });
@@ -584,120 +554,6 @@ describe('engine generalization runtime bindings', () => {
       // unchanged gate review. The contract refusal remains a terminal failure.
       status: 'failed', gateCalls: 1, repairCalls: 0,
     });
-  });
-
-  it('12 — terminal completion consumes validation facts without requiring a green blessing', async () => {
-    const runCase = async (
-      label: string,
-      revalidationExit: number,
-      laterBlessing: false | 'legacy' | 'current',
-      laterBlessingPass = true,
-    ) => {
-      const { projectDir } = seedProject(`terminal-${label}`);
-      const terminalPath = 'docs/final.md';
-      mkdirSync(join(projectDir, 'docs'), { recursive: true });
-      writeFileSync(join(projectDir, terminalPath), '# delivered bytes\n');
-      const created = createRun(projectDir, label, `name: ${label}`, ['finalizer']);
-      const completedAt = new Date(Date.now() - 200).toISOString();
-      const state = terminalState(projectDir, created.runId, terminalPath, completedAt);
-      writeRunState(projectDir, created.runId, state);
-      writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-        version: 1,
-        pass: true,
-        checkedAt: new Date().toISOString(),
-        errors: [],
-        terminalOwners: { [terminalPath]: 'finalizer' },
-      }));
-      const baseline = await configuredBaseline(projectDir);
-      const snapshot = writeValidationSnapshot(created.runDirPath, baseline, false);
-      const oldCheckedAt = new Date(Date.parse(completedAt) - 200).toISOString();
-      let validationCalls = 0;
-      if (laterBlessing === 'current') {
-        const measured = await runProjectValidationBaseline(projectDir, { commands: baseline.discovery.commands, runCommand: validationRunner(laterBlessingPass ? 0 : 1) });
-        seedAttemptValidation(projectDir, created.runId, measured.results, { stageId: 'finalizer' });
-        const attemptStartedAt = new Date(Date.parse(completedAt) + 50).toISOString();
-        const attemptCompletedAt = new Date(Date.parse(completedAt) + 100).toISOString();
-        writeStageStatus(projectDir, created.runId, 'qa', {
-          status: 'complete', retries: 0, startedAt: attemptStartedAt, completedAt: attemptCompletedAt,
-          attempts: [{
-            index: 1, status: 'complete', startedAt: attemptStartedAt, completedAt: attemptCompletedAt,
-            duration_ms: 50, exitCode: 0, tokenUsage: 'unknown',
-          }],
-        });
-        await recordGateValidationDelta(projectDir, created.runId, 'qa', {
-          runCommand: validationRunner(laterBlessingPass ? 0 : 1),
-        });
-      } else {
-        writeFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), JSON.stringify({
-          version: 1,
-          stageId: 'qa',
-          checkedAt: laterBlessing === 'legacy'
-            ? new Date(Date.parse(completedAt) + 100).toISOString()
-            : oldCheckedAt,
-          pass: laterBlessingPass,
-          baselineSha256: snapshot.sha256,
-          current: baseline.results,
-          delta: [],
-        }));
-      }
-      const result = await tryTerminateOnTerminalState(state, {
-        projectDir,
-        runId: created.runId,
-        runDirPath: created.runDirPath,
-        iteration: 1,
-        adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) },
-        validationDependencies: {
-          runCommand: (request) => {
-            validationCalls++;
-            return validationRunner(revalidationExit)(request);
-          },
-        },
-      });
-      return { result, state, validationCalls, runDirPath: created.runDirPath };
-    };
-
-    const rejected = await runCase('stale-rejected', 1, false);
-    expect(rejected.result.decision).toBe('matched');
-    expect(rejected.state.status).toBe('complete');
-    expect(rejected.validationCalls).toBe(0);
-    expect(existsSync(runRecordPath(rejected.runDirPath, 'supervisor_guidance.md'))).toBe(false);
-
-    const revalidated = await runCase('stale-revalidated', 0, false);
-    expect(revalidated.result.decision).toBe('matched');
-    expect(revalidated.state.status).toBe('complete');
-    expect(revalidated.validationCalls).toBe(0);
-    expect(existsSync(runRecordPath(revalidated.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
-
-    const identityFree = await runCase('identity-free-later-delta', 0, 'legacy');
-    expect(identityFree.result.decision).toBe('matched');
-    expect(identityFree.state.status).toBe('complete');
-    expect(identityFree.validationCalls).toBe(0);
-
-    const blessed = await runCase('current-blessing', 1, 'current');
-    expect(blessed.result.decision).toBe('matched');
-    expect(blessed.state.status).toBe('complete');
-    expect(blessed.validationCalls).toBe(0);
-
-    const laterRegression = await runCase('current-regression', 0, 'current', false);
-    expect(laterRegression.result.decision).toBe('matched');
-    expect(laterRegression.state.status).toBe('complete');
-    expect(laterRegression.validationCalls).toBe(0);
-
-    const legacyRegression = await runCase('identity-free-regression', 0, 'legacy', false);
-    expect(legacyRegression.result.decision).toBe('matched');
-    expect(legacyRegression.state.status).toBe('complete');
-    expect(legacyRegression.validationCalls).toBe(0);
-
-    const noBaseline = await ensureTerminalArtifactValidation({
-      projectDir: dirname(identityFree.runDirPath),
-      runId: 'none',
-      runDirPath: temporaryRoot('no-baseline'),
-      state: identityFree.state,
-      ownerStageId: 'finalizer',
-      terminalPath: 'docs/final.md',
-      artifactMtimeMs: Date.now(),
-    });
-    expect(noBaseline).toMatchObject({ required: false, pass: true, disposition: 'no_baseline' });
   });
 
   it('16 — identifies configured-command inputs without scope negotiation', async () => {

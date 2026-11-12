@@ -120,20 +120,3 @@ it.each(['repair', 'review'] as const)('continues cancellation at the ordinary s
   expect(calls).toEqual(stageId === 'repair' ? [['repair']] : [['repair'], ['review']]);
   expect(adapter.calls.map(call => call.stageId)).toEqual(stageId === 'repair' ? [] : ['repair']);
 });
-
-it('continues after terminal ambiguity repends its admitted owner and ledger', async () => {
-  const run = fixture();
-  updateRunState(project, run.runId, state => {
-    state.startedAt = '2000-01-01T00:00:00.000Z';
-    state.terminalStates = { complete: { paths: ['complete.md'] }, escalated: { paths: ['escalated.md'] } };
-  });
-  writeFileSync(runRecordPath(run.runDirPath, 'dispatch_admission.json'), JSON.stringify({ pass: true,
-    terminalOwners: { 'complete.md': 'repair', 'escalated.md': 'repair' } }));
-  writeFileSync(join(project, 'complete.md'), 'Fixture successful outcome.');
-  writeFileSync(join(project, 'escalated.md'), 'Fixture competing outcome.');
-  const result = await services.tryTerminateOnTerminalState(readRunState(project, run.runId), {
-    projectDir: project, runId: run.runId, runDirPath: run.runDirPath, iteration: 1, adapter: new ScriptedAdapter({}),
-  });
-  expect(result).toMatchObject({ decision: 'deferred', reasons: [expect.stringContaining('multiple fresh terminal outcomes')] });
-  await cancelAndContinue(run, 'repair', true);
-});

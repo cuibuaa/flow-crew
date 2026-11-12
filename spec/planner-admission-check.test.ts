@@ -168,7 +168,6 @@ describe('planner checks real admission before its first result', () => {
     expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('bad_scope: invalid schema');
     expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('gate stages cannot declare retry_to');
     expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('No operator found');
-    expect(report.terminalOwners).toEqual({ 'results/report.md': 'implement' });
     expect(report.errors).toEqual(inject(ctx).errors);
   });
 

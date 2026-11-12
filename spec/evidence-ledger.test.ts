@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runShipSetup } from '../src/cli-ship-setup.js';
-import { ensureTerminalArtifactValidation, loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { reviewFacts } from '../src/decision-context.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
@@ -352,9 +352,6 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(facts.filter((fact: { kind: string }) => fact.kind === 'validation').map((fact: { sequence: number }) => fact.sequence)).toEqual([first.sequence]);
     expect(JSON.parse(readFileSync(runRecordPath(result.rd, 'validation_delta_review.json'), 'utf8')).ledgerSequence).toBe(first.sequence);
     expect(reviewFacts(result.target, result.rd, result.final).validation).toMatchObject({ sequence: first.sequence, pass: true });
-    expect(await ensureTerminalArtifactValidation({ projectDir: result.target, runId: result.final.runId, runDirPath: result.rd,
-      state: result.final, ownerStageId: 'repair', terminalPath: 'value.txt', artifactMtimeMs: Date.now(),
-      dependencies: { runCommand: () => { throw Error('restored terminal tree reran validation'); } },
-    })).toMatchObject({ pass: true, validationStageId: first.stageId, checkedAt: first.at });
+
   });
 });

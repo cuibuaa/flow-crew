@@ -1,0 +1,10 @@
+{
+  "terminalPath": "docs/result.md",
+  "content": "Reviewed result from this run.\n",
+  "authorWrites": [],
+  "repairWrites": ["docs/result.md"],
+  "reviews": [
+    { "pass": false, "reason": "The declared result is missing." },
+    { "pass": true, "reason": "The authorized repair produced the correct result." }
+  ]
+}

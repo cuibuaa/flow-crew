@@ -2,12 +2,13 @@ import { runRecordPath } from '../../run-layout.js';
 // Project the settlement content decision into the durable audit and stage summary.
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { attachStageConstraintAudit, readRunState, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
+import { attachStageConstraintAudit, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
 import { normalizedProjectPath } from '../sched_admission/scope-services.js';
 import { type ScopeBatchContext } from './scope-batch.js';
 import { settleProjectWrites } from './write-enforcement.js';
 import { canonicalProjectWriteUnion } from './path-capabilities.js';
 import { trackedGitlinkAncestor } from './rollback-baseline.js';
+import { readRepairFileImage } from './file-images.js';
 
 export function createScopeReconciler() {
   function reconcileStageScope(input: {
@@ -26,8 +27,18 @@ export function createScopeReconciler() {
     const definiteWrites = new Set(rawWrites);
     const enforcement = settleProjectWrites({ projectDir: input.projectDir, snapshot: input.context.snapshot,
       rawWrites, definiteWrites, readOnly: ['shape', 'review'].includes(input.stage.decision?.kind ?? '')
-        || input.stage.is_gate && readRunState(input.projectDir, input.runId).workflowName === 'entry' });
+        || input.stage.is_gate });
     attempt.writes = canonicalProjectWriteUnion(rawWrites, enforcement.rawWrites);
+    // An unrestored content-bearing entry cannot become a retry's trusted
+    // preimage. Use the existing non-retryable integrity disposition; unknown
+    // special entries contain no publishable file bytes and remain untouched.
+    if (enforcement.rollbackFailures.some(path => {
+      const current = readRepairFileImage(input.projectDir, path);
+      return current.exists || current.inspectionFailure;
+    })) {
+      attempt.engineVoid = true;
+      attempt.terminationCause = 'engine_void';
+    }
     writeStageStatus(input.projectDir, input.runId, input.stage.id, status);
     const root = runDir(input.projectDir, input.runId);
     const path = `stages/${input.stage.id}/constraint_audit_attempt_${attempt.index}.json`;

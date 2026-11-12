@@ -142,22 +142,18 @@ describe('canonical criteria and atomic dispatch admission', () => {
       dispatched: [work, gate, repair, finalizer],
       baseStages: [plan],
       dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
       criteria,
     });
     expect(accepted.pass, accepted.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
-    expect(accepted.terminalOwners).toEqual({ 'docs/final.md': 'finalize' });
 
     const badOwner = stage({ ...work, scope: ['src/**', 'docs/final.md'] });
     const shared = inspectDispatchAdmission({
       dispatched: [badOwner, gate, { ...repair, scope: ['src/**', 'docs/final.md'] }, finalizer],
       baseStages: [plan],
       dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
       criteria,
     });
     expect(shared.pass, shared.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
-    expect(shared.terminalOwners).toEqual({ 'docs/final.md': 'finalize' });
 
 
   });
@@ -217,7 +213,7 @@ describe('gate settlement and research evidence', () => {
     expect(readGateEvaluation(project, 'qa')).toMatchObject({ pass: false, reason: expect.stringContaining('missing criteria evidence') });
   });
 
-  it('quarantines multiple non-research terminal outcomes and re-pends their sole owner', async () => {
+  it('quarantines ambiguous terminal outcomes without selecting a stage to repeat', async () => {
     const projectDir = temporaryRoot();
     const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finalize']);
     const startedAt = new Date(Date.now() - 1000).toISOString();
@@ -248,17 +244,17 @@ describe('gate settlement and research evidence', () => {
     } as StoreState;
     writeRunState(projectDir, runId, state);
     const result = await tryTerminateOnTerminalState(state, {
-      projectDir, runId, runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
+      projectDir, runId, runDirPath: taskRunDir, iteration: 1, stages: [],
     });
     expect(result.decision).toBe('deferred');
     expect(state.status).toBe('running');
-    expect(state.stages.finalize.status).toBe('pending');
+    expect(state.stages.finalize.status).toBe('complete');
     expect(existsSync(join(projectDir, 'docs', 'final.md'))).toBe(false);
     expect(existsSync(join(projectDir, 'docs', 'escalation.md'))).toBe(false);
     expect(readdirSync(runRecordPath(taskRunDir, '.')).filter((name) => name.startsWith('ambiguous_terminal_'))).toHaveLength(2);
   });
 
-  it('re-pends every implicated owner when path-specific terminal writers emit conflicting outcomes', async () => {
+  it('reports conflicting outcomes to the run without repeating particular writers', async () => {
     const projectDir = temporaryRoot();
     const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finish', 'escalate']);
     const startedAt = new Date(Date.now() - 1000).toISOString();
@@ -290,15 +286,15 @@ describe('gate settlement and research evidence', () => {
     writeRunState(projectDir, runId, state);
 
     const result = await tryTerminateOnTerminalState(state, {
-      projectDir, runId, runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
+      projectDir, runId, runDirPath: taskRunDir, iteration: 1, stages: [],
     });
 
     expect(result.decision).toBe('deferred');
-    expect(state.stages.finish.status).toBe('pending');
-    expect(state.stages.escalate.status).toBe('pending');
+    expect(state.stages.finish.status).toBe('complete');
+    expect(state.stages.escalate.status).toBe('complete');
     const guidance = readFileSync(runRecordPath(taskRunDir, 'supervisor_guidance.md'), 'utf-8');
-    expect(guidance).toContain('"target":"finish"');
-    expect(guidance).toContain('"target":"escalate"');
+    expect(guidance).toContain('multiple fresh terminal outcomes exist');
+    expect(guidance).toContain('"target":"*"');
   });
 });
 
@@ -443,7 +439,6 @@ describe('output inventory, reachability, and stage prose', () => {
       terminalStates: { complete: { paths: ['docs/final.md'] } },
     })).toEqual([]);
     expect(inspectDispatchAdmission({ dispatched: [work, finalizer, late], baseStages: [], dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
     }).pass).toBe(true);
 
     const optionalResultMarkdown = markdown.replaceAll('docs/not_owned.json', 'docs/round.json');

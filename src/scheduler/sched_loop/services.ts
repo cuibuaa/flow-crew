@@ -13,7 +13,6 @@ import { createPlainCompletionArchiver } from '../sched_settlement/completion.js
 import { canonicalGateRoundArtifactDir, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { loadGateContract } from '../sched_settlement/gate-contract.js';
 import { createGateContractRefusalHandler } from '../sched_settlement/gate-recovery.js';
-import { validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId } from '../sched_settlement/gate-validation.js';
 import { readGateEvaluation, readTerminalStudyCompletionEvidence } from '../sched_settlement/gate-verdict.js';
 import { createPlanSettlement } from '../sched_settlement/scoped-repair.js';
 
@@ -22,7 +21,7 @@ export const inspectDispatchAdmission = createDispatchAdmission();
 // Each unit captures only the services owned by the remaining scheduler.
 export const { appendIterationLog, writeCampaignEntry, writeCampaignEntryUnlessPaused } = createCampaignWriters({ readGateEvaluation, readTerminalStudyCompletionEvidence, pendingScopePlanningInputs });
 export const concludeRepeatedBlockage = createBlockageConcluder(writeCampaignEntry).concludeRepeatedBlockage;
-export const { ensureTerminalArtifactValidation, tryTerminateOnTerminalState, concludeDeclaredTerminalAtQuiescence } = createTerminalEvaluator({ validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId, writeCampaignEntry, concludeRepeatedBlockage });
+export const { tryTerminateOnTerminalState, concludeDeclaredTerminalAtQuiescence } = createTerminalEvaluator({ writeCampaignEntry, concludeRepeatedBlockage });
 export const { injectDispatchedStages } = createDispatchInjector({ inspectDispatchAdmission });
 export const { writeRepairRoundDiffArtifact } = createRepairDiffWriter({ gateArchiveCoordinate, canonicalGateRoundArtifactDir });
 export const { reconcileStageScope, reconcileCompletedStageAttempts } = createScopeReconciler();

@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -39,7 +39,7 @@ function shellWrite(path = terminalPath) {
   writeFileSync(join(project, 'tool-note.md'), 'structured tool wrote this other path\n');
 }
 
-it.each([false, true])('direct terminal owner keeps shell writes with ignored=%s', async ignored => {
+it.each([false, true])('direct author keeps shell writes with ignored=%s', async ignored => {
   if (ignored) writeFileSync(join(project, '.gitignore'), 'docs/\n');
   const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/direct.yaml'));
   config.defaults.max_iterations = 1;
@@ -60,7 +60,6 @@ it.each([false, true])('direct terminal owner keeps shell writes with ignored=%s
   const audit = JSON.parse(readFileSync(runRecordPath(directory, attempt.constraintAudit!.path), 'utf8'));
   expect(attempt.writes).toEqual(audit.rawWrites);
   if (ignored) expect(audit.exemptedWrites).toContain(terminalPath);
-  expect(readdirSync(runRecordPath(directory, '.')).some(path => path.startsWith('non_owner_terminal_'))).toBe(false);
   expect(readFileSync(join(project, terminalPath), 'utf8')).toContain('this execution');
 });
 
@@ -100,21 +99,6 @@ it('accepts changed terminal content whose mtime predates run start by 1.5 secon
   '---\nterminal_states:\n  complete: [docs/result.md]\n---\nProduce the result.\n', true);
   expect(state.status, state.failureReason).toBe('complete');
   expect(existsSync(join(project, terminalPath))).toBe(true);
-});
-
-it('quarantines a reviewer-only terminal write when the admitted owner never wrote it', async () => {
-  const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/direct.yaml'));
-  config.defaults.max_iterations = 1;
-  const state = await runWorkflow(config, raw, project, { async run(_prompt, _role, opts) {
-    if (opts.stageId === 'review') shellWrite();
-    return fixtureResult({ output: opts.stageId === 'review'
-      ? JSON.stringify({ pass: true, reason: 'Reviewed.', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'Finished.',
-    exitCode: 0, duration_ms: 1, writes: opts.stageId === 'review' ? [terminalPath] : [], writeAttribution: 'structured' }, opts);
-  } }, new Map(), undefined, join(import.meta.dirname, '../config/agents'), undefined,
-  '---\nterminal_states:\n  complete: [docs/result.md]\n---\nProduce the result.\n', true);
-  expect(state.status).not.toBe('complete');
-  expect(existsSync(join(project, terminalPath))).toBe(false);
-  expect(readdirSync(runRecordPath(join(fcGlobalDir(), 'runs', state.runId), '.')).some(path => path.startsWith('non_owner_terminal_'))).toBe(true);
 });
 
 it('does not attribute an engine quarantine or restore to the following attempt', async () => {

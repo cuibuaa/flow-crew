@@ -26,21 +26,17 @@ describe('engine boundary cases 57 and 59', () => {
       id, role: 'doc_writer', scope: [path], depends_on: ['gate'],
       dependency_reasons: { gate: 'Use the gate decision.' }, condition,
     });
-    const terminalStates = {
-      complete: { paths: ['docs/complete.md'] },
-      blocked: { paths: ['docs/blocked.md'] },
-    };
     const ordinary = [work, gate, repair,
       owner('complete', 'docs/complete.md', 'gate.outcome == complete'),
       owner('blocked', 'docs/blocked.md', 'gate.outcome == blocked')];
     const admitted = inspectDispatchAdmission({ dispatched: ordinary, baseStages: [],
-      dispatchStageId: 'plan', terminalStates });
+      dispatchStageId: 'plan' });
     expect(admitted.pass).toBe(true);
     const undefinedFacts = [work, gate, repair,
       owner('complete', 'docs/complete.md', 'research.terminalPath == docs/complete.md'),
       owner('blocked', 'docs/blocked.md', 'research.terminalPath == docs/blocked.md')];
     const refused = inspectDispatchAdmission({ dispatched: undefinedFacts, baseStages: [],
-      dispatchStageId: 'plan', terminalStates });
+      dispatchStageId: 'plan' });
     expect(refused.pass).toBe(false);
     expect(refused.errors.filter((error) => error.message.includes('unknown stage research'))).toHaveLength(2);
   });
