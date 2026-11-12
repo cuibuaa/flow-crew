@@ -61,6 +61,58 @@ describe('daemon start owns and verifies its child', () => {
     expect(f.controls.killProcess).not.toHaveBeenCalled();
   });
 
+  it('preserves a live replacement published when failed initialization releases the socket', async () => {
+    const socket = join(root, 'daemon.sock');
+    const dist = join(root, 'empty-dist');
+    mkdirSync(dist); // No build payload: initialization fails after the server binds.
+    const received = deferred<Socket>();
+    const peers = new Set<Socket>();
+    const replacement = net.createServer(peer => {
+      peers.add(peer);
+      peer.on('error', () => {});
+      peer.once('close', () => peers.delete(peer));
+      peer.once('data', () => received.resolve(peer));
+    });
+    const listening = new Promise<void>((resolve, reject) => {
+      replacement.once('listening', resolve);
+      replacement.once('error', reject);
+    });
+    const nativeClose = net.Server.prototype.close;
+    let released = false;
+    const close = vi.spyOn(net.Server.prototype, 'close').mockImplementationOnce(function (this: Server, ...args) {
+      const result = nativeClose.apply(this, args);
+      released = !this.listening;
+      // Native close releases the name synchronously. Bind before cleanup resumes.
+      replacement.listen(socket);
+      return result;
+    });
+    let output = '';
+    const stream = { write: (chunk: string) => { output += String(chunk); return true; } };
+    try {
+      expect(await cmdDaemon(['daemon', 'serve', '--socket', socket], {
+        distDir: dist, stdout: stream as never, stderr: stream as never,
+      })).toBe(1);
+      expect(output).toContain('no JavaScript files found');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(released).toBe(true);
+      await listening;
+      expect(replacement.listening).toBe(true);
+
+      const answer = { ok: true };
+      const pending = sendRpc(socket, { cmd: 'status' });
+      const peer = await Promise.race([
+        received.promise,
+        pending.then(() => { throw new Error('replacement answered before release'); }),
+      ]);
+      peer.end(JSON.stringify({ ok: true, result: answer }));
+      expect(await pending).toEqual(answer);
+    } finally {
+      close.mockRestore();
+      for (const peer of peers) peer.destroy();
+      if (replacement.listening) await new Promise<void>(done => replacement.close(() => done()));
+    }
+  });
+
   it.each(['answer', 'exit'] as const)('settles a held private readiness probe only on child %s', async outcome => {
     const f = fixture();
     let server: Server | undefined;

@@ -384,7 +384,6 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     );
   } catch (error) {
     server.close();
-    rmSync(socketPath, { force: true });
     throw error;
   }
 }
