@@ -134,7 +134,7 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('No model chooser');
+    expect(output).toContain('Rehearsal does not execute the frozen project instrument or fabricate verdicts');
     expect(output).not.toContain('gpg failed');
     expect(output).not.toContain('Buffer <');
     expect(output).not.toContain('at cmdRehearse');
@@ -157,7 +157,7 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('No model chooser');
+    expect(output).toContain('Rehearsal does not execute the frozen project instrument or fabricate verdicts');
     expect(readFileSync(brief, 'utf-8')).toBe(briefSource);
     expect(readFileSync(sentinel, 'utf-8')).toBe('unchanged\n');
     expect(readdirSync(fixture.project).sort()).toEqual(['brief.md', 'sentinel.txt']);
@@ -168,7 +168,7 @@ describe('rehearsal Git isolation', () => {
     expect(tempEntries.some((entry) => entry.startsWith('flowcrew-rehearse-diagnostics-'))).toBe(true);
   });
 
-  it('turns a real Git setup failure into a concise report with executable next steps', { timeout: 100_000 }, () => {
+  it('needs no Git executable for static instrument declaration inspection', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
     const validBrief = writeCriterionBrief(fixture, 'git-failure.md');
     const bin = join(fixture.root, 'broken-git-bin');
@@ -181,17 +181,16 @@ describe('rehearsal Git isolation', () => {
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.error).toBeUndefined();
-    expect(result.status, output).toBe(1);
-    expect(output).toContain('Git could not create the isolated temporary repository (git exit 73).');
-    expect(output).toContain('Next: git --version');
-    expect(output).toContain(`Static fallback: flowcrew rehearse '${validBrief.path}' --static-only`);
-    expect(output).toContain('❌ 1 contract problem');
+    expect(result.status, output).toBe(0);
+    expect(output).toContain('✅ Contract ready');
+    expect(output).not.toContain('git exit 73');
+    expect(output).toContain('Rehearsal does not execute the frozen project instrument or fabricate verdicts');
     expect(output).not.toContain('Buffer <');
     expect(output).not.toContain('at cmdRehearse');
     expect(output).not.toMatch(/\n\s+at\s+/);
   });
 
-  it('simulates a research brief with canonical numbered criteria through a criterion-aware gate', { timeout: 100_000 }, () => {
+  it('checks a versioned research declaration without fabricating author or gate results', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
     const brief = join(fixture.project, 'criteria-research.md');
     const source = readFileSync(helloBrief, 'utf-8').replace(
@@ -206,9 +205,9 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('No model chooser');
+    expect(output).toContain('Rehearsal does not execute the frozen project instrument or fabricate verdicts');
     expect(output).not.toContain('criterion_');
-    expect(output).toContain('produce → review');
+    expect(output).not.toContain('produce → review');
   });
 
   it.each([false, true])('reports external output admission (forbidden=%s) and leaves the real directory absent', { timeout: 100_000 }, forbidden => {
@@ -242,13 +241,14 @@ describe('rehearsal Git isolation', () => {
     expect(existsSync(outputPath)).toBe(false);
   });
 
-  it('rejects an occupied declared output before simulation', { timeout: 100_000 }, () => {
+  it('rejects an occupied declared output during static inspection', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
     const brief = join(fixture.project, 'occupied-output.md');
     const resultPath = join(fixture.project, 'docs', 'research-instrument', 'ceiling_report.md');
     mkdirSync(join(fixture.project, 'docs', 'research-instrument'), { recursive: true });
     writeFileSync(resultPath, 'x'.repeat(286 * 1024));
-    writeFileSync(brief, readFileSync(helloBrief, 'utf-8'), 'utf-8');
+    const source = readFileSync(helloBrief, 'utf-8').replace('---\n', '---\noutputs:\n  - path: docs/research-instrument/ceiling_report.md\n');
+    writeFileSync(brief, source, 'utf-8');
 
     const result = runRehearsal(fixture, brief, { PROJECT_DIR: fixture.project });
     const output = `${result.stdout}${result.stderr}`;

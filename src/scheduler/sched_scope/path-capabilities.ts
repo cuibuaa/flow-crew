@@ -1,3 +1,5 @@
+import { ResearchInstrumentSchema } from '../../research-instrument.js';
+import { parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 // Bind task-frozen identities once; inventory ordinary output through Git and retain planner matching for reporting.
 import { spawnSync } from "node:child_process";
 import { basename, dirname, join, isAbsolute, relative, resolve } from "node:path";
@@ -84,13 +86,22 @@ export interface ImmutableEvidenceBinding {
 /** Freeze structured input identities before authors start. Explicit output
  * declarations retain precedence; planner estimates cannot amend evidence. */
 export function resolveImmutableEvidenceBindings(projectDir: string, brief: string): ImmutableEvidenceBinding[] {
-  return bindImmutableEvidence(projectDir, parseBriefInputs(brief).references, extractBriefOutputDeclarations(brief));
+  return bindImmutableEvidence(projectDir, parseBriefInputs(brief).references, extractBriefOutputDeclarations(brief), researchFrozenRoots(brief));
+}
+
+/** Protocol-owned instrument roots reuse the task-frozen boundary; this replaces
+ * hash-only author protection, and generic outputs cannot release the instrument.
+ * The research block is its own frontmatter contract, never prose. */
+export function researchFrozenRoots(brief: string): string[] {
+  const research = ResearchInstrumentSchema.safeParse((parseBriefFrontmatterDocument(brief)?.value as Record<string, unknown> | undefined)?.research);
+  return research.success ? research.data.frozen : [];
 }
 
 /** Runtime consumes admitted declarations; it never reinterprets task prose. */
 export function bindImmutableEvidence(projectDir: string, inputs: readonly { path: string; frozen?: boolean }[],
-  declaredOutputs: readonly { path: string; expectedType: 'file' | 'directory' }[]): ImmutableEvidenceBinding[] {
-  const frozen = [...new Set(inputs.filter(input => input.frozen === true).map(input => input.path))];
+  declaredOutputs: readonly { path: string; expectedType: 'file' | 'directory' }[], protocolFrozenRoots: readonly string[] = []): ImmutableEvidenceBinding[] {
+  const protocolFrozen = new Set(protocolFrozenRoots);
+  const frozen = [...new Set([...inputs.filter(input => input.frozen === true).map(input => input.path), ...protocolFrozen])];
   const outputs = declaredOutputs.flatMap(output => {
     const path = normalizedProjectPath(output.path);
     return path ? [{ path, resolvedPaths: [canonicalPotentialProjectPath(projectDir, path),
@@ -101,7 +112,7 @@ export function bindImmutableEvidence(projectDir: string, inputs: readonly { pat
     const resolvedPath = canonicalPotentialProjectPath(projectDir, path);
     let kind: ImmutableEvidenceBinding['kind'] = 'file';
     try { if (statSync(join(projectDir, path)).isDirectory()) kind = 'tree'; } catch { /* preserve observed absence */ }
-    return { path, resolvedPath, kind, outputs };
+    return { path, resolvedPath, kind, outputs: protocolFrozen.has(path) ? undefined : outputs };
   });
 }
 

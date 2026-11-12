@@ -1,4 +1,4 @@
-import { readResearchHistory } from './research-history.js';
+import { readResearchHistory, readProtocolResearchRecord } from './research-history.js';
 /**
  * Ledger primitive — the loop's accumulated memory across a campaign's runs.
  *
@@ -23,14 +23,20 @@ export function summarizeLedger(projectDir: string, campaignId: string | undefin
     return 'none';
   }
 
-  const tried: Array<{ runId: string; label: string; result: number }> = [];
+  const tried: string[] = [];
   for (const runId of runIds) {
     try {
-      const journal = readResearchHistory(join(runsRoot(), runId)).value;
+      const directory = join(runsRoot(), runId);
+      const protocol = readProtocolResearchRecord(directory).value;
+      if (protocol) {
+        for (const outcome of protocol.history) tried.push(`- ${runId}: ${JSON.stringify(outcome)}`);
+        continue;
+      }
+      const journal = readResearchHistory(directory).value;
       if (journal) {
         for (const round of journal.rounds ?? []) {
           if (typeof round.label === 'string' && typeof round.result === 'number') {
-            tried.push({ runId, label: round.label, result: round.result });
+            tried.push(`- ${runId}/${round.label} → ${round.result}`);
           }
         }
       }
@@ -38,6 +44,6 @@ export function summarizeLedger(projectDir: string, campaignId: string | undefin
   }
 
   if (!tried.length) return 'none';
-  const lines = tried.slice(0, cap).map(({ runId, label, result }) => `- ${runId}/${label} → ${result}`);
+  const lines = tried.slice(0, cap);
   return `Tried directions (${tried.length}):\n${lines.join('\n')}`;
 }

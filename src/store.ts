@@ -323,18 +323,8 @@ export interface TerminalStateEntry {
 }
 export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
 
-/** Active research declarations. readRunState intentionally reads historical JSON
- * without parsing it as a new brief; unknown historical fields remain untouched. */
-export interface ResearchStopConditions {
-  beat?: number;
-  maxRounds: number;
-  maxWallHours?: number;
-  haltAfterNoImprovement?: number;
-}
-export interface ResearchConfig {
-  measurement: import('./research-measurement.js').ResearchMeasurement;
-  stop: ResearchStopConditions;
-}
+/** Active declarations are versioned; historical records use the explicit read model. */
+export type ResearchConfig = import('./research-instrument.js').ResearchConfig;
 
 /** Regression/plateau labels survive only in historical stored alerts. Current
  * campaign policy produces repeated_failure; research policy owns comparisons. */
@@ -435,10 +425,8 @@ export interface StoreState {
   terminalArtifactBaselines?: Record<string, import('./content-identity.js').ContentIdentity>;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
   terminalArtifact?: string;
-  /** Report destinations committed with terminal state, retained for publication-error recovery. */
+  /** Legacy destination intents, retained only for historical record decoding. */
   researchReportPaths?: string[];
-  /** Order of the terminal destination intent, committed before report publication. */
-  researchReportSequence?: number;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
   /** Structurally declared brief outputs archived before terminal commit. */
@@ -1341,7 +1329,6 @@ function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, re
 }
 
 function copyPersistedHistoryState(target: StoreState, source: StoreState): void {
-  target.researchReportSequence = source.researchReportSequence;
   target.stateFormat = source.stateFormat;
   target.retiredStageUsage = source.retiredStageUsage;
   target.stageEvidence = source.stageEvidence;
@@ -1478,19 +1465,8 @@ function persistRunStateUnlocked(
   copyPersistedHistoryState(state, { ...merged, stateFormat: projection.stateFormat });
 }
 
-/** Read committed destination intents directly, independent of index/event repair.
- * Missing reservations are not commits; unreadable committed records fail closed. */
-export function researchReportCommits(projectDir: string): StoreState[] {
-  return readdirSync(runsRoot(), { withFileTypes: true }).filter(entry => entry.isDirectory()).flatMap(entry => {
-    let state: StoreState;
-    try { state = JSON.parse(readFileSync(join(runsRoot(), entry.name, 'run.json'), 'utf8')) as StoreState; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-    return state.projectDir === projectDir && state.researchReportPaths && isTerminalRunStatus(state.status) ? [state] : [];
-  });
-}
-
 /** Both history and operational writers share the terminal commit boundary. */
-function publishRunProjection(projectDir: string, runPath: string, projection: StoreState, summaryState: StoreState, assertProjectionUnchanged: () => void, previous?: StoreState): void {
+function publishRunProjection(projectDir: string, runPath: string, projection: StoreState, summaryState: StoreState, assertProjectionUnchanged: () => void, _previous?: StoreState): void {
   assertProjectionUnchanged();
   // Terminal status is the commit record for the final reader artifacts.
   // A failed artifact write leaves the previous status observable.
@@ -1504,23 +1480,7 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     assertProjectionUnchanged();
     atomicWrite(runRecordPath(runPath, 'run.json'), JSON.stringify(projection) + '\n', { stagingDirectory: hasSeparatedRunLayout(runPath) ? engineDirectory(runPath) : undefined });
   };
-  if (projection.research?.measurement && projection.researchReportPaths && isTerminalRunStatus(projection.status)) {
-    if (!previous || !isTerminalRunStatus(previous.status)) {
-      // Serialize first terminal commits with shared report projection. A lost
-      // acknowledgement leaves this order durable; recovery cannot become newer.
-      withRunStateLock(runsRoot(), () => {
-        projection.researchReportSequence = 1 + researchReportCommits(projection.projectDir).reduce((max, state) => Math.max(max, state.researchReportSequence ?? 0), 0);
-        publish();
-      });
-    } else {
-      projection.researchReportSequence = previous.researchReportSequence;
-      publish(); // Pointer/failure corrections already run under the shared lock.
-    }
-  } else {
-    delete projection.researchReportSequence; // A resumed run receives a new terminal order.
-    publish();
-  }
-  summaryState.researchReportSequence = projection.researchReportSequence;
+  publish();
   observeRunStatusChange(runPath, projection.runId, projection.status);
   if (isTerminalRunStatus(projection.status)) {
     retireRunScratch(runPath);

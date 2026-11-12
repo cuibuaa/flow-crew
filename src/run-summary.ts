@@ -1,4 +1,4 @@
-import { readResearchHistory } from './research-history.js';
+import { renderLegacyResearchSummary, readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -13,20 +13,10 @@ import {
   STAGE_STATUS,
 } from './store.js';
 import type { StageStatus, StoreState } from './store.js';
-import type { ResearchEvaluation, ResearchRound } from './research-history.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 import type { RunEvent } from './run-events.js';
-import { RUN_STATUS, resolveRunStatus, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './lifecycle-status.js';
 import { archivedGateRejections } from './scheduler/sched_settlement/gate-archives.js';
 import { projectLegacyFindings } from './scoped-audit-repair.js';
-// Statuses for which a human-readable summary is worth generating. Note this
-// now includes the research terminal states (`shipped`, `ceiling_hit`) — those
-// runs previously produced no summary at all.
-// Derived from the engine's single source of truth — this set was hand-copied
-// and had already drifted (missing phase_complete / stopped / incomplete).
-// A paused ('parked') run is deliberately absent: it has no verdict to narrate.
-const TERMINAL_STATUSES = new Set<string>(STORE_TERMINAL_STATUSES);
-
 // ---------------------------------------------------------------------------
 // Git: compute the REAL set of changed files since the run started.
 // ---------------------------------------------------------------------------
@@ -169,12 +159,6 @@ function renderOrchestrationEvents(runDirectory: string): string {
 // Research: deterministic outcome + rounds from the framework-owned journal.
 // ---------------------------------------------------------------------------
 
-interface ResearchData {
-  baseline?: import('./research-measurement.js').Observation;
-  rounds: ResearchRound[];
-  decision: Partial<ResearchEvaluation> | null;
-}
-
 function readJson<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(path, 'utf-8')) as T;
@@ -198,78 +182,18 @@ function renderRealityGateChecks(runDir: string): string {
     advisory.length ? `## Reality-Gate advisories\n\n${render(advisory)}` : ''].filter(Boolean).join('\n\n');
 }
 
-function readResearchData(runDir: string): ResearchData {
-  const journal = readResearchHistory(runDir).value;
-  const decision = readJson<Partial<ResearchEvaluation>>(runRecordPath(runDir, 'research_decision.json'));
-  return { rounds: journal?.rounds ?? [], decision, baseline: journal?.baseline };
-}
-
-function fmtNum(n: number): string {
-  if (!Number.isFinite(n)) return String(n);
-  return Number.isInteger(n) ? String(n) : n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
-}
-
-function renderResearchOutcome(state: StoreState, data: ResearchData): string {
-  const rc = state.research;
-  const historical = rc as import('./research-history.js').HistoricalResearchConfig | undefined;
-  const higherIsBetter = rc?.measurement ? rc.measurement.metrics[rc.measurement.primary[0]].direction === 'max' : historical?.higherIsBetter ?? true;
-  const baseline = rc?.measurement ? data.baseline?.items?.reduce((sum, item) => sum + item.metrics[rc.measurement.primary[0]], 0) : historical?.baseline;
-  const best = data.decision?.runningBest;
-  const lines: string[] = [];
-  // FIX C — the Decision label must derive from the TERMINAL run.json status, not the
-  // research_decision.json snapshot, which can be STALE: rounds integrity-rejected after the
-  // last decision write never refresh it, so a snapshot reading `continue`/`ship` can contradict
-  // a true terminal `ceiling_hit`/`incomplete`. When the run is terminal, the run.json status is
-  // authoritative; the snapshot `reason` is only used as supplementary text and only when the
-  // snapshot is consistent with the terminal status (else it would echo a stale rationale).
-  const statusResolution = resolveRunStatus(state.status);
-  const isTerminal = statusResolution.kind === 'known'
-    && TERMINAL_STATUSES.has(statusResolution.status);
-  // Map the terminal status to the policy-decision vocabulary used in the summary.
-  const terminalDecisionLabel = statusResolution.kind === 'known'
-    ? statusResolution.status === RUN_STATUS.SHIPPED ? 'ship'
-      : statusResolution.status === RUN_STATUS.CEILING_HIT ? 'stop_ceiling' : statusResolution.status
-    : `unrecognized ${statusResolution.display}`;
-  // The snapshot is "consistent" with the terminal only when it agrees (e.g. a real ship snapshot
-  // on a shipped run, or a stop_ceiling snapshot on a ceiling_hit run). A `continue` snapshot on a
-  // terminal run is by definition stale.
-  const snapshotConsistent = isTerminal && data.decision?.decision === terminalDecisionLabel;
-  const decisionLabel = isTerminal ? terminalDecisionLabel : (data.decision?.decision ?? state.status);
-  const reasonSuffix = snapshotConsistent && data.decision?.reason ? ` — ${data.decision.reason}`
-    : (!isTerminal && data.decision?.reason ? ` — ${data.decision.reason}` : '');
-  lines.push(`- **Decision:** ${decisionLabel}${reasonSuffix}`);
-  if (typeof baseline === 'number' && typeof best === 'number') {
-    const delta = best - baseline;
-    const improved = higherIsBetter ? delta > 0 : delta < 0;
-    const pct = baseline !== 0 ? ` (${delta >= 0 ? '+' : ''}${((delta / Math.abs(baseline)) * 100).toFixed(2)}%)` : '';
-    lines.push(`- **Metric:** baseline ${fmtNum(baseline)} → best ${fmtNum(best)}${pct} ${improved ? '↑ improved' : '→ no improvement'}`);
-  } else if (typeof best === 'number') {
-    lines.push(`- **Running-best:** ${fmtNum(best)}`);
-  }
-  // Budget-exhaustion decisions contain terminal authority, without measured
-  // retention/streak fields. Report those quantities only when recorded.
-  const kept = Array.isArray(data.decision?.keptLabels) ? ` | kept: ${data.decision.keptLabels.length}` : '';
-  const streak = typeof data.decision?.consecutiveNoImprovement === 'number'
-    ? ` | no-improvement streak: ${data.decision.consecutiveNoImprovement}` : '';
-  lines.push(`- **Rounds:** ${data.rounds.length}${kept}${streak}`);
-  const wall = data.rounds.at(-1)?.wallHoursCumulative;
-  if (typeof wall === 'number') lines.push(`- **Wall time:** ${wall.toFixed(1)}h`);
-  return `## Outcome\n${lines.join('\n')}`;
-}
-
-function renderRoundsSection(data: ResearchData): string {
-  if (data.rounds.length === 0) return '';
-  const kept = new Set(Array.isArray(data.decision?.keptLabels) ? data.decision.keptLabels : []);
-  const MAX = 25;
-  const shown = data.rounds.slice(-MAX);
-  const lines = shown.map((r) => r.outcome === 'no_candidate'
-    ? `- ${r.label}: no candidate${r.reason ? ` — ${r.reason}` : ''}`
-    : r.outcome === 'review_rejected' ? `- ${r.label}: review rejected — ${r.reason ?? 'candidate properties rejected'}`
-    : r.outcome === 'unmeasured' ? `- ${r.label}: unmeasured — ${r.measurement?.detail ?? r.reason ?? 'measurement unavailable'}`
-    : `- ${r.label}: ${typeof r.result === 'number' ? fmtNum(r.result) : 'invalid measurement'}${(r.comparison ? r.comparison.keep : kept.has(r.label)) ? ' ✓ kept' : ''}`);
-  let out = `## Rounds (${data.rounds.length})\n${lines.join('\n')}`;
-  if (data.rounds.length > MAX) out = `## Rounds (${data.rounds.length}, showing last ${MAX})\n${lines.join('\n')}`;
-  return out;
+function renderProtocolResearch(runDir: string): string {
+  const record = readProtocolResearchRecord(runDir);
+  if (!record.value) return `## Instrument record\n${record.error ?? 'No committed instrument record is available.'}`;
+  const value = record.value;
+  return assemble([
+    `## Instrument record\n- **Protocol:** ${value.protocol}\n- **Engine stop reason:** ${value.engine_stop_reason ?? 'running'}\n- **Incumbent:** ${value.incumbent.sha256}\n- **Manifest:** engine/research_manifest.json`,
+    `## Instrument outcomes (${value.history.length})\n${value.history.map(h => `- ${h.phase ?? 'submission'} ${h.round}: ${h.outcome} — ${h.reason}`).join('\n')}`,
+    value.report ? `## Project report\nRun-local report: ${value.report.path} (sha256 ${value.report.sha256})` : '',
+    value.publication ? `## Publication\n${value.publication.status}: ${value.publication.destination}${value.publication.error ? ` — ${value.publication.error}` : ''}` : '',
+    `## Instrument diagnostics\n\n\`\`\`json\n${JSON.stringify(value.history.map(h => ({ phase: h.phase, round: h.round, outcome: h.outcome,
+      observations: h.response?.observations, diagnostics: h.response?.diagnostics })), null, 2)}\n\`\`\``,
+  ]);
 }
 
 // Records retain their execution identity: a rejected review or failed check
@@ -474,14 +398,11 @@ export function renderRunSummary(projectDir: string, runDir: string, state: Stor
   let summary: string;
 
   if (isResearch) {
-    const research = readResearchData(runDir);
-    const outcomeSection = renderResearchOutcome(state, research);
-    const roundsSection = renderRoundsSection(research);
+    const researchSection = state.research?.protocol ? renderProtocolResearch(runDir) : renderLegacyResearchSummary(runDir, state);
     summary = assemble([
       '# Research Summary',
       runOutcome,
-      outcomeSection,
-      roundsSection,
+      researchSection,
       advisorySection,
       orchestrationSection,
       records.conclusions,

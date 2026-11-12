@@ -8,8 +8,6 @@
     "logSha256": "e7499b5894d598f07979c082a2b5bbf8416d4b691d80a2034198993f290baef5"
   },
   "historical": {
-    "doseMinutes": [1.19595173424691, 2.1428210997008135, 2.1175898313695143],
-    "doseFloorMinutes": 20,
     "firstPlan": {"attemptIndex": 1, "admitted": false, "laterAdmittedAttemptIndex": 2},
     "overhead": [
       {"stageId": "plan", "attemptIndex": 1, "startedAt": "2026-09-03T17:09:33.456Z", "completedAt": "2026-09-03T17:13:57.577Z", "adapterMs": 222869, "overheadMs": 41252},
@@ -30,31 +28,6 @@
     "startedAt": "2026-09-03T17:09:17.000Z",
     "currentIteration": 3,
     "maxIterations": 7,
-    "research": {
-      "baseline": 0,
-      "policy": "greedy_stack",
-      "resultSchema": {
-        "type": "object",
-        "required": ["label", "dose_minutes"],
-        "properties": {
-          "label": {"type": "string"},
-          "dose_minutes": {"type": "number"}
-        },
-        "x-flowcrew-drift": {
-          "researchDose": {
-            "field": "dose_minutes",
-            "metricId": "dose_minutes",
-            "unit": "minutes",
-            "threshold": {
-              "kind": "floor",
-              "operator": ">=",
-              "value": 20,
-              "source": "task_brief.md#criterion-6"
-            }
-          }
-        }
-      }
-    },
     "stages": {
       "plan": {
         "status": "complete",
@@ -89,13 +62,6 @@
     ],
     "terminal": {"disposition": "admitted", "reason": "attempt 2 passed admission"}
   },
-  "researchJournal": {
-    "rounds": [
-      {"label": "round01_static_opponent_tendency_conditioned_return_table", "outcome": "no_candidate"},
-      {"label": "round02_deep_monte_carlo_return_table", "outcome": "no_candidate"},
-      {"label": "round03_advantage_weighted_behavioral_preference_policy", "outcome": "no_candidate"}
-    ]
-  },
   "events": [
     {"type": "admission_rejected", "runId": "example-run-1", "timestamp": "2026-09-03T17:14:10.031Z", "stageId": "plan", "attemptIndex": 1, "detail": "first plan rejected"},
     {"type": "stage_complete", "runId": "example-run-1", "timestamp": "2026-09-03T20:12:24.800Z", "iteration": 1, "stageId": "run_round"},
@@ -105,7 +71,6 @@
     {"label":"b3-warn-flood-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/cli_tui_ux.md","byteStart":440,"byteEndExclusive":1310,"sha256":"35de3a538ebc4685f8439e332505682620feb9eabe91beaf6a5959db2b4503f3"},
     {"label":"b3-registry-growth-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/engine_performance.md","byteStart":6913,"byteEndExclusive":7531,"sha256":"8617c93be8fe42fcca33b78a4c8635bab58c8c5c1c667b83e6352d95df69f961"},
     {"label":"b3-first-plan-admission-reason","sourcePath":"/workspace/state/runs/example-run-1/dispatch_rejections/attempt_1/rejection.json","byteStart":0,"byteEndExclusive":598,"sha256":"18e3e20237193d15bdb478d3cda2bdfdf6f2c8dbf52a9ba68de042402f5a0e98"},
-    {"label":"b4-dose-series","sourcePath":"/workspace/example-project/docs/example-project_explore8b/rounds/round_03/report.md","byteStart":4196,"byteEndExclusive":4812,"sha256":"1b8b7ff0cc8e0ce21044d9dd9efb84f45811c20e87fe70b3c2a930fa559cc254"},
     {"label":"b3-overhead-run-state","sourcePath":"/workspace/state/runs/example-run-1/run.json","bytes":221958,"sha256":"d0056ac0e01a107a78795a92e8dc88a761fd67c87cca9f782c21f74f835c309e"}
   ]
 }

@@ -111,7 +111,7 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeUndefined();
     expect(out.research).toBeUndefined();
-    expect(out.workflowError).toContain('declare research.measurement');
+    expect(out.workflowError).toContain('research-instrument/v1');
   });
 
   it('refuses the retired A+(a) research.confirm block with migration guidance', () => {
@@ -123,7 +123,7 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeUndefined();
     expect(out.research).toBeUndefined();
-    expect(out.workflowError).toContain('declare research.measurement');
+    expect(out.workflowError).toContain('research-instrument/v1');
   });
 });
 

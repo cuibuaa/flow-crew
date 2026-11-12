@@ -688,9 +688,11 @@ describe('structural engine state protection', () => {
   it('rejects a malformed successful typed answer before publishing a handoff', async () => {
     const runId = run.split('/').at(-1)!;
     const adapter: Adapter = { async run() { return {exitCode:0,duration_ms:1,output:'{"status":"delivered"}'}; } };
-    const result = await runStage(adapter, { stageId:'work', projectDir:project,runDir:run,runId,
+    const execution = runStage(adapter, { stageId:'work', projectDir:project,runDir:run,runId,
       role:{name:'fixture',description:'',model:'default',reasoning_effort:'low',tools:[],prompt:''},
       dependsOn:[],promptTemplate:'Do the work.',timeout_ms:5000,retries:0,artifactContract:contract,outputSchema:HANDOFF_SCHEMA });
+    await expect(execution, 'Read-only research imports must leave the ordinary stage clock usable').resolves.toBeDefined();
+    const result = await execution;
     expect(result.exitCode).not.toBe(0);
     expect(result.friendlyError).toContain('STAGE_RECORD_INVALID');
     expect(existsSync(runRecordPath(run,'handoff_work.md'))).toBe(false);
@@ -745,9 +747,11 @@ describe('structural engine state protection', () => {
       writeFileSync(runRecordPath(run, 'verdict_review.json'), '{"pass":true}');
       return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'delivered', summary: 'done', files_modified: [], checks: [], caveats: [] }) };
     } };
-    const result = await runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId,
+    const execution = runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId,
       role: { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' },
       dependsOn: [], promptTemplate: 'Do the work.', timeout_ms: 5000, retries: 0, artifactContract: contract, outputSchema: HANDOFF_SCHEMA });
+    await expect(execution, 'Read-only research imports must leave the ordinary stage clock usable').resolves.toBeDefined();
+    const result = await execution;
     expect(result.exitCode).toBe(125);
     expect(result.output).toContain('ENGINE_STATE_TAMPERED');
     expect(readStageStatus(project, runId, 'work').status).toBe('failed');

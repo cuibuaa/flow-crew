@@ -9,14 +9,11 @@ Run from the repository root after the [local build](../guide/getting-started.md
 node dist/cli.js rehearse examples/hello-research.brief.md
 ```
 
-The [brief](hello-research.brief.md) declares frozen evaluator inputs, baseline replicates,
-structured guards, held-out allowance and a submission budget. Rehearsal constructs and
-admits the same producer and independent candidate-property reviewer as a real run, then
-dispatches them through the scheduler with labelled scripted results in private temporary
-project/state directories. It calls no model or declared instrument. A ready verdict proves
-dispatch wiring, not an improvement or working instrument. The printed diagnostic log remains
-available after temporary project/state cleanup.
-
+The [brief](hello-research.brief.md) declares a versioned frozen project instrument,
+its candidate roots, argv/environment, author instruction and finite round budget.
+Rehearsal inspects the declaration and capabilities. It calls no model or instrument
+and fabricates no author/review result. Real execution tests belong to the project
+instrument and the engine's controlled protocol fixture.
 For static input checks only:
 
 ```bash
@@ -48,6 +45,6 @@ fixtures.
 Sources: [mock](../src/adapters/mock.ts), [scripted results](../src/adapters/scripted.ts),
 [rehearsal](../src/rehearse.ts), [launch admission](../src/cli.ts).
 
-The [instrument example](research-instrument.brief.md) declares four baseline replicates,
-a structured guard and two held-out uses. Both shipped research briefs use the measurement
-contract. Real runs fail closed at calibration before dispatch if their instrument is unavailable.
+The [instrument example](research-instrument.brief.md) uses the same protocol.
+Initialize, evaluate and finalize execute the retained program with a read-only JSON
+request. A failed executable is an execution error, never a project reject.

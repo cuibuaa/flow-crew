@@ -53,9 +53,7 @@ any target in the same `FC_HOME`; submitting those exact bytes costs no extra mo
 ## First safe result
 
 Use the exact recipe in [examples](../examples/README.md#rehearse-a-research-contract).
-Rehearsal launches no model. It parses the brief and dispatches the real research producer/reviewer shape with scripted results;
-engineering briefs receive static checks without that research simulation. A ready verdict
-checks wiring, not research quality or a live agent's ability to complete the task.
+Rehearsal launches no model. It checks brief parsing, capabilities and output occupancy for both research and engineering briefs. A ready verdict checks the declared contract; a real run checks instrument execution and candidate results.
 
 Rehearsal never executes declared instrument commands. Review the real instrument
 in an unfamiliar brief, or select `--static-only` as documented in [CLI](cli.md#inspection-and-setup).

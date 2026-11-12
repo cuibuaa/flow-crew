@@ -1,4 +1,4 @@
-import { readResearchHistory } from './research-history.js';
+import { readResearchHistory, legacyResearchConfig, legacyResearchDisplay, readProtocolResearchRecord, acceptsLegacyCampaignMeasurement, type ProtocolResearchRecord } from './research-history.js';
 import { runRecordPath, stageWorkPath } from './run-layout.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -180,6 +180,8 @@ export interface ResearchMetricGroup {
 }
 
 export interface ResearchNarrative {
+  /** Frozen instrument records replace metric inference for protocol runs. */
+  instruments?: Array<{ runId: string; record: ProtocolResearchRecord }>;
   selected: ResearchMetricGroup | null;
   otherMetrics: ResearchMetricGroup[];
   acceptedPointCount: number;
@@ -333,6 +335,7 @@ interface MetricArtifact {
 }
 
 interface RunEvidence {
+  instrument?: ReturnType<typeof readProtocolResearchRecord>;
   state: StoreState;
   workflow: WorkflowEvidence;
   journal: JournalEvidence;
@@ -373,7 +376,6 @@ interface CampaignIssueSeed {
   detail?: string;
 }
 
-const VALID_SHIP = 'valid_ship';
 const RESEARCH_CONFIRM_STATUS = {
   FAILED: 'failed',
   NOT_RUN: 'not_run',
@@ -810,12 +812,14 @@ function createRunEvidence(
   const runHistory = entries.filter((entry) => entry.runId === state.runId);
   const runTasks = tasks.filter((task) => task.run_id === state.runId);
   const workflow = workflowEvidence(projectDir, state);
-  const journal = journalEvidence(projectDir, state);
-  const artifacts = metricArtifacts(projectDir, state);
+  const instrument = state.research?.protocol ? readProtocolResearchRecord(join(runsRoot(projectDir), state.runId)) : undefined;
+  const journal = instrument ? { rounds: [] } : journalEvidence(projectDir, state);
+  const artifacts = instrument ? { values: [], issues: [] } : metricArtifacts(projectDir, state);
   const summary = readOptionalText(runRecordPath(join(runsRoot(projectDir), state.runId), 'summary.md'));
-  const confirm = readOptionalJson(runRecordPath(join(runsRoot(projectDir), state.runId), 'research_confirm.json'));
+  const confirm = instrument ? { value: null } : readOptionalJson(runRecordPath(join(runsRoot(projectDir), state.runId), 'research_confirm.json'));
   return {
     state,
+    instrument,
     workflow,
     journal,
     metricArtifacts: artifacts.values,
@@ -946,15 +950,10 @@ function metricKey(metric: string): string {
   return metric.trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
 }
 
-function acceptsCampaignMeasurement(statusValue: unknown): boolean {
-  if (statusValue === VALID_SHIP) return true;
-  const resolution = resolveRunStatus(statusValue);
-  return resolution.kind === 'known'
-    && (resolution.status === RUN_STATUS.SHIPPED || resolution.status === RUN_STATUS.CEILING_HIT);
-}
-
 function runDirection(run: RunEvidence, metric: string): 'higher' | 'lower' | 'unknown' {
-  if (run.state.research?.measurement) return run.state.research.measurement.metrics[metric]?.direction === 'min' ? 'lower' : 'higher';
+  const legacy = legacyResearchConfig(run.state.research);
+  if (legacy?.measurement) return legacy.measurement.metrics[metric]?.direction === 'min' ? 'lower' : 'higher';
+  if (run.state.research?.protocol) return 'unknown';
   if (run.state.research) return (run.state.research as import('./research-history.js').HistoricalResearchConfig).higherIsBetter === false ? 'lower' : 'higher';
   const directions = run.metricArtifacts
     .filter((item) => run.workflow.roles?.get(item.stageId)?.isGate && metricKey(item.metric) === metricKey(metric))
@@ -970,8 +969,8 @@ function acceptedLedgerEntry(entry: CampaignHistoryEntry): boolean {
     || entry.terminalStudyComplete === true
     || raw.confirmed === true
     || raw.confirm_pass === true
-    || acceptsCampaignMeasurement(entry.status)
-    || acceptsCampaignMeasurement(entry.outcome);
+    || acceptsLegacyCampaignMeasurement(entry.status)
+    || acceptsLegacyCampaignMeasurement(entry.outcome);
 }
 
 function acceptedPointsFromRuns(
@@ -980,8 +979,9 @@ function acceptedPointsFromRuns(
 ): AcceptedMeasurementPoint[] {
   const points: AcceptedMeasurementPoint[] = [];
   for (const run of runs) {
+    if (run.state.research?.protocol) continue;
     const metricCandidates = new Map<string, string>();
-    const primary = run.state.research?.measurement?.primary[0];
+    const primary = legacyResearchDisplay(run.state.research).primary;
     if (primary) metricCandidates.set(metricKey(primary), primary);
     for (const entry of run.history) {
       const metric = nonEmptyString(entry.metric);
@@ -1133,7 +1133,7 @@ function engineeringEvidence(
   const evidenceRuns: RunEvidence[] = [];
   const issues: CampaignIssueSeed[] = [...sourceIssues];
   for (const run of runs) {
-    if (acceptedRunIds.has(run.state.runId) || run.journal.rounds.length > 0) continue;
+    if (run.instrument || acceptedRunIds.has(run.state.runId) || run.journal.rounds.length > 0) continue;
     if (actualEngineeringExecution(run) || summaryHasDelivery(run)) evidenceRuns.push(run);
     if (run.workflow.issue && !summaryHasDelivery(run)) issues.push(run.workflow.issue);
     if (run.summaryIssue) issues.push(run.summaryIssue);
@@ -1157,7 +1157,8 @@ function classify(
   runRefs: CampaignRunReference[] = [],
 ): { classification: CampaignClassification; engineeringRuns: RunEvidence[]; engineeringIssues: CampaignIssueSeed[] } {
   const acceptedRunIds = new Set(points.map((point) => point.runId));
-  const research = points.length
+  const instrumentCount = runs.filter(run => run.instrument?.value).length;
+  const research = points.length || instrumentCount
     ? CAMPAIGN_EVIDENCE_STATE.PRESENT
     : researchIssues.length
       ? CAMPAIGN_EVIDENCE_STATE.UNKNOWN
@@ -1172,7 +1173,7 @@ function classify(
         : CAMPAIGN_CLASSIFICATION.UNKNOWN;
   const issues = uniqueIssueSeeds([...researchIssues, ...engineering.issues]);
   const reasons = [
-    points.length
+    instrumentCount ? `${instrumentCount} frozen instrument run${instrumentCount === 1 ? '' : 's'}` : points.length
       ? `${points.length} accepted research measurement${points.length === 1 ? '' : 's'}`
       : research === CAMPAIGN_EVIDENCE_STATE.UNKNOWN
         ? 'Research evidence could not be read completely'
@@ -1645,7 +1646,8 @@ function researchNarrative(
   researchIssues: CampaignIssueSeed[],
 ): CampaignSource<ResearchNarrative | null> {
   const runRefs = campaignRunReferences(loaded);
-  if (!groups.length) return source(null, researchIssues.length ? 0 : 1, researchIssues, 1, runRefs);
+  const instruments = loaded.runs.flatMap(run => run.instrument?.value ? [{ runId: run.state.runId, record: run.instrument.value }] : []);
+  if (!groups.length && !instruments.length) return source(null, researchIssues.length ? 0 : 1, researchIssues, 1, runRefs);
   const confirmNotes: string[] = [];
   const refsById = new Map(runRefs.map((ref) => [ref.runId, ref]));
   for (const run of loaded.runs) {
@@ -1657,6 +1659,7 @@ function researchNarrative(
   }
   const latestTerminal = sortedRuns(loaded.runs).find((run) => isTerminalRunStatus(run.state.status));
   const value: ResearchNarrative = {
+    ...(instruments.length ? { instruments } : {}),
     selected: groups[0] ?? null,
     otherMetrics: groups.slice(1),
     acceptedPointCount: groups.reduce((sum, group) => sum + group.points.length, 0),
@@ -1723,6 +1726,8 @@ export async function readCampaignOperatorView(
   const researchIssues = [
     ...runIssues,
     loaded.entriesIssue,
+    ...loaded.runs.flatMap(run => run.instrument && !run.instrument.value
+      ? [issue('research-record-unavailable', 'The committed instrument record could not be read', { runId: run.state.runId, detail: run.instrument.error })] : []),
     ...loaded.runs.flatMap((run) => [run.workflow.issue, run.confirmIssue].filter((value): value is CampaignIssueSeed => Boolean(value))),
   ].filter((value): value is CampaignIssueSeed => Boolean(value));
   const engineeringSourceIssues = [

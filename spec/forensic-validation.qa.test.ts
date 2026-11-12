@@ -148,7 +148,8 @@ describe('scheduler admission and evidence contracts', () => {
       markdown: check('docs/report.json', { kind: 'stage', stage: 'writer', artifact: 'report' }), projectDir, research,
       stages: [{ artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.json' }], reads: [] }), id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
     });
-    const prompt = appendResearchPathContract('confirm the round', research, undefined);
+    let prompt: string | undefined;
+    expect(() => { prompt = appendResearchPathContract('confirm the round', research, undefined); }).not.toThrow();
     expect(refused.join('\n')).toContain('ARTIFACT_INPUT_ABSENT');
     expect(prompt).not.toContain('framework round manifest');
     expect(prompt).toBe('confirm the round'); // A retired execution config supplies no active prompt contract.

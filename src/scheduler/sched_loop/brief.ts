@@ -87,10 +87,10 @@ export function configureWorkflowBrief(
         s.briefConfigured = true;
         writeRunState(projectDir, runId, s);
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
-        if (research) log.info({ runId, replicates: research.measurement.replicates }, 'Research config loaded from brief frontmatter');
+        if (research) log.info({ runId, protocol: research.protocol }, 'Research config loaded from brief frontmatter');
       }
       if (s.declaredOutputs?.length) taskDescription += `\n\nDeclared outputs (required by the brief):\n${s.declaredOutputs.map(output => `- ${output.path} (${output.expectedType})`).join('\n')}\nGuidance cannot remove these obligations. Report conflicting actual constraints rather than silently overriding either one.`;
-      if (s.research?.measurement) researchState = s;
+      if (s.research) researchState = s;
       if (parsed.frontmatterError) log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
 
     }

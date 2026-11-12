@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 42 -->
+<!-- flowcrew-skill-revision: 43 -->
 
 # Ship a conversation to FlowCrew
 
@@ -39,12 +39,14 @@ State effect constraints as plain brief text for the stages to read under their 
 authority. Execution never waits for a human. A stage that lacks a resource continues as far
 as possible and names the gap in its result and report; there is no authorization frontmatter.
 
-State whether the goal is a known pass/fail outcome or candidate research with an allowed supported
-ceiling. Engineering shape is chosen by the entry chooser. A research.measurement declaration fixes the
-producer and independent candidate-property reviewer in an engine-owned loop. Missing author-owned facts end the run with a result naming them. A metric search needs the author's research declaration
-(research.measurement with frozen/candidate roots, metrics, baseline replicates, development command,
-structured guards and stop conditions). Do not invent these author-owned declarations. Map writable paths for authored stages; leave schema details in the
-canonical references.
+State whether the goal is an engineering outcome or candidate research. Engineering shape is chosen by
+the entry chooser. A `research.protocol: research-instrument/v1` declaration fixes the research mechanism:
+candidate roots, frozen instrument/config roots, absolute argv and allowed environment, ordinary author
+role/instruction, finite round budget and optional wall/invocation caps, an optional review hook with
+explicit project criteria, and an optional publication destination. The frozen project instrument owns
+measurements, verdicts, diagnostics, early stopping and report content. Do not invent these author-owned
+declarations or reinterpret legacy measurement briefs. Map writable paths for authored stages; leave
+schema details in the canonical references.
 
 Require the complete configured validation with direct exits/totals after the last relevant
 write. For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
@@ -101,8 +103,7 @@ flowcrew rehearse docs/task_brief.md
 
 Fix blocking findings. Review every retained warning and explain it. Rehearsal is mandatory
 for this skill, including an engineering brief's static pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
-research quality. Nonzero means correct the brief/environment. It calls no model, dispatches the real research producer/reviewer shape with scripted results,
-and never executes declared instrument commands.
+research quality. Nonzero means correct the brief/environment. It calls no model and checks declaration syntax, capabilities and output occupancy without executing author, review or instrument work.
 If bytes change, repeat preflight and rehearsal.
 
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,

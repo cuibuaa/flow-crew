@@ -1,3 +1,4 @@
+import { readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { normalizeNativeEvent } from './adapters/native-events.js';
 import { stageLiveLogPath } from './stage-live-log.js';
@@ -524,6 +525,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     budget: budgetView(state, new Date().toISOString()),
     events: readRunEvents(state.runId),
     operational: readOperationalProjection(runDirectory, { state }),
+    ...(state.research?.protocol ? { researchRecord: readProtocolResearchRecord(runDirectory) } : {}),
     stage_outputs: readStageOutputPreviews(state.runId),
   };
 }

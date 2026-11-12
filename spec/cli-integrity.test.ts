@@ -123,7 +123,7 @@ describe('rehearsal language and diagnostic integrity', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toContain('Rehearsal report');
     expect(result.stdout).toContain('Contract ready');
-    expect(result.stdout).toContain('Engine-owned instrument: 4 baseline replicates');
+    expect(result.stdout).toContain('Frozen project instrument: research-instrument/v1');
     expect(result.stdout).not.toContain('≥-');
     expect(result.stdout).not.toMatch(/[\u3400-\u9fff]/u);
     expect(result.stdout).not.toMatch(/^\{"level":\d+/m);
@@ -132,7 +132,7 @@ describe('rehearsal language and diagnostic integrity', () => {
     expect(path.startsWith(isolated.temp)).toBe(true);
     expect(existsSync(path)).toBe(true);
     const diagnostics = readFileSync(path, 'utf-8');
-    expect(diagnostics).toMatch(/^\{"level":\d+/m);
+    expect(diagnostics).not.toContain('Synthetic');
     expect(result.stderr).not.toMatch(/^\{"level":\d+/m);
   });
 

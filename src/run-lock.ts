@@ -1,5 +1,5 @@
 import { runRecordPath } from './run-layout.js';
-import { writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
+import { atomicWrite, writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
 import { processIsAlive, processLiveness, validProcessStartToken, processStartToken, processStartTokensMatch, POSIX_PS_COMMAND, type ProcessStartToken } from './process-liveness.js';
 export { processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './process-liveness.js';
@@ -30,7 +30,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { fcGlobalDir, runsRoot, updateRunState } from './store.js';
+import { fcGlobalDir, runsRoot, updateRunState, withRunStateLock } from './store.js';
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 import { canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
@@ -54,6 +54,10 @@ function launchIntentPath(projectDir: string): string {
   const key = createHash('sha256').update(normalizedProjectDir(projectDir)).digest('hex');
   return join(launchIntentDir(), `${key}.json`);
 }
+
+// The retained owner and admission/restore lock share the existing project key.
+const projectOwnershipDirectory = (projectDir: string, storeRoot = fcGlobalDir()) =>
+  join(storeRoot, 'launch-intents', `${createHash('sha256').update(normalizedProjectDir(projectDir)).digest('hex')}.ownership`);
 
 /**
  * Read an unexpired cross-process launch claim. A fresh malformed claim is
@@ -122,14 +126,23 @@ export function claimLaunchIntent(
   nowMs = Date.now(),
 ): { claimed: boolean; blockingOwnerRunId?: string } {
   ownerRunId = canonicalRunId(runsRoot(), ownerRunId);
+  const ownership = projectOwnershipDirectory(projectDir);
+  const claim = () => withRunStateLock(ownership, () => {
+    const result = claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
+    if (result.claimed) {
+      try { atomicWrite(join(ownership, 'owner'), ownerRunId); }
+      catch (error) { releaseLaunchIntent(projectDir, ownerRunId); throw error; }
+    }
+    return result;
+  });
   if (existsSync(runRecordPath(join(runsRoot(), ownerRunId), 'run.json'))) {
     let result: { claimed: boolean; blockingOwnerRunId?: string } = { claimed: false };
     updateRunState(projectDir, ownerRunId, () => {
-      result = claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
+      result = claim();
     });
     return result;
   }
-  return claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
+  return claim();
 }
 
 function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs: number): { claimed: boolean; blockingOwnerRunId?: string } {
@@ -177,6 +190,21 @@ export function releaseLaunchIntent(projectDir: string, ownerRunId: string): voi
     if (typeof existing.ownerRunId !== 'string' || canonicalRunId(runsRoot(), existing.ownerRunId) !== ownerRunId) return;
     unlinkSync(path);
   } catch { /* absent, malformed, or already released */ }
+}
+
+/** Replace unconditional delayed project writes with the admission mutex.
+ * Its last owner survives launch release, including completed successors. The
+ * existing lock primitive excludes admission throughout the synchronous write;
+ * settlement never advances ownership. Unknown ownership grants no write. */
+export function withProjectWriteOwnership(projectDir: string, run: string, write: () => void): boolean {
+  const directory = canonicalRunDirectory(run), ownerRunId = basename(directory);
+  const ownership = projectOwnershipDirectory(projectDir, dirname(dirname(directory)));
+  return withRunStateLock(ownership, () => {
+    let owner: string;
+    try { owner = readFileSync(join(ownership, 'owner'), 'utf8'); } catch { return false; }
+    if (owner !== ownerRunId) return false;
+    write(); return true;
+  });
 }
 
 /** Parse the complete scheduler.pid marker; numeric prefixes are not PIDs. */

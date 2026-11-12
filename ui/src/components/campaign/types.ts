@@ -1,3 +1,4 @@
+import type { ProtocolResearchRecord } from '../../../../src/research-history.js';
 import type { RunStatus } from "../../lib/run-status";
 export type { RunStatus } from "../../lib/run-status";
 
@@ -116,6 +117,7 @@ export interface ResearchMetricGroup {
 }
 
 export interface ResearchNarrative {
+  instruments?: Array<{ runId: string; record: ProtocolResearchRecord }>;
   selected: ResearchMetricGroup | null;
   otherMetrics: ResearchMetricGroup[];
   acceptedPointCount: number;

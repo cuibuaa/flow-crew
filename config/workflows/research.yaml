@@ -1,16 +1,10 @@
 name: research
 description: >
-  Engine-owned measurement loop. research.measurement binds the candidate scope.
-  The engine calibrates, dispatches a producer and independent property review,
-  measures changed submissions, restores the best and writes the terminal report.
+  Frozen project instrument loop. The versioned declaration constructs the author
+  and optional project review. The instrument owns verdicts and reports.
 stages:
   - id: produce
     role: coder
     scope: []
-    artifact_contract: {version: 1, produces: [], reads: []}
-  - id: review
-    role: qa
-    scope: []
-    depends_on: [produce]
-    is_gate: true
+    prompt_template: The versioned research declaration supplies the active author instruction.
     artifact_contract: {version: 1, produces: [], reads: []}

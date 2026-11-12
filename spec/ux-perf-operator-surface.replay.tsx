@@ -689,9 +689,11 @@ describe('operator dashboard vocabulary', () => {
     expect(protocol).toContain("planner's path estimate");
     expect(protocol).toContain('including stages with disjoint estimates');
     expect(protocol).toContain('Whole-plan admission');
-    expect(contract).toContain('candidate-root content');
+    expect(contract).toContain('immutable submitted snapshot');
     expect(contract).toContain('engine/research_measurement/state.json');
-    expect(contract).toContain('independent candidate-property');
+    expect(contract).toContain('research-instrument/v1');
+    expect(contract).toContain('optional; absent means no review stage');
+    expect(contract).toContain('Publication never changes run status, stop reason or incumbent');
     expect(cli).toContain('`events`');
     expect(cli).toContain('`task show <numeric-id>`');
     expect(cli).toContain('`--all`');

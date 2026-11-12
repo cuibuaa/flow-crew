@@ -17,13 +17,13 @@ describe('Objective primitive — research/objective frontmatter', () => {
   it('refuses the legacy research block', () => {
     const parsed = parseBriefFrontmatter(body('research'));
     expect(parsed.research).toBeUndefined();
-    expect(parsed.workflowError).toContain('declare research.measurement');
+    expect(parsed.workflowError).toContain('research-instrument/v1');
   });
 
   it('refuses the retired objective alias identically', () => {
     const parsed = parseBriefFrontmatter(body('objective'));
     expect(parsed.research).toBeUndefined();
-    expect(parsed.workflowError).toContain('declare research.measurement');
+    expect(parsed.workflowError).toContain('research-instrument/v1');
   });
 
   it('strips the frontmatter from the brief body either way', () => {

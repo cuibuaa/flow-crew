@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readResearchHistory } from './research-history.js';
+import { readResearchHistory, readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
 import { EXIT_CODE } from './exit-code.js';
@@ -1420,6 +1420,17 @@ function runIdsByRecency(root: string): string[] {
 }
 
 function printResearchProgress(runDir: string): void {
+  const protocol = readProtocolResearchRecord(runDir);
+  if (protocol.value) {
+    const record = protocol.value;
+    console.log(`\n## Research instrument (${record.protocol})`);
+    console.log(`  Engine stop: ${record.engine_stop_reason ?? 'running'} | incumbent: ${record.incumbent.sha256}`);
+    for (const outcome of record.history) console.log(`  ${outcome.phase ?? 'submission'} ${outcome.round}: ${outcome.outcome} — ${outcome.reason}`);
+    if (record.publication) console.log(`  Publication: ${record.publication.status}${record.publication.error ? ` — ${record.publication.error}` : ''}`);
+    console.log(`  Instrument diagnostics: ${JSON.stringify(record.history.map(h => h.response?.diagnostics ?? null))}`);
+    return;
+  }
+  if (protocol.error) console.log(`  Research record unavailable: ${protocol.error}`);
   const { value: journal } = readResearchHistory(runDir);
   if (!journal) return;
   const rounds = journal.rounds;

@@ -178,8 +178,8 @@ artifact_contract:
 Successful settlement checks active required outputs for presence, kind, nonempty policy
 and exactly-one groups. Suspended/failed attempts have no completion obligation. The location protocol requires no intermediate
 proof package, changed content, age or fresh attribution. Location inspection and identity records do not certify content
-quality. Required products and independent gates still govern task settlement; explicit
-Reality checks and research measured-round rules remain separate.
+quality. Required products and independent gates still govern task settlement.
+Declared research instruments own scientific verdicts; engineering reality checks use their ordinary contract.
 
 Sources: [declarations](../src/artifact-declarations.ts),
 [location inspection](../src/stage-artifact-contract.ts), [carrier ownership](../src/engine-owned-carriers.ts).
@@ -352,4 +352,4 @@ release its successors or clear the rejection.
 
 Sources: [content settlement](../src/scheduler/sched_scope/write-enforcement.ts), [plan revisions](../src/plan-revisions.ts).
 
-Research gates retain their existing captured outcome record and settlement owner. Their prompt names that record by path and content identity; it does not inline candidate labels or author reasons, including consumed earlier-round outcomes.
+Declared research reviews use the ordinary independent gate carrier and explicit project criteria. Research authors receive the incumbent and all committed instrument outcomes, observations, diagnostics and opaque state unchanged. Author results are advisory; only a validated frozen instrument response can decide keep or reject.

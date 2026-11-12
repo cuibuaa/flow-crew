@@ -1,3 +1,4 @@
+import type { ProtocolResearchRecord } from '../../src/research-history.js';
 export interface Agent {
   name: string;
   description: string;
@@ -262,6 +263,7 @@ export interface OperationalProjection {
 }
 
 export interface RunDetailData {
+  researchRecord?: { value: ProtocolResearchRecord | null; error?: string };
   runId: string;
   projectDir?: string;
   workflowName?: string;

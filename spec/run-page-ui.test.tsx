@@ -62,6 +62,20 @@ describe("run-page canonical scenes", () => {
     expect(out).not.toContain('dag-node-retired');
     expect(out).toContain('Final failed stages</dt><dd>none recorded');
   });
+  it('shows protocol stop, incumbent, recorded verdict and publication error independently of run success', () => {
+    const run = fixture('complete');
+    const candidate = { path: '/fixture/snapshot', sha256: 'a'.repeat(64), label: 'kept' };
+    run.researchRecord = { value: { protocol: 'research-instrument/v1', run_id: run.runId, engine_stop_reason: 'instrument_stop',
+      initial: candidate, incumbent: candidate, instrument_sha256: 'b'.repeat(64), history: [{ phase: 'evaluate', round: 2,
+        candidate, outcome: 'reject', reason: 'Project tradeoff', result: { path: '/fixture/result', sha256: 'c'.repeat(64) },
+        response: { diagnostics: { nested: ['retained diagnostic'] } } }],
+      publication: { status: 'failed', destination: 'report.md', error: 'Delivery unavailable' } } as any };
+    const out = markup(run);
+    expect(out).toContain('data-testid="canonical-run-status">complete');
+    expect(out).toContain('instrument_stop'); expect(out).toContain(candidate.sha256);
+    expect(out).toContain('Project tradeoff'); expect(out).toContain('retained diagnostic'); expect(out).toContain('Delivery unavailable');
+    expect(out).not.toContain('Best measurement');
+  });
   it.each(NON_TERMINAL_RUN_STATUSES)("renders %s as a truthful non-terminal scene", (status) => {
     const out = markup(fixture(status));
     expect(out).toContain('data-run-scene="non-terminal"');

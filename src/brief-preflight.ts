@@ -109,14 +109,14 @@ export function inspectBrief(
 
   const rc = parsed.research;
   if (parsed.researchPolicyError) add({ code: 'research_policy_invalid', level: 'fail', consequential: true,
-    message: parsed.researchPolicyError, suggestion: 'Declare research.measurement; move numeric protections into structured guards.' });
+    message: parsed.researchPolicyError, suggestion: 'Declare research-instrument/v1 with frozen roots, argv and a finite round budget.' });
 
   if (rc) add({ code: 'research_measurement_valid', level: 'ok', consequential: false,
-    message: `Engine-owned instrument: ${rc.measurement.replicates} baseline replicates, ${rc.measurement.guards.length} guards, held-out allowance ${rc.measurement.held_out?.allowance ?? 'undeclared'}` });
+    message: `Frozen project instrument: ${rc.protocol}; ${rc.budget.max_rounds} hard rounds` });
 
   const terminalStates = parsed.terminalStates;
   if (!terminalStates || Object.keys(terminalStates).length === 0) {
-    add({
+    if (!rc) add({
       code: 'terminal_states_missing',
       level: 'warn',
       message: 'No `terminal_states` declared — terminal artifact paths have no contract',

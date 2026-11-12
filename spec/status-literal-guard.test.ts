@@ -108,12 +108,8 @@ function scanProjectSources(): Violation[] {
 describe('central run-status semantics', () => {
   it('has no direct run-status literal branches outside store.ts', () => {
     const violations = scanProjectSources();
-    if (violations.length > 0) {
-      const diagnostics = violations
-        .map(({ file, line, source }) => `${file}:${line}: ${source}`)
-        .join('\n');
-      throw new Error(`Direct run-status literals must use store.ts constants or guards:\n${diagnostics}`);
-    }
+    const diagnostics = violations.map(({ file, line, source }) => `${file}:${line}: ${source}`).join('\n');
+    expect(violations, `Direct run-status literals must use store.ts constants or guards:\n${diagnostics}`).toEqual([]);
   });
 
   it('ignores comments while detecting comparison, case, and includes branches', () => {

@@ -89,7 +89,7 @@ export function settleGateEvaluation(projectDir: string, runId: string, stageId:
   if ((status.status !== STAGE_STATUS.COMPLETE && status.status !== STAGE_STATUS.FAILED) || status.continuation || status.gate) return;
   const state = readRunState(projectDir, runId);
   const document = readGateVerdictDocument(runDir(projectDir, runId), stageId);
-  const rawVerdict = evaluateGateVerdict(document, projectDir, stageId, runId, state.research?.measurement ? null : loadGateContract(projectDir, runId, state.campaignStorageKey))
+  const rawVerdict = evaluateGateVerdict(document, projectDir, stageId, runId, state.research ? null : loadGateContract(projectDir, runId, state.campaignStorageKey))
     ?? { pass: false, refusal: { kind: 'missing_verdict' as const }, reason: 'Gate did not produce a verdict' };
   const verdict = settleFindingAssessment(rawVerdict, document, projectDir, stageId, runId)!;
   if (status.status === STAGE_STATUS.FAILED) return;
@@ -178,7 +178,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
       if (stages.some(stage => stage.id !== stageId && !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length
           && state.stages[stage.id]?.status !== STAGE_STATUS.COMPLETE && !transitivelyDependsOn(stageId, stage.id, byId)
           && scopeContainsPath(stage.scope ?? [], output.path))) continue;
-      if (state.research?.measurement && Object.values(state.terminalStates ?? {}).some(entry => entry.paths.includes(output.path))) continue;
+      if (state.research && (state.research.publication !== undefined && state.research.publication === output.path || Object.values(state.terminalStates ?? {}).some(entry => entry.paths.includes(output.path)))) continue;
       if (!output.available) return { pass: false, refusal: { kind: 'declared_output' }, reason: `DECLARED_OUTPUT_REQUIRED: ${output.path}: ${output.reason}; restore the required product before gate acceptance; Guidance cannot override the brief` };
     }
   }
@@ -254,7 +254,7 @@ export function deriveCriterionDischarges(input: {
   if (!admission.pass || !admission.criteriaDigest) return [];
 
   const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
-  const contract = input.state.research?.measurement ? null : loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
+  const contract = input.state.research ? null : loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
   const records = new Map<string, CriterionDischargeRecord>();
   for (const gate of input.stages) {
     const refs = admission.criterionGateRefs?.[gate.id] ?? [];

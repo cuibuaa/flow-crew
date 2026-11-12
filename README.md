@@ -33,8 +33,9 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
   Unresolved validation stops review.
 - **Independent gates, bounded repairs.** Authors have downstream independent gates. Rejected work returns through
   admitted repairs to the same gates within a configured budget. Exhaustion stops work instead of repeating the whole plan.
-- **Distinct, honest outcomes.** `complete` is engineering completion; `shipped` is research or declared-terminal delivery;
-  `ceiling_hit` ends research without a metric win; `incomplete` means insufficient completion. `failed` and
+- **Distinct, honest outcomes.** `complete` records engineering completion or a completed instrument loop; project
+  research conclusions stay in instrument records. Historical `shipped` and `ceiling_hit` remain readable;
+  `incomplete` means insufficient completion. `failed` and
   `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
   `cancelled` records an explicit stop.
 - **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
@@ -48,7 +49,7 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 | Point it at… | Kind | What comes back |
 |---|---|---|
-| Improve a measured baseline | Research | Journaled measurements and a ship, ceiling, incomplete or failure outcome; engine-owned calibration, guards and held-out allowance |
+| Improve a measured baseline | Research | Frozen project instrument verdicts, lossless history and a project report; engine-owned snapshots, budgets and cancellation |
 | Implement a module to a spec | Engineering | Implementation, independent verdicts and configured validation results |
 | Refactor while preserving behavior | Engineering | Reviewed changes checked against the brief's criteria and configured tests |
 | Investigate an intermittent defect | Engineering / campaign | Related run history and evidence for the reproducer, diagnosis and fix required by the brief |
@@ -63,7 +64,7 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 Each authoring stage has one author. Independent gates receive their own stage budgets,
 including configured validation. Declared reality checks govern terminal success, with advisory
-exceptions. Research also has measured rounds and a stopping policy. See
+exceptions. Research applies frozen project instrument verdicts within a hard budget. See
 [stage budgets](guide/agent-protocol.md#stage-budgets-and-retained-continuation) and
 [deterministic checks](guide/brief-contract.md#deterministic-checks).
 
@@ -105,8 +106,7 @@ CLIs are installed, or the only installed CLI. [Adapter configuration](guide/con
 flowcrew rehearse examples/hello-research.brief.md
 ```
 
-Rehearsal calls no model and dispatches the real research producer/reviewer shape with scripted results
-in a disposable project. It never runs declared instrument commands; `--static-only` checks inputs. A ready verdict checks wiring, not research quality. [Example recipe](examples/README.md#rehearse-a-research-contract).
+Rehearsal calls no model. It checks declaration syntax, capabilities and output occupancy without executing author, review or instrument work. A ready verdict establishes contract readiness. [Example recipe](examples/README.md#rehearse-a-research-contract).
 
 ### 4. Hand off with `/ship`
 
@@ -144,13 +144,12 @@ is a complete example that runs as written, through rehearsal.
 
 ```text
 > Improve docs-search relevance over the measured baseline. Declare a fresh-split
-> instrument with structured guards and a search budget. An honest ceiling or incomplete outcome is fine.
+> project instrument and a hard search budget. Its policy and report define the scientific outcome.
 > /ship
 ```
 
-The numeric policy computes keep/drop and continue/ship/ceiling from recorded rounds.
-The engine calibrates a frozen instrument, measures changed independently reviewed submissions, applies guards and writes the terminal report.
-[Research contract](guide/brief-contract.md#research-rounds).
+The frozen project instrument receives initialize, evaluate and finalize requests and owns keep/reject decisions, diagnostics and report content. The engine preserves snapshots and history, optionally dispatches declared project review, restores the incumbent and enforces hard budgets.
+[Research protocol](guide/brief-contract.md#research-instrument-protocol).
 
 ### Engineering — satisfy a contract
 

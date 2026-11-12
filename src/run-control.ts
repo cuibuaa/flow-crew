@@ -27,6 +27,8 @@ import {
 } from './run-lock.js';
 import type { SupervisorBackend, UnitStatus } from './supervision.js';
 import { checkpointConsumers } from './restart-recovery.js';
+import { RESEARCH_PROTOCOL } from './research-instrument.js';
+import { finalizeResearchInstrument } from './research-measurement.js';
 
 /** Blocked recovery ends the workflow without asserting consumer death. An
  * explicit interrupt still closes control state and attempts owned cleanup. */
@@ -252,6 +254,7 @@ export class RunCancellationCoordinator {
     // A continuation can claim an owner while its archived verdict is still
     // terminal. Attempt cleanup before preserving that verdict.
     if (lifecycleAlreadyTerminal && this.isStopped(before) && !taskNeedsSettlement) {
+      const settlementError = await this.settleResearchCancellation(run, before);
       return {
         ok: true,
         status: preservedTaskResultStatus,
@@ -259,7 +262,7 @@ export class RunCancellationCoordinator {
         ...(targetRunId ? { runId: targetRunId } : {}),
         ...(run ? { preservedRunStatus: run.state.status } : {}),
         observation: before,
-        message: 'Execution was already terminal; terminal state was preserved.',
+        message: `Execution was already terminal; terminal state was preserved.${settlementError ? ` ${settlementError}` : ''}`,
       };
     }
     const requestedAt = this.now().toISOString();
@@ -391,6 +394,8 @@ export class RunCancellationCoordinator {
     const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
     // The same decision fences a run that initialized during owned cleanup.
     recordRunDecision(latestRun);
+    const settlementError = await this.settleResearchCancellation(latestRun, observation);
+    if (settlementError) stopError = stopError ? `${stopError}; ${settlementError}` : settlementError;
     const releaseProjectDir = latestRun?.projectDir ?? run?.projectDir ?? task?.projectDir;
     const releaseRunId = latestRun?.runId ?? targetRunId;
     if (releaseProjectDir && releaseRunId) {
@@ -499,6 +504,16 @@ export class RunCancellationCoordinator {
       && !observation.launchInFlight
       && observation.commandFateKnown !== false
       && !observation.activeCommandPids?.length;
+  }
+
+  /** Replace reliance on the scheduler's finish closure after native stop.
+   * Only proven retired work permits restoration. The existing finalizer journal
+   * records cancelled execution without launching work or publishing a report. */
+  private async settleResearchCancellation(run: RunTarget | undefined, observation: CancellationObservation): Promise<string | undefined> {
+    if (!run || run.state.status !== RUN_STATUS.CANCELLED || run.state.research?.protocol !== RESEARCH_PROTOCOL || !this.isStopped(observation)) return;
+    try {
+      await finalizeResearchInstrument(run.runPath, 'cancelled', { status: RUN_STATUS.CANCELLED, reasonCode: 'cancelled', detail: run.state.failureReason });
+    } catch (error) { return `research cancellation settlement: ${String(error)}`; }
   }
 
   private observationMessage(prefix: string, observation: CancellationObservation): string {

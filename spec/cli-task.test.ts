@@ -89,8 +89,7 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('Task #3');
     expect(out.text()).toContain('Raw ticks: hidden (pass --raw)');
     expect(out.text()).not.toContain('- tick');
-    expect(out.text().split(/\r?\n/u).filter((line) => line.startsWith('Drift '))).toHaveLength(5);
-    expect(out.text()).toContain('Drift research_dose: value=unavailable; unit=unknown; threshold=');
+    expect(out.text().split(/\r?\n/u).filter((line) => line.startsWith('Drift '))).toHaveLength(4);
 
     const raw = new Capture();
     const rawCode = await cmdTask(['task', 'show', '3', '--raw', '--socket', socketPath], { stdout: raw.stream as any, stderr: raw.err as any });

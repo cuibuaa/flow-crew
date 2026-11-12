@@ -1,3 +1,4 @@
+import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
 import { runResearchLoop, researchStages } from '../sched_policy/research.js';
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
@@ -18,7 +19,7 @@ import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
 import { runWorkflowIterations } from './workflow-loop.js';
 import { writeCampaignEntry } from './services.js';
-import { concludeRun, projectResearchConclusion, reconcileResearchConclusion } from '../sched_policy/run-completion.js';
+import { concludeRun, reconcileResearchConclusion } from '../sched_policy/run-completion.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
 import { recordRunEvent } from '../../run-events.js';
@@ -52,7 +53,7 @@ export async function runWorkflow(
     throw error;
   }
   if (launch.kind === 'settled') {
-    return launch.state.researchReportPaths ? reconcileResearchConclusion(projectDir, launch.state.runId) : launch.state;
+    return launch.state.research?.protocol === RESEARCH_PROTOCOL ? reconcileResearchConclusion(projectDir, launch.state.runId) : launch.state;
   }
   const {runId, runDirPath, maxIterations: initialMaxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
   const maxIterations = initialMaxIterations;
@@ -120,9 +121,8 @@ export async function runWorkflow(
       concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'scheduler_failed', detail: reason,
         eventFields: () => ({ iteration: state.currentIteration, detail: reason }), writeCampaignEntry },
       (_state, notify) => { publish = notify; });
-    }, (current, persist) => {
+    }, (_current, persist) => {
       if (publish) publish(persist);
-      else projectResearchConclusion(current, persist);
     });
     return settled;
   } finally {

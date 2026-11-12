@@ -1,3 +1,4 @@
+import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { runRecordPath, assertSeparatedRunLayout } from '../../run-layout.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
@@ -16,7 +17,7 @@ import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/id
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, isTerminalRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
 import { atomicWrite, mkdirSync, rmSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { deploymentHeld } from '../../deployment-hold.js';
@@ -120,6 +121,9 @@ export function prepareWorkflowLaunch(
     if (hasRunState) {
       let archived = readRunState(projectDir, runId);
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
+      // A terminal protocol journal is immutable. Re-entry reads that result;
+      // engineering relaunch hygiene cannot authorize another publication.
+      if (archived.research?.protocol === RESEARCH_PROTOCOL && isTerminalRunStatus(archived.status)) return { kind: 'settled', state: archived };
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
       // Run initialization prepares a running projection before dispatch. Every consumer
       // gets a durable attempt before launch; an untouched preparation is not an

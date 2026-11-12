@@ -1,423 +1,374 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { calibrateResearchNoise, captureMeasuredCandidate, decideResearchComparison, initializeResearchMeasurements, measureResearchCandidate, researchMeasurementState, ResearchMeasurementSchema, restoreResearchBest, type Metric, type Observation, type ResearchMeasurement } from '../src/research-measurement.js';
-import { createDispatchAdmission } from '../src/scheduler/sched_admission/dispatch.js';
-import { parseDispatchedStageConfig } from '../src/scheduler/sched_admission/configuration.js';
-import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
+import { captureMeasuredCandidate, finalizeResearchInstrument, initializeResearchInstrument, invokeResearchInstrument,
+  recordResearchSubmission, researchAuthorContext, researchDirectory, researchInstrumentState, restoreResearchBest } from '../src/research-measurement.js';
+import { ResearchInstrumentSchema, type ResearchConfig } from '../src/research-instrument.js';
+import { makeInstrument, instrumentProgram } from './test-support/research-instrument-fixture.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
-import * as commandOwner from '../src/adapters/base.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
+import * as commands from '../src/adapters/base.js';
+import * as files from '../src/engine-fs.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
-const metrics: Record<string, Metric> = { cost: { direction: 'min', scale: 'fraction' } };
-const observation = (values = [50, 50], ids = ['a', 'b']): Observation => ({ status: 'measured', fingerprint: 'instrument', candidate: 'candidate', items: values.map((cost, n) => ({ id: ids[n], metrics: { cost } })) });
-const decide = (candidate: Observation, sigma = .05, guards: Parameters<typeof decideResearchComparison>[5] = []) => decideResearchComparison(observation(), candidate, metrics, ['cost'], { fingerprint: 'instrument', items: ['a', 'b'], metrics: { cost: sigma } }, guards);
-
-describe('paired numeric keep rule', () => {
-  it.each([[90, false], [90.00001, false], [89.99999, true], [100, false], [101, false]])('uses strict > twice calibrated noise: %s', (cost, keep) => {
-    expect(decide(observation([cost / 2, cost / 2])).keep).toBe(keep);
-  });
-  it('does not turn a decimal equality at the noise boundary into a keep', () => {
-    const compare = (value: number) => decideResearchComparison(observation([1.1], ['a']), observation([value], ['a']), metrics, ['cost'], { fingerprint: 'instrument', items: ['a'], metrics: { cost: .05 } }, []);
-    expect(compare(.99).keep).toBe(false);
-    expect(compare(.98999999).keep).toBe(true);
-  });
-  it.each(['different', 'duplicate', 'missing', 'instrument', 'unmeasured'] as const)('refuses %s observation identities', mutation => {
-    const c = observation([1, 1]);
-    if (mutation === 'different') c.items![0].id = 'another';
-    if (mutation === 'duplicate') c.items![0].id = 'b';
-    if (mutation === 'missing') c.items!.pop();
-    if (mutation === 'instrument') c.fingerprint = 'changed';
-    if (mutation === 'unmeasured') c.status = 'unmeasured';
-    expect(decide(c)).toMatchObject({ keep: false, reason: 'input_invalid' });
-  });
-  it('pairs by item identity regardless of ordering and refuses a false guard', () => {
-    expect(decide(observation([1, 1], ['b', 'a'])).keep).toBe(true);
-    expect(decide(observation([1, 1]), .05, [{ passes: false }])).toMatchObject({ keep: false, reason: 'guard_worse' });
-  });
-  it('measures task variation even when no-op pooled totals cancel', () => {
-    const a = observation([10, 20]), b = observation([20, 10]);
-    expect(calibrateResearchNoise([a, b], metrics).cost).toBeGreaterThan(.1);
-    expect(calibrateResearchNoise([a, b], metrics)).toEqual(calibrateResearchNoise([a, b], metrics));
-    expect(() => calibrateResearchNoise([a, { ...b, candidate: 'changed' }], metrics)).toThrow('unchanged-baseline');
-  });
-  it('calibrates the magnitude of nonbinary count variation instead of keeping a no-op replicate', () => {
-    const count: Record<string, Metric> = { cost: { direction: 'max', scale: 'count' } };
-    const a = observation([0, 0]), b = observation([10, 10]);
-    const noise = calibrateResearchNoise([a, b], count);
-    expect(decideResearchComparison(a, b, count, ['cost'], { fingerprint: 'instrument', items: ['a', 'b'], metrics: noise }, []).keep).toBe(false);
-    expect(() => calibrateResearchNoise([a, observation([1e200, 1e200])], count)).toThrow('finite calibration noise');
-  });
-  it('uses count noise with a one-count floor and strict count boundaries', () => {
-    const count: Record<string, Metric> = { cost: { direction: 'max', scale: 'count' } };
-    expect(calibrateResearchNoise([observation([1, 1]), observation([1, 1])], count)).toEqual({ cost: 1 });
-    const compare = (value: number) => decideResearchComparison(observation([1, 1]), observation([value, 1]), count, ['cost'], { fingerprint: 'instrument', items: ['a', 'b'], metrics: { cost: 1 } }, []);
-    expect(compare(3).keep).toBe(false); expect(compare(4).keep).toBe(true);
-  });
+let root: string, project: string, run: string, previousStore: string;
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'research-instrument-')); project = join(root, 'project'); run = join(root, 'run');
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
+  mkdirSync(project); mkdirSync(run); writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'controlled-run' }));
 });
-
-let root: string, project: string, run: string;
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'rsi-instrument-')); project = join(root, 'project'); run = join(root, 'run'); mkdirSync(project); mkdirSync(run); writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2 })); });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
-const evaluator = `const fs = require('node:fs');
-const c = JSON.parse(fs.readFileSync(process.env.FC_RESEARCH_CANDIDATE + '/candidate.json'));
-if (process.argv[2] === 'guard') { if(c.crash) process.exit(7); console.log(JSON.stringify({ok:c.ok})); }
-else if (process.argv[2] === 'exit-guard') process.exit(c.ok ? 3 : 2);
-else if (process.argv[2] === 'held') console.log(JSON.stringify({ok:c.held}));
-else if (c.invalid) console.log('{}');
-else if (c.attack) { fs.writeFileSync(__filename, 'overwritten'); console.log(JSON.stringify({items:[{id:'a',metrics:{cost:1}}]})); }
-else if (c.sleep) setTimeout(() => console.log('{}'), 10000);
-else console.log(JSON.stringify({items:[{id:c.id || 'a',metrics:{cost:c.cost}}]}));
-`;
-async function setup(change: (config: ResearchMeasurement) => void = () => {}) {
-  writeFileSync(join(project, 'evaluate.cjs'), evaluator);
-  writeFileSync(join(project, 'candidate.json'), JSON.stringify({ cost: 100, ok: true, held: true }));
-  const config = ResearchMeasurementSchema.parse({ frozen: ['evaluate.cjs'], candidate: ['candidate.json'], replicates: 2, metrics, primary: ['cost'], development: { command: process.execPath, args: ['evaluate.cjs'] }, guards: [{ name: 'guard', command: process.execPath, args: ['evaluate.cjs', 'guard'], pass: { field: 'ok', equals: true } }], held_out: { command: process.execPath, args: ['evaluate.cjs', 'held'], allowance: 2, pass: { field: 'ok', equals: true } }, timeout_seconds: 2 });
-  change(config);
-  await initializeResearchMeasurements(project, run, config);
-  return config;
+afterEach(() => { vi.restoreAllMocks(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+const read = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
+async function setup(edit: (config: ResearchConfig) => void = () => {}) {
+  const config = makeInstrument(project); edit(config);
+  await initializeResearchInstrument(project, run, config); return config;
 }
-const candidate = (label: string, value: Record<string, unknown>) => { writeFileSync(join(project, 'candidate.json'), JSON.stringify({ cost: 50, ok: true, held: true, ...value })); return captureMeasuredCandidate(project, run, label); };
+function candidate(value: Record<string, unknown>, label = 'round-1') {
+  writeFileSync(join(project, 'candidate.json'), JSON.stringify({ value: 50, ...value }));
+  return captureMeasuredCandidate(project, run, label);
+}
+const evaluate = (value: Record<string, unknown> = {}, round = 1) => invokeResearchInstrument(run, 'evaluate', candidate(value, `round-${round}`), round);
 
-describe('engine measurement lifecycle', { timeout: 300000 }, () => {
-  it('records failed development as unmeasured and does not consume held-out', async () => {
-    await setup(); const result = await measureResearchCandidate(run, candidate('invalid', { invalid: true }));
-    expect(result.observation).toMatchObject({ status: 'unmeasured', detail: 'invalid item output' });
-    expect(result.comparison.keep).toBe(false); expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
+describe('frozen project instrument execution', () => {
+  it('initializes once and leaves project policy and payloads opaque', async () => {
+    const config = await setup(); const state = researchInstrumentState(run);
+    expect(state.history).toHaveLength(1); expect(state.history[0].outcome).toBe('baseline');
+    expect(state.history[0].response?.observations).toMatchObject({ value: 100, extra: { arbitrary: null } });
+    const launch = vi.spyOn(commands, 'spawnOwnedCommand');
+    await initializeResearchInstrument(project, run, config);
+    expect(launch).not.toHaveBeenCalled(); expect(researchInstrumentState(run)).toEqual(state);
   });
-  it('relocates an absolute evaluator argument into its frozen copy', async () => {
-    await setup(c => {
-      c.development.args[0] = join(project, 'evaluate.cjs');
-      writeFileSync(join(project, 'evaluate.cjs'), `if (__filename === ${JSON.stringify(join(project, 'evaluate.cjs'))}) process.exit(9);\n` + evaluator);
-    });
-    const result = await measureResearchCandidate(run, candidate('absolute-input', {}));
-    expect(result.observation.items![0].metrics.cost).toBe(50);
-    expect(result.comparison.keep).toBe(true);
+  it('refuses declaration drift on replay rather than changing the frozen run or resetting its budget', async () => {
+    const config = await setup(); config.budget.max_rounds++;
+    const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    await expect(initializeResearchInstrument(project, run, config)).rejects.toThrow('frozen_instrument_declaration_mismatch');
+    expect(spawn).not.toHaveBeenCalled(); expect(researchInstrumentState(run).config.budget.max_rounds).toBe(3);
   });
-  it('refuses edited frozen dependencies even when evaluator code embeds the original absolute path', async () => {
-    writeFileSync(join(project, 'answers.json'), '{"multiplier":1}');
-    writeFileSync(join(project, 'evaluate.cjs'), `const fs=require('node:fs');const c=JSON.parse(fs.readFileSync(process.env.FC_RESEARCH_CANDIDATE+'/candidate.json'));const a=JSON.parse(fs.readFileSync(${JSON.stringify(join(project, 'answers.json'))}));console.log(JSON.stringify({items:[{id:'a',metrics:{cost:c.cost*a.multiplier}}]}));`);
-    writeFileSync(join(project, 'candidate.json'), '{"cost":100}');
-    await initializeResearchMeasurements(project, run, ResearchMeasurementSchema.parse({ frozen: ['evaluate.cjs', 'answers.json'], candidate: ['candidate.json'], replicates: 2, metrics, primary: ['cost'], development: { command: process.execPath, args: ['evaluate.cjs'] } }));
-    expect(researchMeasurementState(run).noise).toEqual({ cost: 0 });
-    writeFileSync(join(project, 'answers.json'), '{"multiplier":0}');
-    const result = await measureResearchCandidate(run, candidate('embedded-original-input', {}));
-    expect(result.observation).toMatchObject({ status: 'unmeasured', detail: expect.stringContaining('frozen_source_fingerprint_mismatch') });
-    expect(result.comparison.keep).toBe(false);
+  it.each(['source', 'snapshot', 'candidate', 'request'])('denies transient %s edits before baseline100 can become forged1', async attack => {
+    await setup(); const result = await evaluate({ attack });
+    expect(result.outcome).toBe('execution_error'); expect(result.response).toBeUndefined();
+    expect(read(result.raw!.path).stderr).toContain('EACCES');
+    expect(read(join(researchInstrumentState(run).incumbent.path, 'candidate.json')).value).toBe(100);
+    expect(readFileSync(join(researchDirectory(run), 'instrument/instrument/run.cjs'), 'utf8')).toBe(instrumentProgram);
+    expect(read(join(project, 'instrument/config.json')).value).toBe(100);
   });
-  it('refuses a changed original candidate even when evaluator code embeds that project path', async () => {
-    await setup(() => {
-      writeFileSync(join(project, 'evaluate.cjs'), evaluator.replace("process.env.FC_RESEARCH_CANDIDATE + '/candidate.json'", JSON.stringify(join(project, 'candidate.json'))));
-    });
-    const captured = candidate('embedded-original-candidate', {});
-    writeFileSync(join(project, 'candidate.json'), '{"cost":1,"ok":true,"held":true}');
-    const result = await measureResearchCandidate(run, captured);
-    expect(result.observation).toMatchObject({ status: 'unmeasured', detail: expect.stringContaining('candidate_source_fingerprint_mismatch') });
-    expect(result.comparison.keep).toBe(false);
+  it('refuses temporary permission edits even after the original mode is restored', async () => {
+    await setup(); expect(await evaluate({ metadata: true })).toMatchObject({ outcome: 'execution_error', reason: 'instrument_input_changed_during_execution' });
   });
-  it('retains empty candidate directories and refuses an added directory after capture', async () => {
-    await setup(c => {
-      c.candidate = ['candidate-tree'];
-      mkdirSync(join(project, 'candidate-tree/empty'), { recursive: true });
-      writeFileSync(join(project, 'candidate-tree/input.json'), '{"cost":100,"ok":true,"held":true}');
-      writeFileSync(join(project, 'evaluate.cjs'), evaluator.replaceAll("'/candidate.json'", "'/candidate-tree/input.json'"));
-    });
-    expect(researchMeasurementState(run).noise).toEqual({ cost: 0 });
-    expect(existsSync(runRecordPath(run, 'research_measurement/baseline/candidate-tree/empty'))).toBe(true);
-    writeFileSync(join(project, 'candidate-tree/input.json'), '{"cost":50,"ok":true,"held":true}');
-    const captured = captureMeasuredCandidate(project, run, 'empty-directory');
-    mkdirSync(join(project, 'candidate-tree/added'));
-    const result = await measureResearchCandidate(run, captured);
-    expect(result.observation.detail).toContain('candidate_source_fingerprint_mismatch');
-    expect(result.comparison.keep).toBe(false);
+  it('confines truncation, renaming and hardlinks while scratch stays writable', async () => {
+    await setup(); expect((await evaluate({ operations: true })).outcome).toBe('keep');
   });
-  it('freezes empty dependency roots as well as their later directory membership', async () => {
-    await setup(c => { c.frozen.push('answers'); mkdirSync(join(project, 'answers')); });
-    expect(researchMeasurementState(run).noise).toEqual({ cost: 0 });
-    mkdirSync(join(project, 'answers/added'));
-    const result = await measureResearchCandidate(run, candidate('empty-frozen-root', {}));
-    expect(result.observation.detail).toContain('frozen_source_fingerprint_mismatch');
-    expect(result.comparison.keep).toBe(false);
+  it.each(['source', 'snapshot', 'mode'])('binds the submitted candidate %s to its digest', async target => {
+    await setup(); const captured = candidate({});
+    if (target === 'mode') chmodSync(join(captured.path, 'candidate.json'), 0o700);
+    else writeFileSync(join(target === 'source' ? project : captured.path, 'candidate.json'), '{"value":1}');
+    const result = await invokeResearchInstrument(run, 'evaluate', captured, 1);
+    expect(result.outcome).toBe('execution_error'); expect(result.reason).toContain(target === 'source' ? 'candidate_source_fingerprint_mismatch' : 'candidate_fingerprint_mismatch');
+    expect(researchInstrumentState(run).incumbent.sha256).not.toBe(captured.sha256);
   });
-  it('records changed engine-owned instrument bytes as unmeasured', async () => {
-    await setup(); writeFileSync(runRecordPath(run, 'research_measurement/instrument/evaluate.cjs'), 'console.log("tampered")');
-    const result = await measureResearchCandidate(run, candidate('tamper', {}));
-    expect(result.observation.status).toBe('unmeasured'); expect(result.observation.detail).toContain('instrument_fingerprint_mismatch'); expect(result.comparison.keep).toBe(false);
-  });
-  it('prevents a write to the frozen instrument during command execution', async () => {
-    await setup(); const result = await measureResearchCandidate(run, candidate('command-tamper', { attack: true }));
-    expect(result.observation.status).toBe('unmeasured');
-    expect(result.observation.detail).toBe('exit 1');
-    expect((result as unknown as { development: { stderr: string } }).development.stderr).toContain('EACCES');
-    expect(result.comparison.keep).toBe(false);
-    expect(readFileSync(runRecordPath(run, 'research_measurement/instrument/evaluate.cjs'), 'utf8')).toBe(evaluator);
-  });
-  it('refreshes a repaired gate candidate while retaining immutable prior snapshots', async () => {
-    await setup(); const old = candidate('repair', { cost: 80 });
-    writeFileSync(join(project, 'candidate.json'), JSON.stringify({ cost: 50, ok: true, held: true }));
-    const repaired = captureMeasuredCandidate(project, run, 'repair', true);
-    expect(repaired.sha256).not.toBe(old.sha256);
-    expect(JSON.parse(readFileSync(join(old.path, 'candidate.json'), 'utf8')).cost).toBe(80);
-    const result = await measureResearchCandidate(run, repaired);
-    expect(result.observation.candidate).toBe(repaired.sha256);
-    expect(result.observation.items![0].metrics.cost).toBe(50);
-  });
-  it('binds a measurement to the captured candidate and detects altered snapshot bytes', async () => {
-    await setup(); const captured = candidate('tamper', {});
-    writeFileSync(join(captured.path, 'candidate.json'), '{"cost":1}');
-    const result = await measureResearchCandidate(run, captured);
-    expect(result.observation.detail).toContain('candidate_fingerprint_mismatch'); expect(result.comparison.keep).toBe(false);
-  });
-  it('binds candidate executable permissions as well as file bytes', async () => {
-    await setup(); const captured = candidate('mode-tamper', {});
-    chmodSync(join(captured.path, 'candidate.json'), 0o700);
-    const result = await measureResearchCandidate(run, captured);
-    expect(result.observation.detail).toContain('candidate_fingerprint_mismatch');
-    expect(result.comparison.keep).toBe(false);
-  });
-  it('records failed guards with their exit and never uses held-out', async () => {
-    await setup(); const result = await measureResearchCandidate(run, candidate('guard-error', { crash: true }));
-    expect(result.comparison.keep).toBe(false); expect(result.guards[0]).toMatchObject({ passes: false });
-    expect(result.guards[0].detail).toContain('7'); expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
-  });
-  it('records a missing guard executable as failed without skipping development calibration', async () => {
-    await setup(c => { c.guards.push({ ...c.guards[0], name: 'second-guard', command: join(root, 'missing-guard') }); });
-    expect(researchMeasurementState(run).noise).toEqual({ cost: 0 });
-    const result = await measureResearchCandidate(run, candidate('missing-guard', {}));
-    expect(result.guards[0].passes).toBe(true);
-    expect(result.guards[1]).toMatchObject({ passes: false, reason: 'guard_error', detail: expect.stringContaining('ENOENT') });
-    expect(result.comparison.keep).toBe(false);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
-  });
-  it('accepts declared nonzero exit-code guards', async () => {
-    await setup(c => { c.guards[0].args = ['evaluate.cjs', 'exit-guard']; c.guards[0].pass = { exit_code: 3 }; });
-    expect((await measureResearchCandidate(run, candidate('exit-guard', {}))).comparison.keep).toBe(true);
-  });
-  it('does not use held-out until strict development improvement and guards pass', async () => {
+  it.each(['source', 'snapshot'])('refuses changed %s frozen config', async target => {
     await setup();
-    expect((await measureResearchCandidate(run, candidate('no-improvement', { cost: 100 }))).comparison.reason).toBe('no_improvement_above_noise');
-    expect((await measureResearchCandidate(run, candidate('guard-refusal', { ok: false }))).comparison.reason).toBe('guard_worse');
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
-    expect((await measureResearchCandidate(run, candidate('held-refusal', { held: false }))).comparison.keep).toBe(false);
-    expect(researchMeasurementState(run).heldOutUses).toMatchObject([{ round: 'held-refusal', passes: false }]);
+    writeFileSync(join(target === 'source' ? project : join(researchDirectory(run), 'instrument'), 'instrument/config.json'), '{}');
+    const result = await evaluate(); expect(result.outcome).toBe('execution_error');
+    expect(result.reason).toContain(target === 'source' ? 'frozen_source_fingerprint_mismatch' : 'instrument_fingerprint_mismatch');
   });
-  it('preserves baseline, noise, best and allowance when initialization is reentered', async () => {
-    const config = await setup(); const captured = candidate('kept', {});
-    expect((await measureResearchCandidate(run, captured)).comparison.keep).toBe(true);
-    const before = researchMeasurementState(run);
-    writeFileSync(join(project, 'evaluate.cjs'), 'invalid');
-    const after = await initializeResearchMeasurements(project, run, config);
-    expect(after).toEqual(before);
-    expect(await measureResearchCandidate(run, captured)).toMatchObject({ comparison: { keep: true } });
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
-    candidate('rejected', { cost: 200 }); restoreResearchBest(project, run);
-    expect(JSON.parse(readFileSync(join(project, 'candidate.json'), 'utf8')).cost).toBe(50);
+  it('retains empty roots and rejects later membership changes', async () => {
+    await setup(config => { config.frozen.push('empty'); mkdirSync(join(project, 'empty')); });
+    expect(existsSync(join(researchDirectory(run), 'instrument/empty'))).toBe(true);
+    mkdirSync(join(project, 'empty/added'));
+    expect((await evaluate()).reason).toContain('frozen_source_fingerprint_mismatch');
   });
-  it('replays the original measured candidate when a later capture reuses its label', async () => {
-    await setup(); const original = candidate('same-round', { cost: 80 });
-    const submission = { notes: { hypothesis: 'Improve the general candidate.', files_changed: ['candidate.json'], property_evidence: 'Independent checks retained.' }, review: { pass: true, reason: 'Properties hold.' } };
-    const first = await measureResearchCandidate(run, original, Infinity, submission);
-    writeFileSync(join(project, 'candidate.json'), '{"cost":1,"ok":true,"held":true}');
-    const later = captureMeasuredCandidate(project, run, 'same-round', true);
-    expect(later.sha256).not.toBe(original.sha256);
-    const replay = await measureResearchCandidate(run, later);
-    expect(replay.candidate).toEqual(original);
-    expect(replay.observation).toEqual(first.observation);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
-    expect(researchMeasurementState(run).rounds).toMatchObject([{ label: 'same-round', ...submission, comparison: first.comparison }]);
-    expect(researchMeasurementState(run).rounds).toHaveLength(1);
+  it('freezes executable bytes and permissions', async () => {
+    const config = makeInstrument(project), executable = join(project, 'node');
+    copyFileSync(process.execPath, executable); chmodSync(executable, 0o755); config.argv[0] = executable;
+    await initializeResearchInstrument(project, run, config);
+    writeFileSync(executable, 'changed live executable');
+    expect((await evaluate()).outcome).toBe('keep');
+    chmodSync(join(researchDirectory(run), 'executables/command'), 0o700);
+    expect((await evaluate({ value: 25 }, 2)).reason).toContain('instrument_fingerprint_mismatch');
   });
-  it('never rolls allowance accounting back when an older rejected result is replayed', async () => {
-    await setup(); const first = candidate('first-refusal', { held: false });
-    await measureResearchCandidate(run, first);
-    await measureResearchCandidate(run, candidate('second-refusal', { held: false }));
-    await measureResearchCandidate(run, first);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(2);
-    expect(researchMeasurementState(run).revision).toBe(2);
+  it.each(['invalid', 'fail', 'badVerdict'])('treats %s as an execution error, never a reject', async fault => {
+    await setup(); const result = await evaluate({ [fault]: fault === 'badVerdict' ? 'baseline' : true });
+    expect(result.outcome).toBe('execution_error'); expect(result.response).toBeUndefined();
+    expect(read(result.raw!.path).stdout).toBeDefined();
+    if (fault === 'fail') expect(read(result.raw!.path)).toMatchObject({ started: true, exitCode: 2, stderr: 'controlled executable failure\n' });
   });
-  it('never exceeds the held-out allowance across distinct improving submissions', async () => {
-    await setup(config => { config.held_out!.allowance = 1; });
-    const first = await measureResearchCandidate(run, candidate('allowed', { cost: 50 }));
-    expect(first.comparison.keep).toBe(true);
-    const spawn = vi.spyOn(commandOwner, 'spawnOwnedCommand');
-    const refused = await measureResearchCandidate(run, candidate('beyond-allowance', { cost: 25 }));
-    expect(refused.comparison).toMatchObject({ keep: false, reason: 'held_out_allowance_exhausted' });
-    expect(spawn).not.toHaveBeenCalled();
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
-    expect(researchMeasurementState(run).best.items![0].metrics.cost).toBe(50);
+  it.each(['run_id', 'invocation_id', 'phase', 'round', 'instrument_sha256', 'candidate_sha256', 'protocol'])('rejects mismatched %s as an execution error', async mismatch => {
+    await setup(); const result = await evaluate({ mismatch });
+    expect(result.outcome).toBe('execution_error'); expect(researchInstrumentState(run).history.at(-1)?.outcome).not.toBe('reject');
   });
-  it('refuses to repeat a spent held-out use after interruption', async () => {
-    await setup(); const captured = candidate('interrupted', {});
-    const path = runRecordPath(run, 'research_measurement/state.json'), state = researchMeasurementState(run);
-    state.heldOutUses.push({ round: 'interrupted', status: 'started' }); writeFileSync(path, JSON.stringify(state));
-    const result = await measureResearchCandidate(run, captured);
-    expect(result.comparison).toMatchObject({ keep: false, reason: 'held_out_interrupted' });
-    expect(result.heldOutExhausted).toBe(false);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
-    const next = await measureResearchCandidate(run, candidate('next-after-interruption', {}));
-    expect(next.comparison.keep).toBe(true);
-    expect(next.heldOutExhausted).toBe(true);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(2);
+  it('distinguishes a valid project reject and project unavailability from execution errors', async () => {
+    await setup(); expect((await evaluate({ value: 200 })).outcome).toBe('reject');
+    const unavailable = await evaluate({ unavailable: true }, 2);
+    expect(unavailable.outcome).toBe('unavailable'); expect(unavailable.response?.next_state).toEqual(researchInstrumentState(run).instrumentState);
+    expect(researchInstrumentState(run).error).toBeUndefined();
   });
-  it('honors an exhausted wall budget without launching development', async () => {
-    await setup(); const result = await measureResearchCandidate(run, candidate('wall', {}), 0);
-    expect(result.observation.status).toBe('unmeasured'); expect(result.observation.detail).toContain('research_wall_budget_exhausted');
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
+  it('requires successful executable start and retains failed launch stderr', async () => {
+    const executable = join(project, 'broken'); writeFileSync(executable, '#!/no/such/interpreter\n'); chmodSync(executable, 0o755);
+    await setup(config => { config.argv[0] = executable; });
+    const result = researchInstrumentState(run).history[0];
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: 'instrument_executable_start_failed' });
+    expect(read(result.raw!.path)).toMatchObject({ started: false, exitCode: 1 });
+    expect(read(result.raw!.path).stderr).toContain('FileNotFoundError');
   });
-  it('times out and retires an owned measurement command', async () => {
-    await setup(c => { c.timeout_seconds = .05; });
-    const result = await measureResearchCandidate(run, candidate('timeout', { sleep: true }));
-    expect(result.observation.status).toBe('unmeasured'); expect(result.observation.detail).toMatch(/measurement_timeout|research_wall_budget_exhausted/);
+  it('retains a missing executable as an explicit baseline execution error', async () => {
+    await setup(config => { config.argv[0] = join(root, 'missing'); });
+    expect(researchInstrumentState(run).history[0]).toMatchObject({ outcome: 'execution_error', reason: expect.stringContaining('ENOENT') });
   });
-  it('preserves an unavailable executable as an explicit unmeasured baseline', async () => {
-    await setup(c => { c.development.command = join(root, 'missing-executable'); });
-    expect(researchMeasurementState(run)).toMatchObject({ baseline: { status: 'unmeasured' }, error: expect.stringContaining('ENOENT') });
-    expect((await measureResearchCandidate(run, candidate('missing', {}))).comparison.keep).toBe(false);
+  it('refuses success when process confinement did not start', async () => {
+    const spawn = commands.spawnOwnedCommand;
+    vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((_cmd, _args, opts) => spawn('/bin/sh', ['-c', 'exit 0'], opts));
+    await setup(); expect(researchInstrumentState(run).history[0]).toMatchObject({ outcome: 'execution_error', reason: 'instrument_write_confinement_unavailable' });
   });
-  it('freezes executable bytes as well as evaluator dependencies', async () => {
-    const executable = join(project, 'node');
-    const { copyFileSync } = await import('node:fs'); copyFileSync(process.execPath, executable); chmodSync(executable, 0o755);
-    await setup(c => { c.development.command = executable; });
-    writeFileSync(executable, 'invalid');
-    expect((await measureResearchCandidate(run, candidate('executable', {}))).comparison.keep).toBe(true);
+  it('retains invalid UTF-8 raw process bytes losslessly while refusing the envelope', async () => {
+    await setup(); const result = await evaluate({ binary: true });
+    expect(result.outcome).toBe('execution_error');
+    expect(read(result.raw!.path).stdout_base64).toBe(Buffer.from([255, 0, 254]).toString('base64'));
+    expect(Buffer.from(read(result.raw!.path).stdout_base64, 'base64')).toEqual(Buffer.from([255, 0, 254]));
   });
-  it('refuses changed retained executable permissions without trusting a successful command', async () => {
-    await setup();
-    const executables = runRecordPath(run, 'research_measurement/executables');
-    chmodSync(join(executables, readdirSync(executables)[0]), 0o700);
-    const result = await measureResearchCandidate(run, candidate('executable-mode-tamper', {}));
-    expect(result.observation.detail).toContain('instrument_fingerprint_mismatch');
-    expect(result.comparison.keep).toBe(false);
-  });
-  it('refuses temporary permission edits even when the original mode is restored', async () => {
-    await setup(() => {
-      writeFileSync(join(project, 'evaluate.cjs'), evaluator.replace("if (process.argv[2]", `if (c.metadata) {
-        const p = __filename, mode = fs.statSync(p).mode;
-        fs.chmodSync(p, mode ^ 0o100); fs.chmodSync(p, mode);
-      }
-      if (process.argv[2]`));
-    });
-    const result = await measureResearchCandidate(run, candidate('metadata', { metadata: true }));
-    expect(result.observation).toMatchObject({ status: 'unmeasured', detail: 'measurement_input_changed_during_execution' });
-    expect(result.comparison.keep).toBe(false);
-    expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
-  });
-  it('fails an exit-code guard when write confinement could not be installed', async () => {
-    await setup(c => { c.guards[0].args = ['evaluate.cjs', 'exit-guard']; c.guards[0].pass = { exit_code: 3 }; });
-    const spawn = commandOwner.spawnOwnedCommand;
-    const launcher = vi.spyOn(commandOwner, 'spawnOwnedCommand').mockImplementation((cmd, args, opts) =>
-      args.includes('exit-guard') ? spawn('/bin/sh', ['-c', 'exit 3'], opts) : spawn(cmd, args, opts));
-    try {
-      const result = await measureResearchCandidate(run, candidate('no-confinement', {}));
-      expect(result.observation.status).toBe('measured');
-      expect(result.guards[0]).toMatchObject({ passes: false, reason: 'guard_error', detail: 'measurement_write_confinement_unavailable' });
-      expect(result.comparison.keep).toBe(false);
-      expect(researchMeasurementState(run).heldOutUses).toHaveLength(0);
-    } finally { launcher.mockRestore(); }
-  });
-  it.each(['source', 'snapshot'] as const)('confines truncation and renaming of %s frozen inputs while allowing scratch writes', async target => {
-    await setup(() => {
-      writeFileSync(join(project, 'evaluate.cjs'), evaluator.replace("if (process.argv[2]", `if (c.operations) {
-        const path = ${target === 'source' ? JSON.stringify(join(project, 'evaluate.cjs')) : '__filename'};
-        const scratch = process.env.TMPDIR + '/result';
-        fs.writeFileSync(scratch, 'scratch is writable');
-        if (fs.readFileSync(scratch, 'utf8') !== 'scratch is writable') process.exit(9);
-        for (const op of [() => fs.truncateSync(path, 0), () => fs.renameSync(path, scratch), () => fs.linkSync(path, scratch + '-link')]) {
-          let refused = false;
-          try { op(); } catch (error) { refused = ['EACCES', 'EXDEV'].includes(error.code); }
-          if (!refused) process.exit(10);
-        }
-      }
-      if (process.argv[2]`));
-    });
-    const result = await measureResearchCandidate(run, candidate('confined-operations', { operations: true }));
-    expect(result.observation.status).toBe('measured');
-    expect(result.comparison.keep).toBe(true);
-  });
-  it.each(['internal', 'external'] as const)('validates all restore destinations before mutation with an %s ancestor alias', async location => {
-    await setup(c => {
-      c.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree'));
-      writeFileSync(join(project, 'tree/input.json'), 'baseline evidence');
-    });
-    const evidence = join(location === 'internal' ? project : root, 'unrelated');
-    mkdirSync(evidence); writeFileSync(join(evidence, 'input.json'), 'unrelated evidence');
-    const submitted = candidate('aliased', {});
-    rmSync(join(project, 'tree'), { recursive: true }); symlinkSync(evidence, join(project, 'tree'));
-    expect(() => restoreResearchBest(project, run)).toThrow('unsafe research restore ancestor');
-    expect(readFileSync(join(evidence, 'input.json'), 'utf8')).toBe('unrelated evidence');
-    // The first valid destination must also remain untouched after preflight fails.
-    expect(readFileSync(join(project, 'candidate.json'), 'utf8')).toBe(readFileSync(join(submitted.path, 'candidate.json'), 'utf8'));
-  });
-  it('restores missing candidate parents and unlinks a leaf alias without touching its target', async () => {
-    await setup(c => {
-      c.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree'));
-      writeFileSync(join(project, 'tree/input.json'), 'baseline evidence');
-    });
-    rmSync(join(project, 'tree'), { recursive: true });
-    const evidence = join(project, 'unrelated.json'); writeFileSync(evidence, 'unrelated evidence');
-    rmSync(join(project, 'candidate.json')); symlinkSync(evidence, join(project, 'candidate.json'));
-    restoreResearchBest(project, run);
-    expect(readFileSync(evidence, 'utf8')).toBe('unrelated evidence');
-    expect(JSON.parse(readFileSync(join(project, 'candidate.json'), 'utf8')).cost).toBe(100);
-    expect(readFileSync(join(project, 'tree/input.json'), 'utf8')).toBe('baseline evidence');
-  });
-  it('reserves all instrument, journal and decision records from stage capabilities', async () => {
-    for (const path of ['research_measurement/state.json', 'research_measurement/instrument/evaluate.cjs', 'research_journal.json', 'research_decision.json']) expect(producesEngineOwnedArtifact({ id: 'forged', root: 'run', path: 'engine/' + path, kind: 'file' }, { id: 'producer', depends_on: [] }, run, project)).toBe(true);
-    await setup();
-    await expect(withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'producer' }, async () => {
-      writeFileSync(runRecordPath(run, 'research_measurement/instrument/evaluate.cjs'), 'stage overwrite');
-    })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-    expect(readFileSync(runRecordPath(run, 'research_measurement/instrument/evaluate.cjs'), 'utf8')).toBe(evaluator);
-  });
-});
-
-describe.each([1, 2])('measurement ownership in storage layout %s', layout => {
-  beforeEach(() => {
-    // Use a fresh path: a run's storage layout is immutable once observed.
-    run = join(root, `layout-${layout}`);
-    mkdirSync(run);
-    writeFileSync(join(run, 'run.json'), JSON.stringify({ ...(layout === 2 ? { storageLayout: 2 } : {}) }));
-  });
-  it('routes records through the run envelope and refuses stage output grants', async () => {
-    const launch = vi.spyOn(commandOwner, 'spawnOwnedCommand');
-    await setup();
-    const local = layout === 2 ? 'engine/research_measurement' : 'research_measurement';
-    expect(runRecordPath(run, 'research_measurement')).toBe(join(run, local));
-    expect(existsSync(join(run, local, 'state.json'))).toBe(true);
-    expect(existsSync(join(run, layout === 2 ? 'research_measurement' : 'engine/research_measurement'))).toBe(false);
-    for (const suffix of ['', '/state.json', '/instrument/evaluate.cjs', '/future-record.json']) {
-      expect(producesEngineOwnedArtifact({ id: 'forged', root: 'run', path: local + suffix, kind: suffix ? 'file' : 'directory' }, { id: 'producer', depends_on: [] }, run, project)).toBe(true);
-    }
-    if (layout === 1) {
-      expect(launch).not.toHaveBeenCalled();
-      expect(researchMeasurementState(run).baseline).toMatchObject({ status: 'unmeasured', detail: expect.stringContaining('RUN_LAYOUT_INCOMPATIBLE') });
+  it.each([true, false])('validates UTF-8 before verdict authority (embedded invalid byte=%s)', async invalid => {
+    await setup(() => writeFileSync(join(project, 'instrument/run.cjs'), `
+      const fs = require('node:fs');
+      const r = JSON.parse(fs.readFileSync(process.argv.at(-1), 'utf8'));
+      const response = { protocol: r.protocol, run_id: r.run_id, invocation_id: r.invocation_id,
+        phase: r.phase, round: r.round, instrument_sha256: r.instrument_sha256,
+        candidate_sha256: r.candidate.sha256, status: 'ok',
+        verdict: r.phase === 'initialize' ? 'baseline' : 'keep', reason: 'valid fields',
+        observations: { text: '�' }, diagnostics: { nested: true }, artifacts: [], next_state: null };
+      const text = JSON.stringify(response), i = text.indexOf('�');
+      process.stdout.write(${invalid} && r.phase === 'evaluate'
+        ? Buffer.concat([Buffer.from(text.slice(0, i)), Buffer.from([255]), Buffer.from(text.slice(i + 1))])
+        : Buffer.from(text));
+    `));
+    expect(researchInstrumentState(run).history[0].outcome).toBe('baseline');
+    const result = await evaluate();
+    // Both streams decode to the same string. Only the actual wire bytes may
+    // authorize a verdict; a literal valid replacement character stays opaque.
+    const raw = read(result.raw!.path);
+    expect(JSON.parse(raw.stdout).observations.text).toBe('�');
+    expect(result.outcome).toBe(invalid ? 'execution_error' : 'keep');
+    if (invalid) {
+      expect(result.reason).toBe('instrument_stdout_invalid_utf8');
+      expect(result.response).toBeUndefined();
+      expect(Buffer.from(raw.stdout_base64, 'base64')).toContain(255);
+      expect(researchInstrumentState(run).incumbent.label).toBe('baseline');
     } else {
-      expect(launch).toHaveBeenCalledTimes(2);
-      expect(researchMeasurementState(run).baseline.status).toBe('measured');
+      expect(raw.stdout_base64).toBeUndefined();
+      expect(result.response?.observations).toEqual({ text: '�' });
+      expect(researchInstrumentState(run).incumbent.label).toBe('round-1');
     }
   });
-  it('voids stage writes or refuses legacy execution before the action', async () => {
-    await setup();
-    const path = runRecordPath(run, 'research_measurement/instrument/evaluate.cjs');
-    const action = vi.fn(async () => { writeFileSync(path, 'stage overwrite'); });
-    await expect(withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'producer' }, action))
-      .rejects.toThrow(layout === 2 ? 'ENGINE_STATE_TAMPERED' : 'RUN_LAYOUT_INCOMPATIBLE');
-    expect(action).toHaveBeenCalledTimes(layout === 2 ? 1 : 0);
-    expect(readFileSync(path, 'utf8')).toBe(evaluator);
-  });
-  it('records tampered retained inputs as unmeasured and never keeps them', async () => {
-    await setup();
-    writeFileSync(runRecordPath(run, 'research_measurement/instrument/evaluate.cjs'), 'tampered instrument');
-    const result = await measureResearchCandidate(run, candidate('layout-tamper', {}));
-    expect(result.observation).toMatchObject({ status: 'unmeasured', detail: expect.stringContaining('instrument_fingerprint_mismatch') });
-    expect(result.comparison.keep).toBe(false);
-    expect(researchMeasurementState(run).heldOutUses).toEqual([]);
+  it('bounds response and raw output without accepting a partial envelope', async () => {
+    await setup(); const result = await evaluate({ overflow: true });
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: 'instrument_output_limit' });
+    expect(read(result.raw!.path).stdout.length).toBeLessThanOrEqual(4 * 1024 * 1024);
   });
 });
 
-it('rejects malformed instrument declarations instead of falling back to producer numbers', () => {
-  const brief = '---\nresearch:\n  baseline: 100\n  measurement: {replicates: 1}\n  stop: {max_rounds: 3}\n---\nTry candidates.';
-  expect(parseBriefFrontmatter(brief).researchPolicyError).toContain('measurement');
+describe('lossless settlement, replay and best restoration', () => {
+  it('delivers nested diagnostics, extra observation fields and opaque state byte-equal to author and next request', async () => {
+    await setup(); const first = await evaluate({ artifact: true });
+    expect(first.outcome, first.reason).toBe('keep');
+    const context = researchAuthorContext(run);
+    const next = await evaluate({ value: 200, stop: true }, 2);
+    const request = read(next.request!.path);
+    const emitted = JSON.parse(read(first.raw!.path).stdout);
+    for (const key of ['diagnostics', 'observations', 'next_state']) {
+      const bytes = JSON.stringify(emitted[key]);
+      expect(JSON.stringify(first.response![key as keyof typeof first.response])).toBe(bytes);
+      expect(JSON.stringify(context.history.at(-1)?.response?.[key as keyof typeof first.response])).toBe(bytes);
+      expect(JSON.stringify(request.history.at(-1).response[key])).toBe(bytes);
+    }
+    expect(JSON.stringify(request.previous_state)).toBe(JSON.stringify(emitted.next_state));
+    expect(request.history.map((h: any) => h.outcome)).toEqual(['baseline', 'keep']);
+    expect(read(first.result.path).artifacts).toHaveLength(1);
+    const artifact = read(first.result.path).artifacts[0];
+    expect(readFileSync(artifact.path, 'utf8')).toBe('opaque artifact\n');
+    const manifest = await finalizeResearchInstrument(run, 'instrument_stop');
+    expect(manifest.incumbent.sha256).toBe(first.candidate.sha256);
+    expect(read(manifest.finalizer!.request!.path).history.map((h: any) => h.outcome)).toEqual(['baseline', 'keep', 'reject']);
+    expect(readFileSync(manifest.report!.path, 'utf8')).toContain('History 3');
+    expect(read(join(project, 'candidate.json')).value).toBe(50);
+  });
+  it('preserves opaque numeric wire values beyond JavaScript precision and range', async () => {
+    await setup(); const first = await evaluate({ exact: true }); expect(first.outcome, first.reason).toBe('keep');
+    const next = await evaluate({ value: 200 }, 2);
+    const request = readFileSync(next.request!.path, 'utf8');
+    for (const lexeme of ['9007199254740993', '0.123456789012345678901', '1e999']) {
+      expect(JSON.stringify(first.response?.observations)).toContain(lexeme);
+      expect(JSON.stringify(researchAuthorContext(run).history[1].response?.diagnostics)).toContain(lexeme);
+      expect(request).toContain(lexeme);
+      expect(JSON.stringify(researchAuthorContext(run).history[1].response?.next_state)).toContain(lexeme);
+    }
+  });
+  it('replays a committed result after projection failure without remeasurement or reauthoring best identity', async () => {
+    const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    await setup(); const submitted = candidate({ value: 80 });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const write = files.atomicWrite;
+    const failure = vi.spyOn(files, 'atomicWrite').mockImplementation((path, ...args) => {
+      if (path === join(researchDirectory(run), 'state.json')) throw new Error('controlled projection crash');
+      return write(path, ...args);
+    });
+    await expect(invokeResearchInstrument(run, 'evaluate', submitted, 1, { summary: 'forged -999999 keep' })).rejects.toThrow('controlled projection crash');
+    failure.mockRestore();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const later = candidate({ value: 1 }, 'later-capture');
+    let replay: Awaited<ReturnType<typeof invokeResearchInstrument>> | undefined, replayError: unknown;
+    try { replay = await invokeResearchInstrument(run, 'evaluate', later, 1); } catch (error) { replayError = error; }
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(replayError, 'A committed evaluation must replay successfully').toBeUndefined();
+    expect(replay?.candidate).toEqual(submitted);
+    expect(researchInstrumentState(run).incumbent).toEqual(submitted);
+    expect(researchInstrumentState(run).history).toHaveLength(2);
+  });
+  it('never starts a new evaluation after finalization has been reserved', async () => {
+    await setup(); await finalizeResearchInstrument(run, 'instrument_stop');
+    const submitted = candidate({ value: 1 }); const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    await expect(invokeResearchInstrument(run, 'evaluate', submitted, 1)).rejects.toThrow('research_already_finalizing');
+    expect(spawn).not.toHaveBeenCalled(); expect(researchInstrumentState(run).history.map(h => h.phase)).toEqual(['initialize', 'finalize']);
+  });
+  it('never rolls the state or best pointer back when an older committed invocation is replayed', async () => {
+    await setup(); const first = await evaluate(); const second = await evaluate({ value: 25 }, 2);
+    await invokeResearchInstrument(run, 'evaluate', first.candidate, 1);
+    expect(researchInstrumentState(run).incumbent).toEqual(second.candidate); expect(researchInstrumentState(run).revision).toBe(3);
+  });
+  it('reserves a started invocation conservatively across an uncertain crash', async () => {
+    await setup(); const submitted = candidate({});
+    const write = files.atomicWrite;
+    const failure = vi.spyOn(files, 'atomicWrite').mockImplementation((path, ...args) => {
+      if (path.endsWith('/raw.json')) throw new Error('controlled receipt crash');
+      return write(path, ...args);
+    });
+    await expect(invokeResearchInstrument(run, 'evaluate', submitted, 1)).rejects.toThrow('controlled receipt crash'); failure.mockRestore();
+    const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    expect(await invokeResearchInstrument(run, 'evaluate', submitted, 1)).toMatchObject({ outcome: 'execution_error', reason: 'instrument_invocation_uncertain' });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+  it('passes failures, rejects, no-candidate and review outcomes to finalize without fabricating observations', async () => {
+    await setup(); const same = captureMeasuredCandidate(project, run, 'unchanged');
+    recordResearchSubmission(run, same, 1, 'no_candidate', { summary: 'keep -999999' });
+    const next = candidate({ value: 80 }, 'review');
+    recordResearchSubmission(run, next, 2, 'review_rejected', {}, { pass: false, reason: 'Project criterion failed' });
+    await evaluate({ fail: true }, 3);
+    const manifest = await finalizeResearchInstrument(run, 'instrument_execution_error');
+    expect(read(manifest.finalizer!.request!.path).history.map((h: any) => h.outcome)).toEqual(['baseline', 'no_candidate', 'review_rejected', 'execution_error']);
+    expect(manifest.history[1].response).toBeUndefined(); expect(manifest.history[2].response).toBeUndefined();
+  });
+  it.each(['internal', 'external'])('refuses hostile %s ancestor aliases before touching unrelated777', async location => {
+    await setup(config => {
+      config.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree')); writeFileSync(join(project, 'tree/input.json'), '100');
+    });
+    const evidence = join(location === 'internal' ? project : root, 'unrelated'); mkdirSync(evidence); writeFileSync(join(evidence, 'input.json'), '777');
+    const submitted = candidate({ value: 1 });
+    rmSync(join(project, 'tree'), { recursive: true }); symlinkSync(evidence, join(project, 'tree'));
+    let refusal: unknown;
+    try { restoreResearchBest(project, run); } catch (error) { refusal = error; }
+    expect(readFileSync(join(evidence, 'input.json'), 'utf8')).toBe('777');
+    expect(readFileSync(join(project, 'candidate.json'), 'utf8')).toBe(readFileSync(join(submitted.path, 'candidate.json'), 'utf8'));
+    expect(refusal).toBeInstanceOf(Error);
+  });
+  it('restores missing parents and unlinks leaf aliases without modifying their targets', async () => {
+    await setup(config => { config.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree')); writeFileSync(join(project, 'tree/input.json'), '100'); });
+    const unrelated = join(project, 'unrelated.json'); writeFileSync(unrelated, '777');
+    rmSync(join(project, 'tree'), { recursive: true }); rmSync(join(project, 'candidate.json')); symlinkSync(unrelated, join(project, 'candidate.json'));
+    restoreResearchBest(project, run);
+    expect(readFileSync(unrelated, 'utf8')).toBe('777'); expect(read(join(project, 'candidate.json')).value).toBe(100);
+    expect(readFileSync(join(project, 'tree/input.json'), 'utf8')).toBe('100');
+  });
+  it('refuses altered best snapshot bytes during restoration', async () => {
+    await setup(); writeFileSync(join(researchInstrumentState(run).incumbent.path, 'candidate.json'), '{"value":1}');
+    expect(() => restoreResearchBest(project, run)).toThrow('best candidate fingerprint mismatch');
+    expect(read(join(project, 'candidate.json')).value).toBe(100);
+  });
+  it('refuses altered prior request/result/raw evidence', async () => {
+    await setup(); const first = researchInstrumentState(run).history[0];
+    writeFileSync(first.raw!.path, '{}'); expect(() => researchInstrumentState(run)).toThrow('research_record_digest_mismatch');
+  });
+});
+
+describe('hard budgets and cancellation', () => {
+  it('does not launch after a hard round budget is spent', async () => {
+    await setup(config => { config.budget.max_rounds = 1; }); await evaluate();
+    const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    expect((await evaluate({ value: 25 }, 2)).reason).toBe('research_round_budget_exhausted'); expect(spawn).not.toHaveBeenCalled();
+  });
+  it('does not launch when the wall budget is exhausted', async () => {
+    const config = makeInstrument(project, { budget: { max_rounds: 2, wall_seconds: .001 } });
+    const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+    await initializeResearchInstrument(project, run, config, new Date(Date.now() - 1000).toISOString());
+    expect(researchInstrumentState(run).history[0].reason).toContain('research_wall_budget_exhausted'); expect(spawn).not.toHaveBeenCalled();
+  });
+  it('times out and retires an owned process', async () => {
+    await setup(config => { config.budget.invocation_seconds = 5; });
+    const spawn = commands.spawnOwnedCommand; let closedAfter = Infinity;
+    vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
+      const launchedAt = Date.now(), owned = spawn(cmd, args, options);
+      owned.child.once('close', () => { closedAfter = Date.now() - launchedAt; });
+      return owned;
+    });
+    const result = await evaluate({ sleep: true }); expect(result).toMatchObject({ outcome: 'execution_error', reason: 'instrument_timeout' });
+    expect(closedAfter).toBeLessThan(6000);
+    const pid = Number(read(result.raw!.path).stderr.match(/PID=(\d+)/)?.[1]); expect(pid).toBeGreaterThan(0);
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+  it('native cancellation fences settlement even when a successful response arrives late', async () => {
+    await setup();
+    const spawn = commands.spawnOwnedCommand;
+    vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
+      const owned = spawn(cmd, args, options);
+      owned.child.on('close', () => files.atomicWrite(join(run, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'controlled-run', status: 'cancelled' })));
+      return owned;
+    });
+    const result = await evaluate();
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: 'research_cancelled' });
+    expect(result.response?.verdict).toBe('keep'); // retained evidence, no authority
+    expect(researchInstrumentState(run).incumbent).toEqual(researchInstrumentState(run).initial);
+    expect(researchInstrumentState(run).instrumentState).toEqual(researchInstrumentState(run).history[0].response?.next_state);
+  });
+  it('cancellation retires an owned process and cannot bank a late verdict', async () => {
+    await setup(); const controller = new AbortController(); vi.spyOn(commands, 'runProcessAbortSignal').mockReturnValue(controller.signal);
+    const spawn = commands.spawnOwnedCommand; let abortedAt = 0, closedAt = Infinity;
+    vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
+      const owned = spawn(cmd, args, options);
+      owned.child.stderr?.on('data', data => { if (String(data).includes('PID=')) { abortedAt = Date.now(); controller.abort(); } });
+      owned.child.once('close', () => { closedAt = Date.now(); });
+      return owned;
+    });
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const result = await evaluate({ sleep: true }); expect(result).toMatchObject({ outcome: 'execution_error', reason: 'research_cancelled' });
+      expect(closedAt - abortedAt).toBeLessThan(1500);
+      const pid = Number(read(result.raw!.path).stderr.match(/PID=(\d+)/)?.[1]); expect(pid).toBeGreaterThan(0);
+      expect(() => process.kill(pid, 0)).toThrow(); expect(read(join(researchInstrumentState(run).incumbent.path, 'candidate.json')).value).toBe(100);
+    } finally { clearTimeout(timer); }
+  });
+});
+
+it('uses the existing engine carrier protection for new requests, records and future files', async () => {
+  await setup();
+  for (const path of ['research_measurement/state.json', 'research_measurement/invocations/evaluate-1/request.json', 'research_manifest.json']) {
+    expect(producesEngineOwnedArtifact({ id: 'forged', root: 'run', path: 'engine/' + path, kind: 'file' }, { id: 'author', depends_on: [] }, run, project)).toBe(true);
+  }
+  await expect(withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'author' }, async () => {
+    writeFileSync(join(researchDirectory(run), 'instrument/instrument/config.json'), '{}');
+  })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+  expect(read(join(researchDirectory(run), 'instrument/instrument/config.json')).value).toBe(100);
+});
+it('refuses active protocol execution in a historical layout without changing its records', async () => {
+  run = join(root, 'legacy-layout'); mkdirSync(run);
+  const record = JSON.stringify({ runId: 'historical-run', research: { baseline: 100 } });
+  writeFileSync(join(run, 'run.json'), record);
+  const spawn = vi.spyOn(commands, 'spawnOwnedCommand');
+  await expect(initializeResearchInstrument(project, run, makeInstrument(project))).rejects.toThrow('RUN_LAYOUT_INCOMPATIBLE');
+  expect(spawn).not.toHaveBeenCalled(); expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(record);
+  expect(existsSync(join(run, 'research_measurement'))).toBe(false);
+});
+it('requires the explicit protocol and refuses scientific legacy declarations', () => {
+  expect(parseBriefFrontmatter('---\nresearch: {measurement: {replicates: 2}, stop: {max_rounds: 3}}\n---\nTry candidates.').researchPolicyError).toContain('research-instrument/v1');
+  const config = makeInstrument(project);
+  expect(ResearchInstrumentSchema.safeParse({ ...config, threshold: 2 }).success).toBe(false);
 });

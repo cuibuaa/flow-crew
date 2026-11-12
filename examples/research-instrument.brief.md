@@ -1,42 +1,17 @@
 ---
 research:
-  measurement:
-    frozen: [examples/research-instrument/evaluate.cjs, examples/research-instrument/retention.json]
-    candidate: [examples/research-instrument/candidate.json]
-    replicates: 4
-    metrics:
-      cost: {direction: min, scale: fraction}
-    primary: [cost]
-    development: {command: /usr/bin/node, args: [examples/research-instrument/evaluate.cjs, development]}
-    guards:
-      - name: retention
-        command: /usr/bin/node
-        args: [examples/research-instrument/evaluate.cjs, guard]
-        pass: {field: pass, equals: true}
-    held_out:
-      command: /usr/bin/node
-      args: [examples/research-instrument/evaluate.cjs, held-out]
-      allowance: 2
-      pass: {field: pass, equals: true}
-    timeout_seconds: 10
-  stop: {max_rounds: 6, halt_after_no_improvement: 3}
-outputs: [docs/research-instrument/ceiling_report.md]
-terminal_states:
-  ceiling_hit:
-    paths: [docs/research-instrument/ceiling_report.md]
+  protocol: research-instrument/v1
+  frozen: [examples/research-instrument/evaluate.cjs, examples/research-instrument/retention.json]
+  candidate: [examples/research-instrument/candidate.json]
+  argv: [/usr/bin/node, examples/research-instrument/evaluate.cjs]
+  environment: {}
+  author:
+    role: coder
+    instruction: Propose a lower synthetic cost while preserving the project retention property. Read the complete instrument history and diagnostics.
+  budget: {max_rounds: 6, invocation_seconds: 10}
+  publication: reports/research-instrument.md
 ---
-# Synthetic engine-owned instrument demonstration
+# Frozen project instrument demonstration
 
-Choose a lower synthetic cost in the declared candidate JSON, preserving its
-structured retention guard. The engine measures candidates with a frozen
-instrument, calibrates four baseline replicates, requires the guard, and charges
-at most two held-out uses. This demonstrates the protocol, not an optimization
-or a benchmark result. Independent review checks the candidate before settlement.
-Return producer notes with hypothesis, changed files and evidence that the brief properties hold. The engine alone writes the terminal report.
-
-## Report criteria
-
-1. Show the engine's baseline replicate count and calibrated noise, candidate
-   digest and frozen instrument fingerprint.
-2. Show each kept or rejected candidate with its numeric comparison and guard
-   output, and the recorded held-out uses and terminal reason.
+The controlled instrument decides whether each candidate is retained and supplies
+its final report. These synthetic observations are a protocol example.

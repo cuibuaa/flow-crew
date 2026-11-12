@@ -70,7 +70,7 @@ describe('closed-loop drift projection', () => {
     const projection = readRunDriftProjection(value.runDir);
 
     expect(new Set(projection.rows.map((candidate) => candidate.id))).toEqual(EXPECTED_DRIFT_ROW_IDS);
-    expect(projection.rows).toHaveLength(5);
+    expect(projection.rows).toHaveLength(4);
     for (const candidate of projection.rows) {
       expect(candidate.source.reference).not.toBe('');
       expect(candidate.source.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
@@ -78,25 +78,6 @@ describe('closed-loop drift projection', () => {
       expect(candidate.unit).not.toBe('');
       expect(candidate.crossing).not.toBe('unavailable');
     }
-
-    const dose = row(projection, 'research_dose');
-    expect(dose).toMatchObject({
-      value: value.evidence.historical.doseMinutes.at(-1),
-      unit: 'minutes',
-      crossing: 'below',
-      threshold: { kind: 'floor', operator: '>=', value: 20, unit: 'minutes' },
-      trend: { values: value.evidence.historical.doseMinutes, direction: 'mixed', unit: 'minutes' },
-      distribution: {
-        sampleCount: 3,
-        mean: 1.818787555105746,
-        median: 2.1175898313695143,
-        reportedValue: 2.1175898313695143,
-        reportedRank: 1,
-        reportedPercentile: 50,
-      },
-    });
-    expect(dose.source.reference).toBe('research_journal.json + research_round_<n>_consumed.json');
-    expect(dose.source.reference).not.toMatch(/round_result/u);
 
     expect(row(projection, 'first_plan_admission')).toMatchObject({
       value: 'rejected',
@@ -142,7 +123,6 @@ describe('closed-loop drift projection', () => {
       'b3-warn-flood-observation',
       'b3-registry-growth-observation',
       'b3-first-plan-admission-reason',
-      'b4-dose-series',
       'b3-overhead-run-state',
     ]));
   });
@@ -176,47 +156,13 @@ describe('closed-loop drift projection', () => {
     const watchRows = watched.drift.map((candidate) => formatRunDriftRow(candidate.row));
     expect(statusRows).toEqual(taskRows);
     expect(taskRows).toEqual(watchRows);
-    expect(statusRows).toHaveLength(5);
+    expect(statusRows).toHaveLength(4);
     expect(statusRows.every((line) => line.includes('observed='))).toBe(true);
     expect(formatWatchPoll(watched).filter((line) => line.startsWith('[DRIFT] '))).toEqual(
       watchRows.map((canonical) => `[DRIFT] ${value.runId} · ${canonical}`),
     );
     expect(watched.drift.every((candidate) => !candidate.crossedNow)).toBe(true);
     expect(after).toBe(before);
-  });
-
-  it('reads the campaign engine canonical graded-floor line when no schema extension exists', () => {
-    const value = fixture();
-    const state = structuredClone(value.state) as Record<string, unknown> & {
-      research: { resultSchema: Record<string, unknown> };
-      taskDescription?: string;
-    };
-    delete state.research.resultSchema['x-flowcrew-drift'];
-    state.taskDescription = [
-      '# Successor',
-      '',
-      '**Graded floor:** `dose_minutes >= 20 minutes`. A value below this floor fails this criterion.',
-    ].join('\n');
-    writeFileSync(runRecordPath(value.runDir, 'run.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
-    const before = fixtureMutationHash(value);
-
-    const projection = readRunDriftProjection(value.runDir, { state });
-
-    expect(fixtureMutationHash(value)).toBe(before);
-    expect(row(projection, 'research_dose')).toMatchObject({
-      value: value.evidence.historical.doseMinutes.at(-1),
-      unit: 'minutes',
-      crossing: 'below',
-      threshold: {
-        kind: 'floor',
-        operator: '>=',
-        value: 20,
-        source: 'run.json#taskDescription[mechanically-derived graded floor]',
-      },
-      annotations: expect.arrayContaining([
-        'definition=run.json#taskDescription[mechanically-derived graded floor]',
-      ]),
-    });
   });
 
   it('marks one in-memory watch crossing edge and never repeats or persists it', () => {
@@ -247,18 +193,12 @@ describe('closed-loop drift projection', () => {
 
   it('keeps malformed and legacy evidence visibly unavailable instead of fabricating zero', () => {
     const value = fixture();
-    writeFileSync(runRecordPath(value.runDir, 'research_round_2_no_candidate_consumed.json'), '{broken\n');
     writeFileSync(runRecordPath(value.runDir, 'plan_retry_state.json'), '{broken\n');
     writeFileSync(runRecordPath(value.runDir, 'events.jsonl'), '{broken\n');
     const before = fixtureMutationHash(value);
     const malformed = readRunDriftProjection(value.runDir);
     expect(fixtureMutationHash(value)).toBe(before);
 
-    expect(row(malformed, 'research_dose')).toMatchObject({
-      value: value.evidence.historical.doseMinutes.at(-1),
-      source: { availability: 'partial' },
-      annotations: expect.arrayContaining(['unavailable_rounds=2']),
-    });
     expect(row(malformed, 'first_plan_admission')).toMatchObject({
       value: null,
       crossing: 'unavailable',
@@ -278,12 +218,11 @@ describe('closed-loop drift projection', () => {
     }, [
       { type: 'admission_rejected', detail: 'legacy event without an attempt index' },
     ]);
-    expect(row(legacy, 'research_dose')).toMatchObject({ value: null, source: { availability: 'legacy' } });
     expect(row(legacy, 'first_plan_admission')).toMatchObject({ value: null, source: { availability: 'legacy' } });
     expect(legacy.rows.filter((candidate) => candidate.value === 0)).toEqual([]);
 
     const current = buildOperationalProjection(value.state, value.evidence.events);
-    expect(formatRunDriftProjection(current.drift)).toHaveLength(5);
+    expect(formatRunDriftProjection(current.drift)).toHaveLength(4);
     expect(loadClosedLoopDriftEvidence().baseFailure.exitCode).toBe(1);
   });
 });

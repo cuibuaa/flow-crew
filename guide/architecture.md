@@ -13,7 +13,7 @@ flowchart LR
   Settlement --> Records
 ```
 
-This diagram summarizes engineering. Research declares a separate engine-owned measurement loop: calibration, producer, independent candidate-property review, measurement, numeric selection and budget stop. The engine writes its terminal report.
+This diagram summarizes engineering. Research declares a frozen project instrument with initialize, evaluate and finalize phases. The engine dispatches an author and optional declared project review, preserves snapshots and lossless receipts, restores the incumbent and enforces budgets. The project instrument owns verdicts, diagnostics, early stopping and report content.
 The scheduler owns graph execution and settlement; the worker owns one adapter execution.
 Planning and judging are model work when live adapters are selected. Admission, declared
 checks, deadlines, process identity and publication integrity are code boundaries.
@@ -21,9 +21,9 @@ checks, deadlines, process identity and publication integrity are code boundarie
 A planner's typed result supplies the graph. Roles and check descriptors are supplied from
 registries; unknown roles and invalid whole-plan topology refuse admission.
 [Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and retained continuation.
-[Brief contract](brief-contract.md) owns research policy and deterministic checks.
+[Brief contract](brief-contract.md) documents research instrument declarations and deterministic checks.
 Ordinary failed work follows admitted bounded repairs, then stops; it does not force an
-unbounded outer re-plan. Deliberate next-phase engineering work can plan more work. Research keeps its declaration-owned producer/reviewer shape for every submission.
+unbounded outer re-plan. Deliberate next-phase engineering work can plan more work. Research uses its declared author and optional project review for every submission; the frozen instrument owns verdicts.
 
 Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
 [worker](../src/worker.ts), [gate loop](../src/scheduler/sched_loop/gate-loop.ts),

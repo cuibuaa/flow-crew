@@ -7,7 +7,6 @@ import { REGISTRY_COMPACTION_THRESHOLDS } from './task-registry.js';
 import { supervisionPaths } from './supervision.js';
 
 export const RUN_DRIFT_ROW_IDS = [
-  'research_dose',
   'first_plan_admission',
   'engine_overhead',
   'registry_growth',
@@ -45,12 +44,6 @@ export interface RunDriftDistribution {
   percentileMethod: 'midrank percentage; rank is zero-based count strictly below reportedValue';
 }
 
-export interface RunDriftTrend {
-  values: number[];
-  direction: 'increasing' | 'decreasing' | 'flat' | 'mixed' | 'unavailable';
-  unit: string;
-}
-
 export interface RunDriftRow {
   id: RunDriftRowId;
   label: string;
@@ -62,7 +55,6 @@ export interface RunDriftRow {
   source: RunDriftSource;
   crossing: RunDriftCrossing;
   distribution?: RunDriftDistribution;
-  trend?: RunDriftTrend;
   annotations: string[];
 }
 
@@ -107,7 +99,6 @@ interface RegistryObservation extends FileObservation {
 }
 
 const MAX_JSON_BYTES = 1024 * 1024;
-const MAX_RESEARCH_ROUNDS = 64;
 const MAX_OVERHEAD_SAMPLES = 512;
 const MAX_EVENT_ROWS = 2_000;
 const MAX_EVENT_TAIL_BYTES = 2 * 1024 * 1024;
@@ -115,7 +106,6 @@ const MAX_REGISTRY_SCAN_BYTES = REGISTRY_COMPACTION_THRESHOLDS.bytes;
 const MAX_REGISTRY_TAIL_BYTES = 4 * 1024 * 1024;
 const LOG_WARNING_BYTES = 64 * 1024 * 1024;
 const OVERHEAD_WARNING_MS = 60_000;
-const DRIFT_SCHEMA_KEY = 'x-flowcrew-drift';
 const MIDRANK_METHOD = 'midrank percentage; rank is zero-based count strictly below reportedValue' as const;
 
 let registryCache: {
@@ -228,28 +218,6 @@ function compare(value: number | undefined, threshold: number | undefined): RunD
   return 'at';
 }
 
-function trend(values: readonly number[], unit: string): RunDriftTrend {
-  if (values.length < 2) return { values: [...values], direction: 'unavailable', unit };
-  const changes = values.slice(1).map((value, index) => Math.sign(value - values[index]));
-  const direction = changes.every((change) => change === 0)
-    ? 'flat'
-    : changes.every((change) => change >= 0) && changes.some((change) => change > 0)
-      ? 'increasing'
-      : changes.every((change) => change <= 0) && changes.some((change) => change < 0)
-        ? 'decreasing'
-        : 'mixed';
-  return { values: [...values], direction, unit };
-}
-
-function unavailableThreshold(unit: string, sourceName: string): RunDriftThreshold {
-  return {
-    kind: 'unavailable',
-    unit,
-    display: 'unavailable',
-    source: sourceName,
-  };
-}
-
 function unavailableRow(
   id: RunDriftRowId,
   label: string,
@@ -268,187 +236,6 @@ function unavailableRow(
     source: source(availability, reference),
     crossing: 'unavailable',
     annotations,
-  };
-}
-
-interface DoseDefinition {
-  field: string;
-  metricId: string;
-  unit: string;
-  threshold: RunDriftThreshold;
-  definitionSource: string;
-}
-
-function doseDefinition(state: unknown): DoseDefinition | undefined {
-  const research = object(object(state)?.research);
-  const schema = object(research?.resultSchema);
-  const hasSchemaExtension = Boolean(schema && Object.hasOwn(schema, DRIFT_SCHEMA_KEY));
-  const extension = object(schema?.[DRIFT_SCHEMA_KEY]);
-  const declared = object(extension?.researchDose);
-  if (!declared && !hasSchemaExtension) {
-    const brief = text(object(state)?.taskDescription);
-    if (!brief) return undefined;
-    const pattern = /\*\*Graded floor:\*\*\s*`([A-Za-z][A-Za-z0-9_.-]{0,80})\s*(>=|>)\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s+([A-Za-z][A-Za-z0-9 _/-]{0,60})`\./gu;
-    const matches = [...brief.matchAll(pattern)].filter((match) => /dose/iu.test(match[1]));
-    if (matches.length !== 1) return undefined;
-    const [, metricId, operator, numeric, rawUnit] = matches[0];
-    const thresholdValue = Number(numeric);
-    const unit = rawUnit.trim().replaceAll(/\s+/g, ' ');
-    if (!Number.isFinite(thresholdValue) || thresholdValue < 0 || !unit) return undefined;
-    const definitionSource = 'run.json#taskDescription[mechanically-derived graded floor]';
-    return {
-      field: metricId,
-      metricId,
-      unit,
-      threshold: {
-        kind: 'floor',
-        operator: operator as '>=' | '>',
-        value: thresholdValue,
-        unit,
-        display: `${operator} ${thresholdValue}`,
-        source: definitionSource,
-      },
-      definitionSource,
-    };
-  }
-  const field = text(declared?.field);
-  const metricId = text(declared?.metricId);
-  const unit = text(declared?.unit);
-  const properties = object(schema?.properties);
-  const property = field ? object(properties?.[field]) : undefined;
-  const required = Array.isArray(schema?.required) ? schema.required : [];
-  if (!field || !metricId || !unit || property?.type !== 'number' || !required.includes(field)) return undefined;
-
-  const rawThreshold = object(declared!.threshold);
-  const thresholdValue = finite(rawThreshold?.value);
-  const operator = text(rawThreshold?.operator);
-  const kind = text(rawThreshold?.kind);
-  const validOperator = operator === '>=' || operator === '>' || operator === '<=' || operator === '<';
-  const validKind = kind === 'floor' || kind === 'expectation';
-  const threshold: RunDriftThreshold = validOperator && validKind && thresholdValue !== undefined
-    ? {
-        kind,
-        operator,
-        value: thresholdValue,
-        unit,
-        display: `${operator} ${thresholdValue}`,
-        source: text(rawThreshold?.source)
-          ?? `run.json#research.resultSchema.${DRIFT_SCHEMA_KEY}.researchDose.threshold`,
-      }
-    : unavailableThreshold(unit, `run.json#research.resultSchema.${DRIFT_SCHEMA_KEY}.researchDose.threshold`);
-  return {
-    field,
-    metricId,
-    unit,
-    threshold,
-    definitionSource: `run.json#research.resultSchema.${DRIFT_SCHEMA_KEY}.researchDose`,
-  };
-}
-
-function researchDoseRow(state: unknown, runDirectory?: string): RunDriftRow {
-  const definition = doseDefinition(state);
-  if (!definition) {
-    return unavailableRow(
-      'research_dose',
-      'Research dose and trend',
-      'unknown',
-      unavailableThreshold('unknown', `run.json#research.resultSchema.${DRIFT_SCHEMA_KEY}.researchDose`),
-      `run.json#research.resultSchema.${DRIFT_SCHEMA_KEY}.researchDose`,
-      object(object(state)?.research) ? 'legacy' : 'missing',
-      ['typed dose-to-round linkage is absent; research prose and mutable latest-round files were not parsed'],
-    );
-  }
-  if (!runDirectory) {
-    return unavailableRow(
-      'research_dose',
-      'Research dose and trend',
-      definition.unit,
-      definition.threshold,
-      'research_journal.json + research_round_<n>_consumed.json',
-      'missing',
-      ['durable round directory was not supplied'],
-    );
-  }
-
-  const journal = readJsonObject(runRecordPath(runDirectory, 'research_journal.json'));
-  const rounds = Array.isArray(journal.value?.rounds) ? journal.value.rounds : undefined;
-  if (journal.availability !== 'read' || !rounds) {
-    return unavailableRow(
-      'research_dose',
-      'Research dose and trend',
-      definition.unit,
-      definition.threshold,
-      'research_journal.json',
-      journal.availability,
-      ['scheduler-owned immutable round journal is unavailable'],
-    );
-  }
-
-  const selected = rounds.slice(-MAX_RESEARCH_ROUNDS);
-  const offset = rounds.length - selected.length;
-  const values: number[] = [];
-  const missingRounds: number[] = [];
-  let latestObservation: FileObservation | undefined;
-  for (let localIndex = 0; localIndex < selected.length; localIndex++) {
-    const roundIndex = offset + localIndex + 1;
-    const round = object(selected[localIndex]);
-    const expectedLabel = text(round?.label);
-    const noCandidate = round?.outcome === 'no_candidate';
-    const preferred = runRecordPath(
-      runDirectory,
-      `research_round_${roundIndex}_${noCandidate ? 'no_candidate_' : ''}consumed.json`,
-    );
-    const alternate = runRecordPath(
-      runDirectory,
-      `research_round_${roundIndex}_${noCandidate ? '' : 'no_candidate_'}consumed.json`,
-    );
-    const result = existsSync(preferred) ? readJsonObject(preferred) : readJsonObject(alternate);
-    const value = finite(result.value?.[definition.field]);
-    const label = text(result.value?.label);
-    if (result.availability !== 'read' || value === undefined || !expectedLabel || label !== expectedLabel) {
-      missingRounds.push(roundIndex);
-      continue;
-    }
-    values.push(value);
-    latestObservation = result.observation;
-  }
-
-  if (values.length === 0) {
-    return unavailableRow(
-      'research_dose',
-      'Research dose and trend',
-      definition.unit,
-      definition.threshold,
-      'research_journal.json + research_round_<n>_consumed.json',
-      missingRounds.length > 0 ? 'malformed' : 'missing',
-      ['no journal-labelled consumed round carried the required finite typed dose'],
-    );
-  }
-  const latest = values.at(-1)!;
-  const partial = missingRounds.length > 0 || rounds.length > MAX_RESEARCH_ROUNDS;
-  return {
-    id: 'research_dose',
-    label: 'Research dose and trend',
-    value: latest,
-    comparisonValue: latest,
-    unit: definition.unit,
-    threshold: definition.threshold,
-    source: source(
-      partial ? 'partial' : 'read',
-      'research_journal.json + research_round_<n>_consumed.json',
-      latestObservation ?? journal.observation,
-    ),
-    crossing: compare(latest, definition.threshold.value),
-    distribution: distribution(values, latest),
-    trend: trend(values, definition.unit),
-    annotations: [
-      `metric=${definition.metricId}`,
-      `definition=${definition.definitionSource}`,
-      `rounds=${values.length}/${rounds.length}`,
-      ...(missingRounds.length > 0 ? [`unavailable_rounds=${missingRounds.join(',')}`] : []),
-      ...(rounds.length > MAX_RESEARCH_ROUNDS ? [`bounded_to_latest=${MAX_RESEARCH_ROUNDS}`] : []),
-      ...(definition.threshold.kind === 'expectation' ? ['expectation is advisory, not a hard floor'] : []),
-    ],
   };
 }
 
@@ -847,7 +634,6 @@ export function buildRunDriftProjection(
   return {
     version: 1,
     rows: [
-      researchDoseRow(state),
       firstPlanAdmissionRow(eventObjects),
       engineOverheadRow(state),
       registryGrowthRow(undefined, 'tasks.jsonl'),
@@ -872,7 +658,6 @@ export function readRunDriftProjection(
   return {
     version: 1,
     rows: [
-      researchDoseRow(state, runDirectory),
       firstPlanAdmissionRow(events, runDirectory),
       engineOverheadRow(state, stateObservation),
       registryGrowthRow(registry, registryPath),
@@ -910,11 +695,8 @@ export function formatRunDriftRow(row: RunDriftRow): string {
   const distributionText = row.distribution
     ? `; distribution=n=${row.distribution.sampleCount},mean=${numberText(row.distribution.mean)},median=${numberText(row.distribution.median)},reported-rank=${row.distribution.reportedRank}/${row.distribution.sampleCount},percentile=${numberText(row.distribution.reportedPercentile)}`
     : '';
-  const trendText = row.trend
-    ? `; trend=${row.trend.direction}[${row.trend.values.map(numberText).join(' -> ')}]`
-    : '';
   const annotations = row.annotations.length > 0 ? `; notes=${compact(row.annotations.join(', '), 260)}` : '';
-  return `Drift ${row.id}: value=${value}; unit=${row.unit}; threshold=${threshold}; source=${sourceText}; crossing=${row.crossing}${trendText}${distributionText}${annotations}`;
+  return `Drift ${row.id}: value=${value}; unit=${row.unit}; threshold=${threshold}; source=${sourceText}; crossing=${row.crossing}${distributionText}${annotations}`;
 }
 
 export function formatRunDriftProjection(projection: RunDriftProjection | undefined): string[] {

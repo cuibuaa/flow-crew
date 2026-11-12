@@ -10,7 +10,7 @@ import { resolve, join, relative, dirname } from "node:path";
 import { existsSync, readFileSync, readlinkSync, lstatSync, realpathSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileIdentity, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
-import { bindImmutableEvidence, canonicalPotentialProjectPath, listProjectFiles, listProjectFilesAt, firstImmutableEvidenceConflict, type ImmutableEvidenceBinding } from './path-capabilities.js';
+import { bindImmutableEvidence, researchFrozenRoots, canonicalPotentialProjectPath, listProjectFiles, listProjectFilesAt, firstImmutableEvidenceConflict, type ImmutableEvidenceBinding } from './path-capabilities.js';
 
 export interface RunRollbackBaseline {
   frozenInputs: ImmutableEvidenceBinding[];
@@ -197,8 +197,9 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   };
   const briefPath = runDirPath && runRecordPath(runDirPath, 'task_brief.md');
   if (briefPath && existsSync(briefPath)) {
-    const contract = readAdmittedBriefContract(runDirPath!, readFileSync(briefPath, 'utf8'));
-    baseline.frozenInputs = bindImmutableEvidence(projectDir, contract.inputs, contract.outputs);
+    const brief = readFileSync(briefPath, 'utf8');
+    const contract = readAdmittedBriefContract(runDirPath!, brief);
+    baseline.frozenInputs = bindImmutableEvidence(projectDir, contract.inputs, contract.outputs, researchFrozenRoots(brief));
   }
   // Derive supporting topology only for identities still frozen after exact
   // output precedence. A released input alias is not a separate prohibition.

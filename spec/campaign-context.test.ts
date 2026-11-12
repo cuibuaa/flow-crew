@@ -186,6 +186,20 @@ describe('campaign context relevance selector', () => {
 });
 
 describe('campaign context production path', () => {
+  it('includes protocol verdicts and opaque payloads in the existing tried-direction digest without numeric reconstruction', () => {
+    const runId = 'protocol-ledger-run'; writeCampaignEntries([historyEntry({ runId, score: -999999 })]);
+    const directory = join(fcHome, 'runs', runId); mkdirSync(directory, { recursive: true });
+    const candidate = { path: '/fixture/candidate', sha256: 'a'.repeat(64), label: 'incumbent' };
+    const response = { observations: { extra: ['unprojected', { signed: -3 }] }, diagnostics: { nested: ['retained diagnostic'] }, next_state: { opaque: true } };
+    const manifest = { protocol: 'research-instrument/v1', run_id: runId, engine_stop_reason: 'instrument_stop',
+      initial: candidate, incumbent: candidate, instrument_sha256: 'b'.repeat(64), history: [{ phase: 'evaluate', round: 1,
+        candidate, outcome: 'reject', reason: 'Project tradeoff', result: { path: '/fixture/result', sha256: 'c'.repeat(64) }, response }] };
+    const path = runRecordPath(directory, 'research_manifest.json'); writeFileSync(path, JSON.stringify(manifest));
+    const before = readFileSync(path);
+    const digest = summarizeLedger(projectDir, CAMPAIGN_ID);
+    expect(digest).toContain('"outcome":"reject"'); expect(digest).toContain(JSON.stringify(response));
+    expect(digest).not.toContain('-999999'); expect(readFileSync(path)).toEqual(before);
+  });
   it('keeps distinct trial rounds when engine display labels repeat across runs', () => {
     writeCampaignEntries([historyEntry({ runId: 'first-run' }), historyEntry({ runId: 'second-run' }), historyEntry({ runId: 'first-run' })]);
     for (const [runId, result] of [['first-run', 90], ['second-run', 80]] as const) {

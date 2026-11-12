@@ -43,12 +43,6 @@ export const HANDOFF_SCHEMA = object({
   blocks: { anyOf: [object({ criterion_ids: strings, paths: strings }), { type: 'null' }] },
 });
 
-/** Research proposals add labelled advisory notes to the ordinary result carrier. */
-export const RESEARCH_PRODUCER_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
-  properties: { ...HANDOFF_SCHEMA.properties, notes: object({ hypothesis: text, files_changed: strings, property_evidence: text }) },
-  required: [...HANDOFF_SCHEMA.required!, 'notes'],
-};
-
 // Old results carry an author-reported file list. Deleting the read field would
 // hide those records; new generation uses the engine's existing write ledger.
 export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA,

@@ -86,12 +86,24 @@ function ResearchGroup({ group }: { group: ResearchMetricGroup }) {
 function ResearchPanel({ source }: { source: SourceResult<ResearchNarrative | null> }) {
   return (
     <div className="campaign-conclusion-panel" data-testid="research-conclusion">
-      <h3>Research measurements</h3>
+      <h3>Research outcomes</h3>
       <SourceNotice source={source} label="Research evidence" />
       {source.value?.latestCanonicalStatus ? (
         <div className="campaign-delivery-status"><span>Latest canonical outcome</span><Status value={source.value.latestCanonicalStatus} /></div>
       ) : null}
-      {source.value?.selected ? <ResearchGroup group={source.value.selected} /> : <ErrorOrEmpty unavailable={source.status === "unavailable"} empty="No accepted measurement evidence" />}
+      {source.value?.instruments?.map(({ runId, record }) => (
+        <div className="campaign-research-group" key={runId}>
+          <a href={`/run/${encodeURIComponent(runId)}`}>Instrument run {runId}</a>
+          <div>Engine stop: {record.engine_stop_reason ?? "running"}</div>
+          <div>Incumbent: {record.incumbent.sha256}</div>
+          {record.publication ? <div>Publication: {record.publication.status}{record.publication.error ? ` — ${record.publication.error}` : ""}</div> : null}
+          <details className="campaign-evidence-details">
+            <summary>Instrument outcomes and diagnostics</summary>
+            <pre>{JSON.stringify(record, null, 2)}</pre>
+          </details>
+        </div>
+      ))}
+      {source.value?.selected ? <ResearchGroup group={source.value.selected} /> : source.value?.instruments?.length ? null : <ErrorOrEmpty unavailable={source.status === "unavailable"} empty="No recorded research outcomes" />}
       {source.value ? (
         <details className="campaign-evidence-details">
           <summary>Research evidence details</summary>
@@ -298,7 +310,7 @@ function costEvidenceSummary(view: CampaignOperatorView): string {
 function campaignTypeExplanation(kind: CampaignOperatorView["identity"]["classification"]["kind"]): string {
   switch (kind) {
     case "engineering": return "Implementation work is evaluated through run outcomes and execution evidence; research measurements are not required.";
-    case "research": return "Accepted measurements are used to compare research outcomes.";
+    case "research": return "Frozen instrument outcomes and archived measurements are shown from run records.";
     case "mixed": return "This campaign contains both implementation outcomes and accepted research measurements.";
     case "unknown": return "The available records are not sufficient to determine the campaign type.";
   }

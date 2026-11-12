@@ -1,4 +1,3 @@
-import { ResearchMeasurementSchema } from '../src/research-measurement.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -154,9 +153,30 @@ afterEach(() => {
 });
 
 describe('campaign page evidence classifier', () => {
+  it('uses protocol manifests and opaque diagnostics without inferring a scientific best from legacy numeric artifacts', async () => {
+    const state = runState('protocol-run', { research: { protocol: 'research-instrument/v1' } as any });
+    writeEvidence(state, { workflow: RESEARCH_WORKFLOW, journal: { rounds: [{ label: 'forged', result: -999999 }] },
+      metric: { metric: 'cost', value: -999999 }, confirm: { pass: false } });
+    const candidate = { path: '/fixture/candidate', sha256: 'a'.repeat(64), label: 'kept' };
+    const diagnostics = { nested: { provenance: ['opaque', { signed: -7 }], extra: true } };
+    const manifest = { protocol: 'research-instrument/v1', run_id: state.runId, engine_stop_reason: 'instrument_stop',
+      initial: candidate, incumbent: candidate, instrument_sha256: 'b'.repeat(64), history: [{ phase: 'evaluate', round: 1,
+        candidate, outcome: 'reject', reason: 'Project tradeoff', result: { path: '/fixture/result', sha256: 'c'.repeat(64) },
+        response: { observations: { extra: ['unprojected'] }, diagnostics, next_state: { opaque: true }, stop: { reason: 'done', outcome: ['project-defined'] } } }] };
+    writeFileSync(runRecordPath(join(runsRoot(), state.runId), 'research_manifest.json'), JSON.stringify(manifest));
+    const view = await readCampaignOperatorView(projectDir, campaignId, pageSources([state], {
+      entries: [{ runId: state.runId, metric: 'cost', score: -999999, pass: true, iteration: 2, timestamp: NOW.toISOString() } as any],
+    }));
+    expect(view.identity.classification.kind).toBe('research');
+    expect(view.research.value?.selected).toBeNull(); expect(view.research.value?.acceptedPointCount).toBe(0);
+    expect(view.research.value?.confirmNotes).toEqual([]);
+    expect(view.research.value?.instruments).toEqual([{ runId: state.runId, record: manifest }]);
+    expect(JSON.stringify(view.research.value?.instruments?.[0].record.history[0].response?.diagnostics)).toBe(JSON.stringify(diagnostics));
+    expect(view.engineering.value).toBeNull();
+  });
   it('projects only engine-kept measurement rounds into the accepted campaign best', async () => {
     const state = runState('native-measurement-selection', { status: RUN_STATUS.CEILING_HIT, research: {
-      measurement: ResearchMeasurementSchema.parse({ frozen: ['instrument'], candidate: ['src'], replicates: 2,
+      measurement: ({ frozen: ['instrument'], candidate: ['src'], replicates: 2,
         metrics: { cost: { direction: 'min', scale: 'fraction' } }, primary: ['cost'], development: { command: process.execPath, args: [] } }),
       stop: { maxRounds: 3 },
     } });

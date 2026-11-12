@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '../ui/test-
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fetchCampaignOperatorView } from '../ui/src/components/campaign/client';
 import CampaignPage from '../ui/src/components/campaign/CampaignPage';
 import Workspaces from '../ui/src/components/Workspaces';
 import type {
@@ -198,6 +199,30 @@ describe('decision-first campaign UI', () => {
     expect(qualified.container).toHaveTextContent('Best measurement (2): 9');
   });
 
+  it('renders frozen instrument outcomes and lossless diagnostics through the client without a numeric best', async () => {
+    const view = engineeringView();
+    view.identity.classification = { kind: 'research', status: 'complete', research: 'present', engineering: 'absent',
+      acceptedPointCount: 0, engineeringRunCount: 0, reasons: ['Frozen instrument run'], issues: [] };
+    const candidate = { path: '/fixture/snapshot', sha256: 'a'.repeat(64), label: 'incumbent' };
+    const record = { protocol: 'research-instrument/v1', run_id: 'instrument-run', engine_stop_reason: 'instrument_stop',
+      initial: candidate, incumbent: candidate, instrument_sha256: 'b'.repeat(64), history: [{ phase: 'evaluate', round: 2,
+        candidate, outcome: 'reject', reason: 'Project tradeoff', result: { path: '/fixture/result', sha256: 'c'.repeat(64) },
+        response: { observations: { extra: ['opaque'] }, diagnostics: { nested: { signed: -7, text: 'retained diagnostic' } } } }],
+      publication: { status: 'failed', destination: 'report.md', error: 'Delivery unavailable' } } as any;
+    view.research = complete({ selected: null, otherMetrics: [], acceptedPointCount: 0, confirmNotes: [], latestCanonicalStatus: 'complete',
+      instruments: [{ runId: 'instrument-run', record }] });
+    view.engineering = complete(null);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => view })));
+    const received = await fetchCampaignOperatorView(view.identity.id);
+    expect(received.research.value?.instruments?.[0].record).toEqual(record);
+    const { container } = renderCampaign(received);
+    expect(container).toHaveTextContent('instrument_stop');
+    expect(container).toHaveTextContent('Project tradeoff');
+    expect(container).toHaveTextContent('retained diagnostic');
+    expect(container).toHaveTextContent('Delivery unavailable');
+    expect(container).not.toHaveTextContent('Best measurement');
+    expect(container.querySelector('.campaign-research-trend')).toBeNull();
+  });
   it('distinguishes an incomplete attention source from the trustworthy empty answer', () => {
     const view = engineeringView();
     view.attention = {

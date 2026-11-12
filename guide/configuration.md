@@ -142,7 +142,7 @@ sharing a mutable project tree wait for the active author to settle. Settlement 
 task-declared immutable evidence, with exact task outputs taking precedence.
 See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
 
-A brief declaring `research.measurement` constructs its producer and independent property reviewer directly.
+A brief declaring `research.protocol: research-instrument/v1` constructs its author and optional declared project reviewer directly. The frozen project instrument owns verdicts and final report content.
 Engineering briefs enter `entry.yaml`; its chooser selects a fixed author/review/repair shape or
 releases the dynamic planner. The parsed declaration alone decides research versus engineering. The fixed author's result routes
 through a read-only assessment to focused or full independent review. Full review remains available.

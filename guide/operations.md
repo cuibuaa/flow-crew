@@ -15,9 +15,9 @@ expresses human wrap-up intent and may link to an exact daemon task; it is optio
 | `pending` | Queued, not executing |
 | `running` | Executing; inspect process identity as well as stored status |
 | `parked` | Paused for a decision or proven resumable interruption; not terminal |
-| `complete` | Successful terminal engineering completion |
-| `shipped` | Successful terminal research ship decision |
-| `ceiling_hit` | Successful process-level research ceiling; not a metric win |
+| `complete` | Terminal engineering completion or a completed instrument loop; project research conclusions remain in the instrument record |
+| `shipped` | Recorded historical project ship decision |
+| `ceiling_hit` | Recorded historical process-level ceiling; not a metric win |
 | `failed`, `reality_gate_failed` | Terminal execution/check failure |
 | `escalated` | Terminal unresolved or irreparable outcome |
 | `cancelled` | Terminal explicit stop; compatible settled work requires explicit resume |
@@ -133,13 +133,32 @@ the run with a result naming what the author must supply before launching again.
 Historical approval logs and paused run records remain readable by the CLI, dashboard and
 wrap-up readers. They grant no new authority and have no decision/resume endpoint.
 
-Research review rejection journals an unmeasured rejected submission. A producer or review execution failure
-fails the run. The engine owns numeric decisions, stopping and every terminal report. Proven resumable host interruptions retain their
+A declared research review can reject a submission without creating an observation. An author or review execution failure
+fails the run. The frozen project instrument owns keep/reject and report content; the engine enforces hard budgets, cancellation and terminal publication. Proven resumable host interruptions retain their
 orchestration checkpoints without requesting human approval.
+
+For `research-instrument/v1`, inspect `engine/research_manifest.json` for the engine
+stop reason and final incumbent, and `engine/research_publication.json` for delivery.
+Publication is attempted once at terminal and cannot change the run result. Recovery
+and `land` never recreate project reports, even after the project worktree is removed.
+A reserved invocation with no committed result is uncertain and is never silently
+remeasured; the invocation ID is the project's external idempotency key. Historical
+research records remain read-only through the explicit legacy decoder; old briefs
+must be migrated to the named protocol before a new launch.
 
 Cancellation closes active control state as `cancelled` and attempts to stop its owned
 workers. It acknowledges a terminal decision; task notes report any unresolved process
 evidence. Daemon restart, recovery and deployment release leave that cancellation cancelled.
+For a versioned research run, proven scheduler and owned-worker retirement also allows
+native control to restore the incumbent and commit the run-local manifest, even when
+SIGTERM prevented the scheduler's finish closure. No new instrument work or report
+publication runs after cancellation; unknown process fate defers restoration.
+If a newer run has acquired the project, including one that has already completed,
+the older cancellation writes only its run-local manifest. Its `restoration_skipped`
+field records changed or unknown project ownership; its retained best snapshot stays
+available. Admission and restoration share the existing lock primitive, and launch
+release retains the last project owner. This fences delayed candidate writes without
+reintroducing research-report ordering or recovery publication.
 Explicit resume can continue safely settled work after ownership and compatibility checks.
 Use the deployment hold below to let current stage work settle normally before deployment.
 
@@ -304,7 +323,7 @@ retains its stored choice. A history instruction to avoid repeated directions do
 mechanically guarantee model novelty.
 
 Campaign health can request research/pivots;
-research policy owns numeric keep/stop decisions. Current telemetry does not create a
+the frozen project instrument owns project verdicts and stop requests. Current telemetry does not create a
 principal metric merely because a gate passes.
 
 Sources: [selection](../src/config.ts), [launch context](../src/cli.ts),

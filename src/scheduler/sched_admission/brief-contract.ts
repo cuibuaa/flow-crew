@@ -1,5 +1,5 @@
 import { ArtifactPathSchema } from '../../artifact-location.js';
-import { ResearchMeasurementSchema } from '../../research-measurement.js';
+import { ResearchInstrumentSchema, RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
 import { type TerminalStatesConfig, type ResearchConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
@@ -12,7 +12,7 @@ export interface ParsedBriefFrontmatter {
   maxContinuations?: number;
   workflowError?: string;
   terminalStates?: TerminalStatesConfig;
-  /** The only active research contract is an engine-owned measurement declaration. */
+  /** The only active research contract is a versioned frozen instrument declaration. */
   research?: ResearchConfig;
   researchPolicyError?: string;
   outputs?: BriefOutputDeclaration[];
@@ -21,10 +21,10 @@ export interface ParsedBriefFrontmatter {
   frontmatterErrorKind?: BriefFrontmatterDocument['errorKind'];
 }
 
-/** A measurement declaration owns research shape; engineering enters the chooser. */
+/** An instrument declaration owns research shape; engineering enters the chooser. */
 export function entryWorkflow(parsed: ParsedBriefFrontmatter): { workflow: string; reason: string; error?: string } {
   const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError ?? parsed.researchPolicyError;
-  return { workflow: parsed.research ? 'research' : 'entry', reason: parsed.research ? 'The measurement declaration fixes the research loop.' : 'The model chooser selects the engineering shape.', ...(error ? { error } : {}) };
+  return { workflow: parsed.research ? 'research' : 'entry', reason: parsed.research ? 'The instrument declaration fixes the research loop.' : 'The model chooser selects the engineering shape.', ...(error ? { error } : {}) };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
@@ -55,32 +55,11 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   const resRaw = Object.hasOwn(parsed, 'research') ? (parsed as Record<string, unknown>).research : (parsed as Record<string, unknown>).objective;
   const duplicate = Object.hasOwn(parsed, 'research') && Object.hasOwn(parsed, 'objective');
   if (resRaw !== undefined || duplicate) {
-    const migration = 'Legacy research is retired; declare research.measurement with frozen/candidate roots and structured guards.';
-    const fail = (detail: string) => { out.researchPolicyError = `${migration} ${detail}`; out.workflowError = out.researchPolicyError; };
-    if (duplicate) fail('Declare the measurement contract once; research and its objective alias cannot both be present.');
-    else if (!resRaw || typeof resRaw !== 'object' || Array.isArray(resRaw)) fail('Research must be a mapping.');
-    else {
-      const r = resRaw as Record<string, unknown>;
-      const unknown = Object.keys(r).filter(key => !['measurement', 'stop'].includes(key));
-      const stop = r.stop as Record<string, unknown> | undefined;
-      const stopKeys = stop && typeof stop === 'object' ? Object.keys(stop) : [];
-      const retired = stopKeys.filter(key => !['beat', 'max_rounds', 'max_wall_hours', 'halt_after_no_improvement'].includes(key));
-      if (r.measurement === undefined || unknown.length || retired.length) fail(`Remove retired fields: ${[...unknown, ...retired.map(k => 'stop.' + k)].join(', ') || 'research without measurement'}.`);
-      else {
-        const measurement = ResearchMeasurementSchema.safeParse(r.measurement);
-        if (!measurement.success) fail(`research.measurement: ${measurement.error.message}`);
-        else if (!Number.isSafeInteger(stop?.max_rounds) || Number(stop?.max_rounds) < 1) fail('stop.max_rounds must be a positive integer.');
-        else if (stop?.max_wall_hours !== undefined && (typeof stop.max_wall_hours !== 'number' || !Number.isFinite(stop.max_wall_hours) || stop.max_wall_hours <= 0)) fail('stop.max_wall_hours must be finite and positive.');
-        else if (stop?.halt_after_no_improvement !== undefined && (!Number.isSafeInteger(stop.halt_after_no_improvement) || Number(stop.halt_after_no_improvement) < 1)) fail('stop.halt_after_no_improvement must be a positive integer.');
-        else if (stop?.beat !== undefined && (typeof stop.beat !== 'number' || !Number.isFinite(stop.beat))) fail('stop.beat must be finite.');
-        else out.research = { measurement: measurement.data, stop: {
-          maxRounds: Number(stop!.max_rounds),
-          ...(stop!.max_wall_hours === undefined ? {} : { maxWallHours: Number(stop!.max_wall_hours) }),
-          ...(stop!.halt_after_no_improvement === undefined ? {} : { haltAfterNoImprovement: Number(stop!.halt_after_no_improvement) }),
-          ...(stop!.beat === undefined ? {} : { beat: Number(stop!.beat) }),
-        } };
-      }
-    }
+    const parsedResearch = ResearchInstrumentSchema.safeParse(resRaw);
+    if (duplicate || Object.hasOwn(parsed, 'objective') || !parsedResearch.success) {
+      out.researchPolicyError = `Declare ${RESEARCH_PROTOCOL} in research; legacy research briefs are not reinterpreted. ${duplicate ? 'Declare research once.' : parsedResearch.error?.message ?? 'The objective alias is retired.'}`;
+      out.workflowError = out.researchPolicyError;
+    } else out.research = parsedResearch.data;
   }
 
   const raw = (parsed as Record<string, unknown>).terminal_states;
@@ -147,7 +126,7 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
     if (entry) ts[status] = entry;
   }
   if (out.research) {
-    const roots = [...out.research.measurement.frozen, ...out.research.measurement.candidate];
+    const roots = [...out.research.frozen, ...out.research.candidate];
     const reports = Object.values(ts).flatMap(entry => entry.paths);
     const invalid = reports.find(path => !ArtifactPathSchema.safeParse(path).success
       || roots.some(root => path === root || path.startsWith(root + '/') || root.startsWith(path + '/')));

@@ -1,3 +1,4 @@
+import { RESEARCH_PROTOCOL } from './research-instrument.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 export { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
 import { join, resolve } from 'node:path';
@@ -105,7 +106,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   let state = readRunState(projectDir, runId);
-  if (state.status !== RUN_STATUS.RUNNING) return state.researchReportPaths ? reconcileResearchConclusion(projectDir, runId) : state;
+  if (state.status !== RUN_STATUS.RUNNING) return state.research?.protocol === RESEARCH_PROTOCOL ? reconcileResearchConclusion(projectDir, runId) : state;
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: state is not bound to this run/project');
   if (Object.hasOwn(evidence, 'expectedCheckpoint') && digest(state.engineCheckpoint ?? null) !== digest(evidence.expectedCheckpoint ?? null)) throw new Error('RECOVERY_STATE_CHANGED: checkpoint changed since daemon observation');
   evidence.assertSchedulerAbsent ??= () => {

@@ -129,7 +129,7 @@ describe('nothing waits for a person after launch', () => {
     const fixture = adapter();
     const state = await runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined, true, admission);
     expect(state.status).toBe('failed');
-    expect(state.failureReason).toContain('declare research.measurement');
+    expect(state.failureReason).toContain('research-instrument/v1');
     expect(fixture.calls).toEqual([]);
   });
 

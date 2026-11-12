@@ -243,9 +243,8 @@ describe('daemon status local diagnosis', () => {
     });
     expect(merged.completed_at).toBeUndefined();
     expect(merged).not.toHaveProperty('failure_reason');
-    expect(merged.operational?.drift?.rows).toHaveLength(5);
+    expect(merged.operational?.drift?.rows).toHaveLength(4);
     expect(merged.operational?.drift?.rows.map((row) => row.id)).toEqual([
-      'research_dose',
       'first_plan_admission',
       'engine_overhead',
       'registry_growth',

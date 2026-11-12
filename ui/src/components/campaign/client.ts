@@ -164,6 +164,11 @@ function isResearch(value: unknown): boolean {
   return value === null || (isRecord(value)
     && (value.selected === null || isMetricGroup(value.selected))
     && Array.isArray(value.otherMetrics) && value.otherMetrics.every(isMetricGroup)
+    && (value.instruments === undefined || (Array.isArray(value.instruments) && value.instruments.every(item =>
+      isRecord(item) && isString(item.runId) && isRecord(item.record)
+      && item.record.protocol === 'research-instrument/v1' && isRecord(item.record.incumbent) && isString(item.record.incumbent.sha256)
+      && Array.isArray(item.record.history) && item.record.history.every(outcome => isRecord(outcome)
+        && isCount(outcome.round) && isString(outcome.outcome) && isString(outcome.reason)))))
     && isCount(value.acceptedPointCount)
     && isStringArray(value.confirmNotes)
     && (value.latestCanonicalStatus === null || isRunStatus(String(value.latestCanonicalStatus))));

@@ -41,8 +41,6 @@ export interface ClosedLoopDriftEvidence {
   evidenceRunId: string;
   baseFailure: { exitCode: 1; logBytes: number; logSha256: string };
   historical: {
-    doseMinutes: number[];
-    doseFloorMinutes: number;
     firstPlan: { attemptIndex: 1; admitted: false; laterAdmittedAttemptIndex: number };
     overhead: OverheadRecord[];
     registry: { bytes: number; records: number; tasks: number };
@@ -50,7 +48,6 @@ export interface ClosedLoopDriftEvidence {
   };
   runState: Record<string, unknown>;
   planRetryState: Record<string, unknown>;
-  researchJournal: { rounds: Array<{ label: string; outcome: 'no_candidate' }> };
   events: Record<string, unknown>[];
   anchors: RecordedAnchor[];
 }
@@ -71,7 +68,6 @@ export interface MaterializedClosedLoopDriftFixture {
 }
 
 export const EXPECTED_DRIFT_ROW_IDS = new Set<RunDriftRowId>([
-  'research_dose',
   'first_plan_admission',
   'engine_overhead',
   'registry_growth',
@@ -152,14 +148,6 @@ export function materializeClosedLoopDriftFixture(): MaterializedClosedLoopDrift
   }));
   writeJson(runRecordPath(runDir, 'run.json'), state);
   writeJson(runRecordPath(runDir, 'plan_retry_state.json'), evidence.planRetryState);
-  writeJson(runRecordPath(runDir, 'research_journal.json'), evidence.researchJournal);
-  for (const [index, round] of evidence.researchJournal.rounds.entries()) {
-    writeJson(runRecordPath(runDir, `research_round_${index + 1}_no_candidate_consumed.json`), {
-      label: round.label,
-      outcome: round.outcome,
-      dose_minutes: evidence.historical.doseMinutes[index],
-    });
-  }
   writeFileSync(runRecordPath(runDir, 'events.jsonl'), `${evidence.events.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf-8');
   writeFileSync(runRecordPath(runDir, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
 

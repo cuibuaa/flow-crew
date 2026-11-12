@@ -1,3 +1,5 @@
+import { researchAuthorContext } from '../../research-measurement.js';
+import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { runRecordPath } from '../../run-layout.js';
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
 import { type StageConfig } from '../sched_admission/configuration.js';
@@ -37,12 +39,16 @@ export function appendResearchPathContract(
   _terminalStates: TerminalStatesConfig | undefined,
   directory?: string,
 ): string {
-  if (!research?.measurement) return prompt;
-  return `${prompt}\n\n# Engine-owned measurement loop\n`
-    + `Candidate roots: ${research.measurement.candidate.join(', ')}. Frozen roots: ${research.measurement.frozen.join(', ')}. `
-    + `Submit a content change and producer notes (hypothesis, files_changed, property_evidence); unchanged content is no candidate. `
-    + `Review judges candidate properties only. Read ${directory ? runRecordPath(directory, 'research_measurement/state.json') : 'engine/research_measurement/state.json'} for previous engine measurements. `
-    + `The engine alone measures, applies guards and held-out allowance, restores the best, and writes terminal reports. Stages never run the instrument or write terminal reports.`;
+  if (research?.protocol !== RESEARCH_PROTOCOL) return prompt;
+  return `${prompt}\n\n# Frozen project instrument\n`
+    + `Candidate roots: ${research.candidate.join(', ')}. Frozen instrument/config roots: ${research.frozen.join(', ')}. `
+    + `Submit a content change; unchanged content is no candidate. Your ordinary stage result is advisory and cannot decide keep or reject. `
+    + `The current incumbent, every prior outcome, complete opaque diagnostics, observations and instrument state are in the read-only record `
+    + `${directory ? runRecordPath(directory, 'research_measurement/state.json') : 'engine/research_measurement/state.json'}. `
+    + `Read that record and its referenced requests/results/raw observations before proposing the next candidate. `
+    + `The frozen project instrument decides; the engine restores the incumbent and retains the lossless history. `
+    + `Stages never modify frozen roots or engine records. Project review criteria apply only when explicitly declared.`
+    + (directory ? `\n\nCommitted instrument context (lossless JSON):\n${JSON.stringify(researchAuthorContext(directory))}\n` : '');
 }
 
 export function appendPlannerAdmissionContract(

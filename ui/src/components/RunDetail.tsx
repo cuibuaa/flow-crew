@@ -536,6 +536,18 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         </div>
       </section>
 
+      {run.researchRecord ? (
+        <section className="run-operational-projection" aria-label="Research instrument outcomes">
+          <h2>Research instrument</h2>
+          {run.researchRecord.value ? <>
+            <p>Engine stop: {run.researchRecord.value.engine_stop_reason ?? "running"}</p>
+            <p>Incumbent: {run.researchRecord.value.incumbent.sha256}</p>
+            {run.researchRecord.value.history.map((outcome, index) => <p key={index}>{outcome.phase ?? "submission"} {outcome.round}: {outcome.outcome} — {outcome.reason}</p>)}
+            {run.researchRecord.value.publication ? <p>Publication: {run.researchRecord.value.publication.status}{run.researchRecord.value.publication.error ? ` — ${run.researchRecord.value.publication.error}` : ""}</p> : null}
+            <details><summary>Instrument diagnostics and report records</summary><pre>{JSON.stringify(run.researchRecord.value, null, 2)}</pre></details>
+          </> : <p role="alert">Instrument record unavailable: {run.researchRecord.error ?? "No committed record"}</p>}
+        </section>
+      ) : null}
       {run.operational ? (
         <section className="run-operational-projection" data-testid="operational-projection" aria-label="Operational run projection">
           <div>

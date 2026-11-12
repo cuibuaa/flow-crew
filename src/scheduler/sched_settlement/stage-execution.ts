@@ -9,7 +9,7 @@ import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
-import { stageRecordSchema, RESEARCH_PRODUCER_SCHEMA } from '../../handoff.js';
+import { stageRecordSchema } from '../../handoff.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
@@ -179,9 +179,9 @@ export async function executeSingleStage(
     try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
     const retries = state.stages[stage.id]?.retries ?? 0;
     const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
-    const researchWall = state.research?.measurement ? state.research.stop?.maxWallHours : undefined;
+    const researchWall = state.research?.budget?.wall_seconds;
     if (researchWall !== undefined) prepared.budgetMs = Math.max(1, Math.min(prepared.budgetMs,
-      Math.floor(Date.parse(state.startedAt) + researchWall * 3600000 - Date.now())));
+      Math.floor(Date.parse(state.startedAt) + researchWall * 1000 - Date.now())));
     // Read the failure cause before the running projection clears latest error.
     const retryPreamble = retries > 0
       ? buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)
@@ -200,8 +200,8 @@ export async function executeSingleStage(
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
-      outputSchema: state.research?.measurement && !stage.is_gate ? RESEARCH_PRODUCER_SCHEMA : stageRecordSchema({ isGate: stage.is_gate,
-        criterionRefs: stage.criterion_refs, extendedVerdict: !state.research?.measurement && Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
+      outputSchema: stageRecordSchema({ isGate: stage.is_gate,
+        criterionRefs: stage.criterion_refs, extendedVerdict: !state.research && Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       timeout_ms: prepared.budgetMs,
@@ -231,7 +231,7 @@ export async function executeSingleStage(
       throw new StageAttemptSettlementError(stage.id, readStageStatus(projectDir, runId, stage.id).attempts!.at(-1)!.index, new Error(result.friendlyError));
     }
     state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
-    if (decision === 'retry' && (researchWall === undefined || Date.now() - Date.parse(state.startedAt) < researchWall * 3600000)) {
+    if (decision === 'retry' && (researchWall === undefined || Date.now() - Date.parse(state.startedAt) < researchWall * 1000)) {
       state.stages[stage.id] = rependStageStatus(state.stages[stage.id], retries + Number(result.endingCause !== 'process_death'), state.stages[stage.id].error);
       writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
       writeRunState(projectDir, runId, state);
