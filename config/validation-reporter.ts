@@ -14,7 +14,7 @@ export default class ValidationReporter extends JsonReporter {
     const report: JsonTestResults = JSON.parse(bytes);
     await super.writeReport(JSON.stringify({ complete: this.complete,
       numTotalTests: report.numTotalTests, numFailedTests: report.numFailedTests, numPassedTests: report.numPassedTests,
-      numFailedTestSuites: report.numFailedTestSuites, snapshot: { failure: report.snapshot.failure },
+      numFailedTestSuites: report.numFailedTestSuites, numPendingTests: report.numPendingTests, numTodoTests: report.numTodoTests, snapshot: { failure: report.snapshot.failure },
       testResults: report.testResults.map(({ name, status, message, assertionResults }) => ({ name, status, message,
         assertionResults: assertionResults.map(({ fullName, status, ancestorTitles }) => ({ status,
           ...(status === 'failed' ? { fullName, ancestorTitles } : {}) })),

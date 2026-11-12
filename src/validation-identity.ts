@@ -17,6 +17,7 @@ export const FailureReadingSchema = z.object({
 
 export type FailureReading = z.infer<typeof FailureReadingSchema>;
 export interface IdentityFacts {
+  totals?: { tests: number; passed: number; failed: number; pending: number | null; todo: number | null; files: number };
   failureFiles?: string[];
   count?: number;
   testsRun?: number;
@@ -61,7 +62,7 @@ const VitestReport = z.object({
   }).strict()),
 }).strict();
 
-export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string, failed?: boolean): FailureReading & { files: string[] } {
+export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string, failed?: boolean): FailureReading & { files: string[]; totals: NonNullable<IdentityFacts['totals']> } {
   if (format !== 'vitest-json') throw new Error('Unsupported structured reporter');
   const report = VitestReport.parse(JSON.parse(bytes));
   if (failed !== undefined && report.success !== undefined && report.success === failed) {
@@ -96,7 +97,8 @@ export function decodeRunnerReport(bytes: string, format: 'vitest-json', project
     && report.testResults.every(suite => !suite.message?.length
       && (suite.status !== RUNNER_FAILURE_STATUS || suite.assertionResults.some(test => test.status === RUNNER_FAILURE_STATUS)))
     && (report.numFailedTestSuites === undefined || report.numFailedTestSuites === accountedSuites.size);
-  return { ...FailureReadingSchema.parse({ version: 1, testsRun: report.numPassedTests + report.numFailedTests, complete, failures }), files };
+  return { ...FailureReadingSchema.parse({ version: 1, testsRun: report.numPassedTests + report.numFailedTests, complete, failures }), files, totals: { tests: report.numTotalTests, passed: report.numPassedTests, failed: report.numFailedTests,
+    pending: report.numPendingTests ?? null, todo: report.numTodoTests ?? null, files: report.testResults.length } };
 }
 
 export function identityFacts(reading: unknown, owner: IdentityFacts['owner'], failed: boolean, truncated = false): IdentityFacts {

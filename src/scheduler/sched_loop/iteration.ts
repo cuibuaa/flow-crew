@@ -1,3 +1,4 @@
+import { validateSettledTree } from '../sched_settlement/gate-validation.js';
 import { settleDecisions, reconcileDecisionEvents } from './decisions.js';
 // Boundary: Advance one admitted DAG until quiescence, park or terminal state; planner admission and ordinary batch execution own their independent loops.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
@@ -50,6 +51,7 @@ export async function executeIteration(
     // this iteration. The outer loop owns the finite continuation budget.
     if (Object.values(state.stages).some(isContinuingStage)) return state;
 
+    if (!await validateSettledTree(projectDir, runId)) return readRunState(projectDir, runId);
     state = settleDecisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
     if (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status)) return state;
     if (state.decisionGraph?.replan) injectedDispatchStages.delete(state.decisionGraph.replan.stageId);

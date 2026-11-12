@@ -2,13 +2,12 @@ import type { EndingCause } from '../attempt-ending.js';
 import { appendFileSync, mkdirSync } from '../engine-fs.js';
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
 
 import { dirname } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { runDir, updateRunState, type StageContinuation, type AttemptTerminationCause } from '../store.js';
 import { createInvocationScratch } from '../invocation-scratch.js';
-import { linuxProcessStartTimeTicks, processGroupIsAlive, processStartToken } from '../process-liveness.js';
+import { processGroupIsAlive, processStartToken } from '../process-liveness.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
@@ -40,25 +39,45 @@ export function reportRunProcessProgress(projectDir: string, runId: string): voi
 
 /** Keep the existing detached command groups, but bind them before execution.
  * Deleting the boot restriction alone cannot exclude orphan writers. The pipe
- * gate closes the spawn/publication crash window without another supervisor or
- * a process registry: ownership lives in the existing engine checkpoint. */
-function spawnRunCommand(command: string, args: string[], options: SpawnOptions): ChildProcess {
+ * gate closes the spawn/publication crash window, including raw-command
+ * supervision: ownership lives in the existing engine checkpoint. */
+function spawnRunCommand(command: string, args: string[], options: SpawnOptions, supervise = false): ChildProcess {
   const owner = runOwner.getStore();
-  if (!owner || process.platform === 'win32') return spawn(command, args, options);
+  if ((!owner && !supervise) || process.platform === 'win32') return spawn(command, args, options);
   if (!Array.isArray(options.stdio)) throw new Error('RUN_PROCESS_STDIO: owned commands require explicit descriptors');
-  const child = spawn('/bin/sh', ['-c', 'read -r ready <&3 || exit 125; exec 3<&-; exec "$@"', 'flowcrew-command', command, ...args], {
+  const child = spawn(supervise ? '/usr/bin/python3' : '/bin/sh', supervise
+    ? ['-I', '-S', '-B', '-c', commandSupervisor, command, ...args]
+    : ['-c', 'read -r ready <&3 || exit 125; exec 3<&-; exec "$@"', 'flowcrew-command', command, ...args], {
     ...options, stdio: [...options.stdio, 'pipe'],
   });
-  const gate = child.stdio[3] as import('node:stream').Writable;
+  const gate = child.stdio[3] as import('node:stream').Duplex;
   gate.on('error', () => {});
   try {
     // Enclosing runs must retire every nested consumer before recovering their
     // interrupted stage. Publish all ownership before opening the existing gate.
-    if (child.pid) for (const enclosing of owner.owners) updateRunState(enclosing.projectDir, enclosing.runId, state => {
+    if (child.pid) for (const enclosing of owner?.owners ?? []) updateRunState(enclosing.projectDir, enclosing.runId, state => {
       if (!state.engineCheckpoint?.processes || state.engineCheckpoint.pid !== process.pid) throw new Error('RUN_PROCESS_OWNER_CHANGED: command requires the current checkpoint');
-      state.engineCheckpoint.processes.push({ pid: child.pid!, processStart: processStartToken(child.pid!) });
+      state.engineCheckpoint.processes.push({ pid: child.pid!, processStart: processStartToken(child.pid!), ...(supervise ? { supervised: true } : {}) });
     });
-    gate.end('start\n');
+    if (supervise) {
+      // The supervisor retains all adopted descendants. Publish the command
+      // identity too, before its execution gate opens, for existing observers.
+      let identity = '';
+      gate.on('data', bytes => {
+        identity += bytes.toString();
+        if (!identity.endsWith('\n')) return;
+        const pid = Number(identity.trim());
+        try {
+          if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('RUN_PROCESS_IDENTITY_INVALID');
+          for (const enclosing of owner?.owners ?? []) updateRunState(enclosing.projectDir, enclosing.runId, state => {
+            if (state.engineCheckpoint?.pid !== process.pid) throw new Error('RUN_PROCESS_OWNER_CHANGED');
+            state.engineCheckpoint.processes!.unshift({ pid, processStart: processStartToken(pid) });
+          });
+          gate.end('exec\n');
+        } catch { gate.end(); child.kill('SIGTERM'); }
+      });
+      gate.write('start\n');
+    } else gate.end('start\n');
   } catch (error) {
     gate.end();
     child.kill('SIGKILL');
@@ -477,52 +496,78 @@ export function execWithStdin(
   });
 }
 
-/** Raw command owner. Remember Linux descendants while ancestry is observable,
- * including workers that create their own session and later lose their parent. */
+/** A subreaper replaces sampled ancestry: even a fast setsid/double-fork worker
+ * stays owned after its command leader or controller exits. The checkpointed
+ * supervisor lives until every child is reaped, and TERM retires adopted children. */
+const commandSupervisor = String.raw`
+import ctypes, os, signal, sys, time
+if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'subreaper unavailable')
+stopping = False
+def stop(signum, frame):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+gate = os.fdopen(3, 'r+b', buffering=0)
+if gate.readline() != b'start\n': sys.exit(125)
+reader, writer = os.pipe()
+primary = os.fork()
+if primary == 0:
+    os.close(writer)
+    gate.close()
+    os.setsid()
+    if os.read(reader, 1) != b'x': os._exit(125)
+    os.close(reader)
+    # CPython starts with SIGPIPE/SIGXFZ/SIGXFSZ ignored; ignored dispositions
+    # survive exec, so restore every one this interpreter may have changed.
+    for restored in ('SIGTERM', 'SIGINT', 'SIGPIPE', 'SIGXFZ', 'SIGXFSZ'):
+        if hasattr(signal, restored): signal.signal(getattr(signal, restored), signal.SIG_DFL)
+    try: os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
+    except OSError as error:
+        print(str(error), file=sys.stderr, flush=True)
+        os._exit(127)
+os.close(reader)
+gate.write((str(primary) + '\n').encode())
+if gate.readline() == b'exec\n': os.write(writer, b'x')
+else: stopping = True
+os.close(writer)
+gate.close()
+result = 125
+while True:
+    if stopping:
+        # Only our unreaped children are signalled. Killing a parent adopts its
+        # children here; repeat until waitpid proves there are no consumers.
+        with open('/proc/self/task/%d/children' % os.getpid()) as children:
+            for child in children.read().split():
+                try: os.kill(int(child), signal.SIGKILL)
+                except ProcessLookupError: pass
+    try: pid, status = os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError: break
+    if pid == primary: result = os.waitstatus_to_exitcode(status)
+    if pid == 0: time.sleep(0.01)
+if stopping: result = -signal.SIGTERM
+if result < 0:
+    # End by the command's own signal. KILL and STOP accept no disposition.
+    try: signal.signal(-result, signal.SIG_DFL)
+    except (OSError, ValueError): pass
+    os.kill(os.getpid(), -result)
+sys.exit(result)
+`;
+
 export function spawnOwnedCommand(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) {
   const environment = commandEnvironment(options.env);
   let child: ChildProcess;
   try {
-    child = spawnRunCommand(command, args, { ...options, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawnRunCommand(command, args, { ...options, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }, process.platform === 'linux');
   } catch (error) { environment.cleanup(); throw error; }
-  const owned = new Map<number, string>();
-  if (process.platform === 'linux' && child.pid) {
-    const token = linuxProcessStartTimeTicks(child.pid);
-    if (token) owned.set(child.pid, token);
-  }
-  const rememberDescendants = (): void => {
-    for (const [pid, token] of owned) {
-      if (linuxProcessStartTimeTicks(pid) !== token) continue;
-      try {
-        for (const tid of readdirSync(`/proc/${pid}/task`)) {
-          const children = readFileSync(`/proc/${pid}/task/${tid}/children`, 'utf8').trim();
-          for (const value of children.split(/\s+/)) {
-            const descendant = Number(value);
-            if (!Number.isSafeInteger(descendant) || descendant <= 0) continue;
-            const stat = readFileSync(`/proc/${descendant}/stat`, 'utf8');
-            const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
-            // Verify both the current parent link and its identity before
-            // granting authority; a stale children list cannot bind a reused PID.
-            if (Number(fields[1]) === pid && fields[19] && linuxProcessStartTimeTicks(pid) === token) owned.set(descendant, fields[19]);
-          }
-        }
-      } catch { /* exited or ancestry unavailable; never infer ownership */ }
-    }
-  };
-  const ancestry = process.platform === 'linux' ? setInterval(rememberDescendants, 50) : undefined;
-  ancestry?.unref();
-  const stop = (): void => {
-    rememberDescendants();
-    clearInterval(ancestry);
-    for (const [pid, token] of [...owned].reverse()) {
-      if (pid === child.pid || linuxProcessStartTimeTicks(pid) !== token) continue;
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
-    }
-    if (child.pid && owned.has(child.pid)) {
-      const current = linuxProcessStartTimeTicks(child.pid);
-      if (current !== undefined && current !== owned.get(child.pid)) return;
-    }
-    try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* already closed */ }
+  const retired = new Promise<void>(resolve => child.once('close', () => resolve()));
+  const stop = (): Promise<void> => {
+    if (process.platform === 'linux' && (child.exitCode !== null || child.signalCode !== null)) return retired;
+    try { if (process.platform === 'linux') child.kill('SIGTERM');
+      else if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL'); } catch { /* already closed */ }
+    return retired;
   };
   child.once('close', stop);
   child.once('close', environment.cleanup);

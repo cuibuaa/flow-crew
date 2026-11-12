@@ -1,7 +1,7 @@
 import { runRecordPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
-import { projectValidationResult, validationDispositions } from '../../project-validation.js';
+import { projectValidationResult } from '../../project-validation.js';
 import { assessFindings, AuditFindingsSchema, projectLegacyFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
@@ -112,15 +112,12 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const regressions = currentValidationRegressions(projectDir, runId);
   findings.confirmed.push(...regressions);
   const results = currentValidationResults(projectDir, runId);
-  const dispositions = validationDispositions(results, document.value.validation_review);
-  const caused = dispositions.filter(entry => entry.disposition === 'caused_by_change');
   const validation = results.map(result => ({
-    role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed,
+    role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, totals: result.totals, testsRun: result.testsRun, failureCount: result.failureCount, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed,
     load: result.load, sourceBound: result.sourceBound, storedState: result.storedState ?? result.state, ...projectValidationResult(result),
-    disposition: dispositions.find(entry => entry.role === result.role && entry.display === result.display)?.disposition,
   }));
   const unverified = validation.filter(result => result.measurement === 'unverified');
-  const validationNote = unverified.length ? ` Validation unverified: ${unverified.map(result => `${result.display ?? result.role} (exit ${result.exitCode ?? 'absent'}, ${result.disposition ?? 'unknown'})`).join('; ')}.` : '';
+  const validationNote = unverified.length ? ` Validation unverified: ${unverified.map(result => `${result.display ?? result.role} (exit ${result.exitCode ?? 'absent'})`).join('; ')}.` : '';
   const { findings: _findings, validation: _validation, ...authored } = verdict;
   // Rejections survive review-depth changes. Effective acceptance binds a
   // closure to its reviewed tree, so later independent work cannot reopen it.
@@ -131,6 +128,9 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
     && entry.status === STAGE_STATUS.COMPLETE && entry.exitCode === 0 && state?.decisionGraph?.records.some(record => record.gateAccepted === true
       && record.key === `${record.iteration}/${entry.stageId}/${entry.attemptIndex}/${entry.attemptStartedAt}`));
   const closureFailed = required.some(finding => {
+    if (finding.record.validationRecord !== undefined) {
+      return results.length === 0 || results.some(result => projectValidationResult(result).state !== 'passed');
+    }
     const original = ledger.find(entry => entry.sequence === finding.record.sequence);
     const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence).at(-1);
     return original?.kind !== 'command' || !original.context || closure?.kind !== 'command' || closure.owner !== 'code'
@@ -138,9 +138,9 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
       || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
       || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
   });
-  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${regressions.length ? ` Confirmed validation regression: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${validationNote}${caused.length ? ` Independent gate attributes failure to the change: ${caused.map(entry => entry.display).join(', ')}.` : ''}`;
-  return { ...authored, ...(regressions.length ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Candidate-alone failure and passing identical base-alone reproduction' } } : {}),
-    ...(closureFailed || caused.length || regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
+  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${validationNote}`;
+  return { ...authored, ...(regressions.length && !authored.repairability ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Completed engine validation has a nonzero command exit' } } : {}),
+    ...(closureFailed || regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
     ...(parsed.success || regressions.length ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
 
 }

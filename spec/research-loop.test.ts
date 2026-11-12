@@ -35,6 +35,8 @@ import { once } from 'node:events';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, LAUNCH_INTENT_TTL_MS } from '../src/run-lock.js';
+import { readEvidence, captureProjectTree, validationForTree } from '../src/evidence-ledger.js';
+import * as validationOwner from '../src/project-validation.js';
 
 const agents = join(import.meta.dirname, '../config/agents');
 const delivered = JSON.stringify({ status: 'delivered', summary: 'Advisory author note: keep -999999; claimed measurement 1.', caveats: [], remaining_work: [], blocks: null });
@@ -67,6 +69,91 @@ async function run(text: string, adapter: ScriptedAdapter) {
 }
 
 describe('versioned declaration-owned research loop', () => {
+  it('engine-runs-it: research report publication cannot inherit validation from an earlier tree', async () => {
+    const text = brief(config => { config.budget.invocation_seconds = 30; config.publication = 'report.md'; });
+    mkdirSync(join(project, 'config'));
+    writeFileSync(join(project, 'check.cjs'), "process.exit(require('node:fs').existsSync('report.md')?7:0);");
+    writeFileSync(join(project, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.cjs'] } } }));
+    const { state, directory } = await run(text, proposal(200));
+    expect(existsSync(join(project, 'report.md'))).toBe(true);
+    const records = readEvidence(directory).filter(entry => entry.kind === 'validation');
+    expect(records).toHaveLength(2); expect(records.every(record => record.pass)).toBe(true);
+    expect(validationForTree(records, captureProjectTree(project, text, directory).hash!)).toBeUndefined();
+    expect(state.status).toBe('incomplete'); expect(state.reasonCode).toBe('validation_unresolved');
+    expect(state.validation?.map(command => command.exitCode)).toEqual([null]);
+    expect(readRunState(project, state.runId).validation).toEqual(state.validation);
+  });
+
+  it('engine-runs-it: a restored research baseline requires its own completed validation for acceptance', async () => {
+    const text = brief(config => { config.budget.invocation_seconds = 30; delete config.publication; });
+    mkdirSync(join(project, 'config'));
+    writeFileSync(join(project, 'check.cjs'), "process.exit(JSON.parse(require('node:fs').readFileSync('candidate.json','utf8')).value===200?0:7);");
+    writeFileSync(join(project, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.cjs'] } } }));
+    const { state, directory } = await run(text, proposal(200));
+    expect(read(join(project, 'candidate.json')).value).toBe(100);
+    expect(state.status).toBe('incomplete'); expect(state.reasonCode).toBe('validation_unresolved');
+    expect(state.validation?.map(command => command.exitCode)).toEqual([7]);
+    const records = readEvidence(directory).filter(entry => entry.kind === 'validation');
+    expect(records).toHaveLength(2); expect(records.map(record => record.pass)).toEqual([true, false]);
+    expect(records[1].treeHash).toBe(captureProjectTree(project, text, directory).hash);
+  });
+
+  it('unfinished-is-resource-state: expired research resume settles validation before stopping without another author or review', async () => {
+    const text = brief(config => { config.budget.invocation_seconds = 30; config.budget.wall_seconds = 300;
+      config.review = { role: 'qa', criteria: ['Check candidate value'] }; delete config.publication; });
+    mkdirSync(join(project, 'config'));
+    writeFileSync(join(project, 'check.cjs'), 'process.exit(0);');
+    writeFileSync(join(project, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.cjs'] } } }));
+    setEngineDefaults({ validation_attempts: 1 });
+    const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: null, unfinished: true });
+    const adapter = proposal(80);
+    const { state: parked } = await run(text, adapter);
+    expect(parked.status).toBe('parked');
+    setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
+    const nativeNow = Date.now, clock = vi.spyOn(Date, 'now').mockImplementation(() => nativeNow() + 600_000);
+    const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    let resumed;
+    try { resumed = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, parked.runId, text, true); }
+    finally { clock.mockRestore(); }
+    expect(resumed.status).toBe('incomplete'); expect(resumed.reasonCode).toBe('validation_unresolved');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['produce']);
+    expect(resumed.stages.produce.attempts).toHaveLength(1); expect(resumed.stages.review.attempts ?? []).toHaveLength(0);
+    const records = readEvidence(runDir(project, resumed.runId)).filter(entry => entry.kind === 'validation');
+    expect(records.map(record => record.resourceState)).toEqual(['unfinished', 'complete']);
+    expect(records.at(-1)?.executions.map(execution => execution.commands[0].exitCode)).toEqual([null, 0]);
+  });
+
+  it('unfinished-is-resource-state: resumes a completed author validation before invoking research review', async () => {
+    const text = brief(config => { config.budget.invocation_seconds = 30; config.review = { role: 'qa', criteria: ['Check candidate value'] }; });
+    mkdirSync(join(project, 'config'));
+    writeFileSync(join(project, 'check.cjs'), 'process.exit(0);');
+    writeFileSync(join(project, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.cjs'] } } }));
+    setEngineDefaults({ validation_attempts: 1 });
+    const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: null, unfinished: true });
+    const calls: string[] = [];
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'produce') {
+        writeFileSync(join(project, 'candidate.json'), '{"value":80}');
+        return { output: delivered, exitCode: 0, duration_ms: 1, writes: ['candidate.json'], writeAttribution: 'structured' };
+      }
+      const fact = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
+      expect(fact.resourceState).toBe('complete'); expect(fact.treeHash).toBe(captureProjectTree(project, text, opts.runDir).hash);
+      expect(fact.executions.at(-1)?.commands.map(command => command.exitCode)).toEqual([0]);
+      return { output: verdict(parseBriefFrontmatter(text).research!), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+    } };
+    const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    const execute = (existing?: string) => runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, existing, text, true);
+    const parked = await execute();
+    expect(parked.status).toBe('parked'); expect(calls).toEqual(['produce']);
+    setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
+    const resumed = await execute(parked.runId);
+    expect(resumed.status).toBe('incomplete'); expect(resumed.reasonCode).toBe('validation_unresolved');
+    expect(resumed.validation?.map(command => command.exitCode)).toEqual([null]); expect(calls).toEqual(['produce', 'review']);
+    expect(resumed.stages.produce.attempts).toHaveLength(1); expect(resumed.stages.review.attempts).toHaveLength(1);
+    const fact = readEvidence(runDir(project, resumed.runId)).filter(entry => entry.kind === 'validation').at(-1)!;
+    expect(fact.executions).toHaveLength(2);
+  });
   it('runs initialize → keep → reject with stop → finalize, publishes the project report and restores best', async () => {
     const text = brief(config => { config.budget.max_rounds = 5; config.budget.wall_seconds = 300; });
     const contexts: any[] = [];

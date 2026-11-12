@@ -1,5 +1,5 @@
 import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
-import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
+import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence, validateSettledTree } from '../sched_settlement/gate-validation.js';
 // Run serialized shared-tree authors and settle each closed attempt.
 import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
 import { attemptEventFields, recordRunEvent, recordStageOutcome } from "../../run-events.js";
@@ -180,6 +180,7 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
 
 /** Both ordinary and repair waves bind validation and publish the same gate result. */
 export async function settleStageGroup(projectDir: string, runId: string, stages: StageConfig[]): Promise<void> {
+  if (!await validateSettledTree(projectDir, runId)) return;
   for (const stage of stages.filter(stage => stage.is_gate)) {
     const status = readStageStatus(projectDir, runId, stage.id);
     if (status.status !== STAGE_STATUS.COMPLETE && status.status !== STAGE_STATUS.FAILED) continue;

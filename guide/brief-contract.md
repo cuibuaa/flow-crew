@@ -152,7 +152,15 @@ still apply.
 `{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
 extra fields and control characters refuse parsing. Without declarations, setup discovers
 commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
-baseline and comparison semantics. Do not replace the full configured suite with a subset.
+command selection semantics. Do not replace the full configured suite with a subset.
+The engine validates settled author and repair trees outside author budgets. One completed
+record per content hash supplies every review and gate with direct exits and structured
+reporter totals. All zero exits accept validation; any nonzero exit rejects. Unfinished
+executions retry within engine `validation_attempts` and `validation_timeout_ms` limits;
+exhaustion parks the run without spending a review or repair round. The store-wide FIFO
+uses engine `validation_concurrency` and `validation_priority` (niceness), across daemon
+scheduler processes. Resume reuses completed records and preserves spent resource attempts.
+Authors run related tests and end their invocation; they never run or poll full validation.
 
 Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/cli-ship-setup.ts),
 [validation discovery](../src/project-validation.ts).

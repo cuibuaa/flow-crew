@@ -10,7 +10,7 @@ import { readRunValidationBaseline } from '../../src/scheduler/sched_settlement/
  * executes a command or extracts identity from output. Real execution/count,
  * reporter/model reading and base isolation live in evidence-ledger.test.ts. */
 export function seedAttemptValidation(projectDir: string, runId: string, current: ValidationCommandResult[],
-  options: { stageId?: string; baseline?: ProjectValidationBaseline; delta?: ValidationDeltaResult[] } = {}) {
+  options: { validationVersion?: number; stageId?: string; baseline?: ProjectValidationBaseline; delta?: ValidationDeltaResult[] } = {}) {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   if (!plan) throw new Error('Fixture needs a validation declaration');
   const stageId = options.stageId ?? 'author';
@@ -21,7 +21,7 @@ export function seedAttemptValidation(projectDir: string, runId: string, current
   let brief = ''; try { brief = readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { /* consumer-only fixture */ }
   const tree = captureProjectTree(projectDir, brief);
   const delta = options.delta ?? evaluateValidationDelta(options.baseline ?? plan.baseline, current);
-  return appendEvidence(base, { kind: 'validation', validationVersion: VALIDATION_FACT_VERSION, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
+  return appendEvidence(base, { kind: 'validation', resourceState: (options.validationVersion ?? VALIDATION_FACT_VERSION) < VALIDATION_FACT_VERSION ? undefined : current.every(result => Number.isInteger(result.exitCode) && !result.unfinished) ? 'complete' : 'unfinished', validationVersion: options.validationVersion ?? VALIDATION_FACT_VERSION, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
     treeHash: tree.hash, executions: [{ target: 'attempt', cwd: projectDir, treeHash: tree.hash, treeAfterHash: tree.hash,
       commands: current.map(result => ({ ...result, ...plan.baseline.discovery.commands.find(command => command.role === result.role && (command.display === result.display || !result.display)), command: 'declared-fixture', args: [] })) }],
     delta, failures: [], pass: current.length > 0 && evaluateValidationDelta(undefined, current).every(entry => entry.state === 'verified') });

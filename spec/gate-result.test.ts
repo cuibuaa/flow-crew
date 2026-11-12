@@ -57,7 +57,7 @@ function writeVerdict(verdict: Record<string, unknown>): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = true): void {
+function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = true, validationVersion?: number): void {
   const baselineBytes = JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: {
     version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [{ role: 'test', command: 'fixture', args: [], display: 'npm run test' }], missingRoles: [] }, results: [], gateCriteria: [],
   } });
@@ -65,7 +65,7 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
   const reason = state === 'unresolved'
     ? 'Green baseline no longer passes, but current failure identity/count is unavailable'
     : state === 'regression' ? 'A green baseline no longer passes' : 'Green baseline remains green';
-  const fact = seed ? seedAttemptValidation(projectDir, runId, [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed', exitCode: state === 'pass' ? 0 : 1, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' }], { delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
+  const fact = seed ? seedAttemptValidation(projectDir, runId, [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed', exitCode: state === 'unresolved' ? null : state === 'pass' ? 0 : 1, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' }], { validationVersion, delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
   writeFileSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
     treeHash: captureProjectTree(projectDir).hash, ...(fact ? { ledgerSequence: fact.sequence } : {}),
     version: 2, stageId: gateId, checkedAt: completedAt, pass: state === 'pass',
@@ -73,7 +73,7 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
     attemptIndex: 1, attemptStartedAt: startedAt, attemptCompletedAt: completedAt,
     executionId: validationExecutionId(runId, gateId, 1, startedAt, completedAt),
     current: [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed',
-      exitCode: state === 'pass' ? 0 : 1, durationMs: 1, output: '',
+      exitCode: state === 'unresolved' ? null : state === 'pass' ? 0 : 1, durationMs: 1, output: '',
       failureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [],
       failureIdentity: state === 'unresolved' ? 'unknown' : state === 'pass' ? 'none' : 'known' }],
     delta: [{ role: 'test', display: 'npm run test', state, reason,
@@ -170,8 +170,8 @@ describe('settled gate results', () => {
     expect(row.terminalStudyComplete).toBe(true);
   });
 
-  it('blocks acceptance on an independent causal disposition without changing the completed process result', () => {
-    const verdictSha256 = writeVerdict({ pass: true, reason: 'The independent gate attributes the failed test to the change', validation_review: { commands: [{ role: 'test', display: 'npm run test', disposition: 'caused_by_change', reason: 'Independent product comparison' }], request_base: [] } });
+  it('blocks acceptance on a completed nonzero exit without changing the completed process result', () => {
+    const verdictSha256 = writeVerdict({ pass: true, reason: 'Independent product comparison passed' });
     writeValidation('regression');
     settleGateEvaluation(projectDir, runId, gateId);
     const status = readStageStatus(projectDir, runId, gateId);
@@ -179,7 +179,7 @@ describe('settled gate results', () => {
       attempts: [{ status: 'complete', exitCode: 0 }],
       gate: { pass: false, kind: 'audit_findings', verdictSha256, refusal: { kind: 'audit_findings' } } });
     expect(classifyGateRecoveryFact(gateId, { pass: true }, status.gate!).rejectionKind)
-      .toBe('engine_contract_or_evidence_rejection');
+      .toBe('repairable_failure');
   });
 
   it('retains unknown evidence without vetoing an independent acceptance or relabeling validation as passing', () => {
@@ -209,7 +209,7 @@ describe('settled gate results', () => {
   });
 
   it.each(['pass', 'regression'] as const)('retains a settled %s decision when the authored and validation aliases change', initial => {
-    const verdictSha256 = writeVerdict({ pass: true, reason: 'Original authored bytes', ...(initial === 'regression' ? { validation_review: { commands: [{ role: 'test', display: 'npm run test', disposition: 'caused_by_change', reason: 'Independent product comparison' }], request_base: [] } } : {}) });
+    const verdictSha256 = writeVerdict({ pass: true, reason: 'Original authored bytes' });
     writeValidation(initial);
     settleGateEvaluation(projectDir, runId, gateId);
     const original = readStageStatus(projectDir, runId, gateId).gate;
@@ -268,13 +268,13 @@ describe('settled gate results', () => {
 
   it.each(['validation_regression', 'validation_unresolved'] as const)('reads a kind-only historical %s as facts without overriding the independent gate', kind => {
     const digest = writeVerdict({ pass: true, reason: 'Independent acceptance of the unverified command' });
-    writeValidation('regression');
+    writeValidation('regression', true, 3);
     const status = readStageStatus(projectDir, runId, gateId);
     status.gate = { pass: false, kind, verdictSha256: digest, reason: 'Historical code-owned validation veto' };
     writeStageStatus(projectDir, runId, gateId, status);
     const verdict = readGateEvaluation(projectDir, gateId, runId)!;
     expect(verdict.pass).toBe(true);
-    expect(verdict.validation?.[0]).toMatchObject({ exitCode: 1, measurement: 'unverified', disposition: 'unknown' });
+    expect(verdict.validation?.[0]).toMatchObject({ exitCode: 1, measurement: 'unverified' });
     expect(readStageStatus(projectDir, runId, gateId).gate?.pass).toBe(false);
   });
 
@@ -358,11 +358,11 @@ describe('stage group settlement boundaries', () => {
     expect(f.executed).toEqual(['first', gateId, 'deferred']);
     expect(readFileSync(join(projectDir, 'product.ts'), 'utf8')).toBe('regressed');
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
-      gate: { pass: true, kind: 'pass' } });
-    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: true, kind: 'pass' });
+      gate: { pass: false, kind: 'audit_findings' } });
+    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: false, kind: 'audit_findings' });
     const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
     expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
-    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: true, kind: 'pass' });
+    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'audit_findings' });
     expect(f.bind).toHaveBeenCalledOnce();
     expect(f.retry).toHaveBeenCalledOnce();
     expect(f.commands).toHaveBeenCalledOnce();
@@ -371,7 +371,7 @@ describe('stage group settlement boundaries', () => {
 });
 
 describe('validation at the review boundary', () => {
-  it.each(['repaired', 'exhausted', 'launch_error'] as const)('vetoes confirmed failures and retains their failed closure; launch gaps stay unverified: %s', async outcome => {
+  it.each(['repaired', 'exhausted', 'launch_error'] as const)('rejects nonzero exits, validates changed repair trees, and parks unfinished resources: %s', async outcome => {
     for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
@@ -397,34 +397,39 @@ describe('validation at the review boundary', () => {
     const workflow = WorkflowConfigSchema.parse({ name: 'validation-review',
       defaults: { max_iterations: 2, max_retries: 0 },
       stages: [
-        { id: 'work', role: 'coder', scope: [], artifact_contract: fixtureArtifactContract('work') },
+        { id: 'work', role: 'coder', scope: ['product.txt'], artifact_contract: fixtureArtifactContract('work') },
         { id: gateId, role: 'qa', scope: [], depends_on: ['work'], is_gate: true,
           artifact_contract: fixtureArtifactContract(gateId, true) },
-        { id: 'repair', role: 'coder', scope: [], depends_on: [gateId], retry_to: [gateId],
+        { id: 'repair', role: 'coder', scope: ['product.txt'], depends_on: [gateId], retry_to: [gateId],
           artifact_contract: fixtureArtifactContract('repair') },
       ],
     });
-    const adapter = new ScriptedAdapter({ work: { output: 'Work completed' },
+    const adapter = new ScriptedAdapter({ work: { output: 'Work completed', projectFiles: { 'product.txt': 'bad' } },
       [gateId]: { output: 'Independent review accepted', runFiles: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'Semantic review passed' }) } },
-      repair: { output: 'Repair the missing fixture' },
+      repair: { output: 'Repair the missing fixture', ...(outcome === 'repaired' ? { projectFiles: { 'product.txt': 'good' } } : {}) },
       _summary: { output: 'summary' },
     });
     const final = await runWorkflow(workflow, '', projectDir, adapter, new Map(), undefined, join(import.meta.dirname, '..', 'config', 'agents'), undefined,
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
     const confirmed = outcome !== 'launch_error';
-    expect(final.status, final.failureReason).toBe(confirmed ? 'incomplete' : 'complete');
-    expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0, gate: { pass: !confirmed, kind: confirmed ? 'audit_findings' : 'pass' } });
-    expect(repairs).toHaveLength(confirmed ? 3 : 0);
-    expect(commands).toHaveBeenCalledTimes(confirmed ? 3 : 1);
-    if (confirmed) {
-      const ledger = readEvidence(runDir(projectDir, final.runId));
-      expect(final.stages[gateId].gate?.findings?.confirmed).toHaveLength(1);
-      // The fixture's actual reproduction is process.exit(1). A mock claiming
-      // repair cannot change its source tree or close that failing command.
-      expect(ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined).map(entry => entry.kind === 'command' && entry.exitCode)).toEqual([1, 1, 1]);
+    expect(final.status, final.failureReason).toBe(outcome === 'launch_error' ? 'parked' : outcome === 'repaired' ? 'complete' : 'incomplete');
+    const ledger = readEvidence(runDir(projectDir, final.runId));
+    if (!confirmed) {
+      expect(adapter.calls.filter(call => call.stageId === gateId)).toHaveLength(0);
+      expect(repairs).toHaveLength(0);
+      expect(commands).toHaveBeenCalledTimes(3);
+      expect(ledger.filter(fact => fact.kind === 'validation').at(-1)).toMatchObject({ resourceState: 'unfinished', executions: expect.any(Array) });
+      expect(final.stages.work.attempts).toHaveLength(1);
+    } else {
+      expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,
+        gate: { pass: outcome === 'repaired', kind: outcome === 'repaired' ? 'pass' : 'audit_findings' } });
+      expect(repairs).toHaveLength(outcome === 'repaired' ? 1 : 3);
+      expect(commands).toHaveBeenCalledTimes(outcome === 'repaired' ? 2 : 1);
+      // Engine nonzero facts are already reproductions. An unchanged repair
+      // reuses them; only the actual source repair earns a new execution.
+      expect(ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)).toEqual([]);
+      expect(ledger.filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(outcome === 'repaired');
     }
-    expect(final.validation?.every(result => result.measurement === 'unverified')).toBe(true);
-    expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 });

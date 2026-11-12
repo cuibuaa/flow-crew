@@ -3,7 +3,7 @@ import { unlinkSync } from '../../engine-fs.js';
 import { decisionSchema } from '../../decision-graph.js';
 import { decisionInput, focusedReviewInput } from '../../decision-context.js';
 import { adapterInputLimit } from '../../config.js';
-import { confirmedRepairFindings, buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
+import { buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
 // Boundary: Prepare and execute one ordinary stage with admitted prompt/context, shared attempt budgets, session rules and a supplied live write guard.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
@@ -172,7 +172,6 @@ export async function executeOrdinaryStage(
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
         gateContext: { authorIds: fixStageIds ?? gateReviewedAuthorIds(stage, sorted), fixStageIds, roundDiffPath },
-        repairFindings: stage.retry_to && state.gateRetryRound ? confirmedRepairFindings(runDirPath, stage.retry_to, state.gateRetryRound) : [],
         gateReviewed: isGateReviewed(stage, sorted),
         dynamicDispatch: stage.dynamic_dispatch,
         criterionRefs: stage.criterion_refs,

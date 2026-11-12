@@ -256,44 +256,32 @@ A reviewed author's `blocked` answer settles for the gate to confirm or reject; 
 blocked answer fails its stage. A pass still requires every assigned brief criterion, including
 any explicitly permitted negative/blocked report outcome.
 
-Configured validation records facts at successful author/repair settlement. One batch per
-source tree spends at most the smaller of `validation_timeout_ms` (60 seconds by default)
-and the author's remaining budget. Each command receives an equal share of the remaining
-batch time, so a hung build cannot consume the test allowance. If the author has already
-spent its entire budget, commands remain explicitly unrun; a very small allowance may
-expire before useful work. Source binding, integrity setup and cleanup also spend
-batch time. Synchronous filesystem work can delay deadline delivery and leave later
-commands unrun; a subprocess's share does not reserve filesystem throughput. These
-commands stay unverified. Shares apply to selected commands: if a declaration
-combines a build and tests inside one opaque shell program, the engine cannot
-reserve a separate allowance for its inner tests without parsing that program.
-No separate stall detector or load wait runs. Owned commands
-are retired on expiry, including inherited pipes, using the existing process owner.
+Configured validation belongs to the engine after author/repair settlement, outside the
+author invocation and its deadline. Authors run related tests, finish code and deliverables,
+and return; they neither execute full validation nor poll its record. The scheduler requests
+one content-addressed record and reuses every completed result across stages, gates and resume.
 
-Facts include exact executable/argv and the declared non-secret environment map, raw exit (null when absent), bounded output, duration,
-and start/end load. Unavailable load samples are `null` and never discard the command exit. Load is telemetry only. The three raw result states are passed, failed,
-and unverified (unfinished or no completed exit). Coverage is verified only for a completed
-exit 0 without a runner error and with source binding intact; every failed, unfinished or unrun command is unverified.
-Historical receipts retain execution-tree binding, and unresolved inline coverage stays unverified when hashes are unavailable.
-Projection never rewrites stored records. Typed engine-integrity violations still void execution; optional telemetry cannot swallow them.
+Engine configuration declares `validation_timeout_ms`, `validation_attempts`,
+`validation_concurrency` and `validation_priority` (Unix niceness adjustment). A store-wide
+FIFO coordinates separate daemon scheduler processes. Duplicate requests share their tree's
+owner. Each command gets a share of the remaining batch allowance. An opaque command that
+combines build and tests remains one declared command; its text is never parsed.
 
-The independent gate alone decides causation. Its optional `validation_review` has exactly
-`commands` and `request_base` arrays. Each disposition names an exact role/display and has
-`disposition: caused_by_change|already_failing|environment|unknown` plus a reason. Missing,
-invalid, duplicate or unrelated dispositions leave the command unknown and unverified.
-A `caused_by_change` disposition blocks acceptance; the existing independently reproduced,
-confirmed-finding rule still governs repair admission. A base pass or new reporter ID never
-establishes causation in code.
+Records contain tree identities before and after each resource execution, exact executable,
+argv and declared non-secret environment, direct exits (null when absent), bounded output,
+structured reporter totals, duration and load telemetry. All zero completed exits accept;
+any completed nonzero validation rejects and has an engine-record-derived repair finding.
+Output spelling, test IDs, totals, elapsed times, errors from optional reporting and load
+cannot override those exits. Independent review still examines every assigned criterion.
+No candidate confirmation, base suite or model failure-disposition handshake runs.
 
-Only a valid gate `request_base: [{role, display}]` obtains base evidence for unverified
-commands. The engine runs one bounded base batch in an isolated checkout, then returns its
-facts to the same gate attempt for a final verdict. Unavailable base evidence remains unknown;
-no automatic base execution, repeated batch or rule fallback occurs. The gate remains read-only
-with scope `[]`; preparation belongs to declared commands, with no engine-invented dependency
-install. Reusing a tree's facts avoids repeating installs in later stages.
-
-Accepted runs with any unverified command keep that label in gate inputs, run.json and reports;
-validation uncertainty alone neither rejects review nor ends a run incomplete.
+An unfinished batch is engine resource work. The engine retries within its numeric allowance;
+exhaustion parks the run without another author attempt, review verdict or repair round.
+Resume preserves spent resource attempts; completed nonzero records remain rejected.
+Cancellation removes queued requests and retires owned commands. Dead scheduler slots remain
+occupied until their checkpoint-owned commands have retired. Historical record fields remain
+readable; supported complete tree-bound raw receipts can populate the new cache without
+executing again. Projection does not rewrite historical bytes.
 
 Declare project isolation inputs in each command's `env` map (or preserve them in
 the explicitly selected executable/argv). The engine overlays that map on ordinary
@@ -311,8 +299,7 @@ stdout is JSON alone. File reports must be freshly written, remain within the pr
 and fit the 1 MiB evidence bound. Valid, exit-consistent exhaustive reports own failure
 identity even when stdout or stderr also carries human diagnostics. Incomplete suite,
 snapshot or global-error populations remain partial; malformed or exit-inconsistent
-reports remain unknown, without model fallback. Without a declared reporter, failure identity remains unknown. Only the independent gate model judges causation from logs and the diff; no code parser
-classifies introduction. Without any command declaration, the author
+reports remain unknown, without model fallback. Without a declared reporter, failure identity remains unknown. Reporter identity and totals are for readers; they do not classify validation outcomes. Without any command declaration, the author
 model reads the repository and chooses commands via `ValidationSelectionSchema` in its existing result; an empty
 or invalid selection is explicitly unverified, with no discovery fallback.
 This repository declares its test reporter in `config/validation.json`; the reporter

@@ -14,7 +14,7 @@ import { evaluateValidationDelta, projectValidationResult, type ValidationComman
 import type { CommandContext } from './adapters/base.js';
 
 export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
-export const VALIDATION_FACT_VERSION = 3;
+export const VALIDATION_FACT_VERSION = 4;
 export interface TreeFile { path: string; mode: number; content: ContentIdentity; targetContent?: ContentIdentity }
 export interface ProjectTree { hash: string | null; files: TreeFile[]; reason?: string }
 export interface ValidationExecution {
@@ -29,6 +29,8 @@ export interface ValidationExecution {
 }
 export interface ValidationFact {
   kind: 'validation';
+  resourceState?: 'complete' | 'unfinished';
+  recordPath?: string;
   /** Missing/unsupported versions remain readable, but cannot authorize gates. */
   validationVersion?: number;
   stageId: string;
@@ -43,6 +45,12 @@ export interface ValidationFact {
   regressions?: import('./scoped-audit-repair.js').FindingAssessment['confirmed'];
   baseRequest?: { commands: Array<{ role: string; display: string }>; error?: string };
   baseInputSnapshot?: { manifestSha256: string; files: number; bytes: number; durationMs: number; error?: string };
+}
+/** Legacy confirmations are subsets, not replacement batches. Resource retries
+ * in v4 each contain a complete declared batch and use the latest execution. */
+export function validationBatch<T extends Pick<ValidationFact, 'validationVersion' | 'executions'>>(fact: T): T['executions'][number] | undefined {
+  const attempts = fact.executions.filter(execution => execution.target === 'attempt');
+  return fact.validationVersion === VALIDATION_FACT_VERSION ? attempts.at(-1) : attempts.find(execution => !execution.rerun);
 }
 /** Readers project raw receipts without rewriting the append-only ledger.
  * Tree binding remains a separate fact from command outcome/measurement. */
@@ -59,7 +67,7 @@ export function projectValidationFact<T extends ValidationFact>(fact: T) {
         ? { storedState: result.storedState ?? result.state } : {};
       return { ...result, ...provenance, ...projected };
     }) }));
-  const current = executions.find(execution => execution.target === 'attempt')?.commands ?? [];
+  const current = validationBatch({ ...fact, executions })?.commands ?? [];
   const delta = evaluateValidationDelta(undefined, current, undefined, fact.delta);
   // Historical classification/pass labels are provenance only, never inputs
   // to a present judgment. A red-to-red result cannot become verified.
@@ -72,7 +80,7 @@ export function projectValidationDelta<T extends { current: ValidationCommandRes
   if (value.ledgerSequence !== undefined) {
     const fact = readEvidence(base).find(entry => entry.sequence === value.ledgerSequence);
     if (fact?.kind !== 'validation') return undefined;
-    value.current = projectValidationFact(fact).executions.find(execution => execution.target === 'attempt')?.commands ?? [];
+    value.current = validationBatch(projectValidationFact(fact))?.commands ?? [];
   }
   if (!Array.isArray(value.current)) return undefined;
   const current = value.current.filter(Boolean).map(raw => {
@@ -108,6 +116,7 @@ export type EvidenceFact = ValidationFact | {
   reproductionOf?: number;
   /** Reproduction hang allowance; the enclosing attempt may narrow it. */
   timeoutMs?: number;
+  validationRecord?: number;
 } | {
   kind: 'decision'; stageId: string; attemptIndex: number; verdict: Record<string, unknown>; owner: 'closed-schema-model';
 
@@ -149,7 +158,7 @@ export function stagePredecessor(entries: EvidenceEntry[], stageId: string, prev
  * result. Unmatched historical facts remain in the ledger, never current greens. */
 export function validationForTree(entries: EvidenceEntry[], treeHash: string | null) {
   const facts = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation');
-  return treeHash === null ? undefined : facts.filter(fact => fact.treeHash === treeHash).at(-1);
+  return treeHash === null ? undefined : facts.filter(fact => fact.treeHash === treeHash).filter(fact => fact.resourceState === 'complete').at(-1) ?? facts.filter(fact => fact.treeHash === treeHash).at(-1);
 }
 
 /** Identity covers Git's source inventory, plus explicitly declared ignored
@@ -278,7 +287,6 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
     + `Inspect the diff (including untracked additions; any unavailable patch is explicitly marked): ${diffPath}\nChanged-file hashes, including untracked files, are recorded in the ledger's attempt facts.\n`
     + 'Use these facts and current artifacts for every decision. Do not read author transcripts, stage output narratives or provider session history. '
     + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
-    + 'A solely pre-existing configured failure cannot justify repair; unknown identity remains unknown. '
     + 'Independent experiments and every assigned acceptance criterion remain required. Read the complete diff artifact when its excerpt is truncated.\n'
     + (ledgerText.length + selectionText.length + predecessorText.length <= budget ? `Ledger facts:\n${ledgerText}${selectionText}${predecessorText}`
       // All or nothing: a ledger that does not fit the adapter's input limit is named, not clipped.

@@ -6,7 +6,6 @@ import { isolatedProjectCommand } from './test-support/isolated-project-command.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { runShipSetup } from '../src/cli-ship-setup.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { reviewFacts } from '../src/decision-context.js';
@@ -27,8 +26,8 @@ afterEach(() => { for (const root of roots.splice(0)) {
 const engine = resolve(import.meta.dirname, '..');
 
 
-async function fixture(options: { requestBase?: boolean; noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
-  rejectFirstReview?: boolean; returnToFirstTree?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
+async function fixture(options: { noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
+  rejectFirstReview?: boolean; returnToFirstTree?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ledger-spec-')); roots.push(root);
   const source = join(root, 'source'), target = join(root, 'target'); mkdirSync(source);
   const counter = join(root, 'executions.jsonl');
@@ -45,18 +44,6 @@ console.log(JSON.stringify({complete:true,numTotalTests:1,numFailedTests:fail?1:
 fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');
 console.log('Test Files 1 passed (1)\\nTests 1 passed (1)');
 process.stderr.write('diagnostic '.repeat(10000));`);
-  if (options.suiteError) {
-    const packageURL = import.meta.resolve('vitest/package.json');
-    const cli = fileURLToPath(new URL(JSON.parse(readFileSync(new URL(packageURL), 'utf8')).bin.vitest, packageURL));
-    writeFileSync(join(source, '.gitignore'), 'node_modules\n');
-    writeFileSync(join(source, 'vitest.config.mjs'), "export default {test:{include:['*.test.mjs'],maxWorkers:1}};");
-    writeFileSync(join(source, 'case.test.mjs'), `import {test,expect} from ${JSON.stringify(import.meta.resolve('vitest'))};test('known',()=>expect(1).toBe(2));`);
-    writeFileSync(join(source, 'check.mjs'), `import fs from 'node:fs';import {spawnSync} from 'node:child_process';
-fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');
-const result=spawnSync(process.execPath,[${JSON.stringify(cli)},'run','--config','vitest.config.mjs','--reporter=json'],{encoding:'utf8',timeout:30000});
-const report=JSON.parse(result.stdout);${options.suiteError !== 'unhandled' ? 'report.complete=true;' : ''}
-process.stdout.write(JSON.stringify(report));process.stderr.write(result.stderr??'');if(fs.existsSync('extra.diagnostic'))process.stderr.write(fs.readFileSync('extra.diagnostic'));process.exitCode=result.status??1;`);
-  }
   if (options.input) {
     writeFileSync(join(source, '.gitignore'), 'data/\n'); mkdirSync(join(source, 'data'));
     writeFileSync(join(source, 'data/value.txt'), options.input === 'mixed' ? 'BAD' : 'GOOD');
@@ -91,9 +78,6 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
         opts.onCommandLifecycle?.({ phase: 'started', id: 'unclosed-command', command: 'node interrupted.mjs' });
       }
       for (let i = 1; i <= 3; i++) { writeFileSync(join(target, 'value.txt'), options.unchanged ? 'base\n' : options.introduce ? `introduced ${i}\n` : `write ${i}\n`); writes++; }
-      if (options.suiteError === 'suite') writeFileSync(join(target, 'load.test.mjs'), "throw new Error('new suite startup failure');");
-      if (options.suiteError === 'diagnostic') writeFileSync(join(target, 'extra.diagnostic'), 'opaque project runner diagnostic');
-      if (options.suiteError === 'unhandled') writeFileSync(join(target, 'background.test.mjs'), `import {test} from ${JSON.stringify(import.meta.resolve('vitest'))};test('background',async()=>{setTimeout(()=>{Promise.reject(new Error('unhandled runtime failure'));},0);await new Promise(resolve=>setTimeout(resolve,30));});`);
       if (options.input === 'introduced') writeFileSync(join(target, 'data/value.txt'), 'BAD');
       if (options.input === 'mixed') writeFileSync(join(target, 'data/readme.txt'), 'authored member');
     }
@@ -103,14 +87,6 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
     }
     if (opts.stageId === 'review') {
       const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
-      if (options.requestBase && !prompt.startsWith('# Requested base evidence')) {
-        const fact = readEvidence(opts.runDir).filter((entry): entry is typeof entry & ValidationFact => entry.kind === 'validation').at(-1)!;
-        const failed = fact.executions[0].commands.filter(command => command.exitCode !== 0);
-        if (failed.length && !fact.baseRequest) return { output: JSON.stringify({ pass: true, reason: 'Need base evidence to settle the failure',
-          criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Pending comparison' }])),
-          audit_findings: { version: 1, findings: [] }, validation_review: { commands: [], request_base: failed.map(command => ({ role: command.role, display: command.display })) } }),
-          exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-      }
       reviews++;
       const defect = options.input === 'introduced' ? readFileSync(join(target, 'data/value.txt'), 'utf8') !== 'GOOD'
         : options.introduce ? readFileSync(join(target, 'value.txt'), 'utf8').startsWith('introduced') : false;
@@ -135,7 +111,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'value.txt' } } : {}) }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured', tokens_in: 1, tokens_out: 1 };
     }
-    return { ...await scripted.run(prompt, role, opts), writes: ['value.txt', ...(options.suiteError ? [options.suiteError === 'suite' ? 'load.test.mjs' : options.suiteError === 'diagnostic' ? 'extra.diagnostic' : 'background.test.mjs'] : []),
+    return { ...await scripted.run(prompt, role, opts), writes: ['value.txt',
       ...(options.input === 'introduced' ? ['data/value.txt'] : options.input === 'mixed' ? ['data/readme.txt'] : [])], writeAttribution: 'structured', tokens_in: 1, tokens_out: 1,
       sessionId: '12345678-1234-4234-8234-123456789abc' };
   } };
@@ -157,7 +133,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const [command] = result.validations[0].executions[0].commands;
     expect(command.exitCode).toBe(0);
     expect(Buffer.byteLength(command.output)).toBeLessThanOrEqual(25 * 1024);
-    const output = readFileSync(runRecordPath(result.rd, command.outputPath!), 'utf8');
+    const output = JSON.parse(readFileSync(result.validations[0].recordPath!, 'utf8')).executions[0].commands[0].output;
     expect(output).toBe(command.output);
     expect(output).toContain('earlier bytes omitted');
     expect(Buffer.byteLength(output)).toBeLessThan(command.outputBytes!.stdout + command.outputBytes!.stderr);
@@ -166,68 +142,24 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(command.identityOwner).toBe('unknown');
   });
 
-  it.each(['suite', 'diagnostic', 'unhandled'] as const)('uses structured identity while retaining unrepresented native Vitest %s failures as unknown', async suiteError => {
-    const result = await fixture({ suiteError, requestBase: true });
-    expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(4);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
-    const [fact] = result.validations; expect(fact.pass).toBe(false);
-    for (const execution of fact.executions) expect(execution.treeAfterHash).toBe(execution.treeHash);
-    expect(fact.executions[0].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'diagnostic' ? 'complete' : 'partial', identityOwner: 'runner-json', testsRun: suiteError === 'unhandled' ? 2 : 1 });
-    expect(fact.executions[3].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'unhandled' ? 'partial' : 'complete', identityOwner: 'runner-json' });
-    expect(fact.executions[3].commands[0].outputBytes?.stderr).toBe(0);
-    expect(fact.executions.map(execution => [execution.target, execution.rerun])).toEqual([['attempt', undefined], ['attempt', true], ['base', true], ['base', undefined]]);
-    if (suiteError === 'diagnostic') expect(fact.executions[0].commands[0].outputBytes!.stderr).toBeGreaterThan(0);
-    expect(fact.delta.find(value => value.role === 'test')?.state).toBe('unverified');
-    expect(fact.failures).toEqual([]);
+  it('binds changed ignored inputs and validates their repair once', async () => {
+    const result = await fixture({ input: 'introduced' });
+    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(2);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.executions.map(value => value.input)).toEqual(['BAD', 'GOOD']);
+    expect(result.validations.map(value => value.executions[0].commands[0].exitCode)).toEqual([1, 0]);
+    expect(result.validations[0].treeHash).not.toBe(result.validations[1].treeHash);
+    expect(result.validations[0].failures).toEqual([]);
   });
 
-  it('compares a changed ignored input with its pre-author bytes and enforces introduction before repair', async () => {
-    const result = await fixture({ input: 'introduced', requestBase: true });
-    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(6);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review', 'repair', 'review']);
-    expect(result.executions.map(value => value.input)).toEqual(['BAD', 'BAD', 'GOOD', 'GOOD', 'GOOD', 'GOOD']);
-    expect(result.validations[0].executions.map(value => value.commands[0].exitCode)).toEqual([1, 1, 0, 0]);
-    expect(result.validations[0].executions[2].treeHash).toBe(result.baselineTree.hash);
-    expect(result.validations[0].failures).toEqual([]);
-    expect(result.validations[0].baseInputSnapshot).toMatchObject({ bytes: 4, files: 2, manifestSha256: expect.any(String) });
-  });
-
-  it.each([false, true])('restores ignored descendants and modes without replacing base tracked source or repairing a pre-existing failure (readonly=%s)', async readonlyInput => {
-    const result = await fixture({ input: 'mixed', readonlyInput, requestBase: true });
-    expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(4);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
-    expect(result.executions.map(value => value.input)).toEqual(['BAD', 'BAD', 'BAD', 'BAD']);
-    expect(result.executions.map(value => value.member)).toEqual(['authored member', 'authored member', 'committed member', 'committed member']);
-    expect(result.validations[0].executions.map(value => value.commands[0].exitCode)).toEqual([1, 1, 1, 1]);
-    expect(result.validations[0].executions[2].treeHash).toBe(result.baselineTree.hash);
-    expect(result.validations[0].failures).toEqual([]);
-    expect(result.validations[0].baseInputSnapshot).toMatchObject({ bytes: 3, files: 2 });
+  it.each([false, true])('retains ignored descendant identity and modes without executing a base tree (readonly=%s)', async readonlyInput => {
+    const result = await fixture({ input: 'mixed', readonlyInput });
+    expect(result.final.status).toBe('incomplete');
+    expect(result.executions.every(value => value.cwd === result.target)).toBe(true);
+    expect(result.executions.every(value => value.input === 'BAD' && value.member === 'authored member')).toBe(true);
+    expect(result.validations.every(value => value.executions.length === 1)).toBe(true);
+    expect(result.validations[0].treeHash).not.toBe(result.baselineTree.hash);
     if (readonlyInput) for (const execution of result.executions) expect(execution).toMatchObject({ inputDirectoryMode: 0o555, inputFileMode: 0o640 });
-  });
-
-  it('records the batch, alone confirmation and requested base after three writes; pre-existing alone never repairs', async () => {
-    const result = await fixture({ baseRed: true, requestBase: true });
-    expect(result.final.status).toBe('complete'); expect(result.writes).toBe(3);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
-    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(4);
-    expect(result.executions[0]).toMatchObject({ cwd: result.target, value: 'write 3\n' });
-    expect(result.executions[1]).toMatchObject({ cwd: result.target, value: 'write 3\n' });
-    for (const execution of result.executions.slice(2)) {
-      expect(execution.cwd).not.toBe(result.target); expect(execution.value).toBe('base\n');
-      expect(existsSync(execution.cwd)).toBe(false);
-    }
-    expect(result.validations).toHaveLength(1);
-    const [validation] = result.validations;
-    expect(validation.validationVersion).toBe(VALIDATION_FACT_VERSION);
-    expect(validation.failures).toEqual([]);
-    expect(validation.executions.map(execution => [execution.target, execution.rerun])).toEqual([['attempt', undefined], ['attempt', true], ['base', true], ['base', undefined]]);
-    expect(validation.executions[2].treeHash).toBe(result.baselineTree.hash);
-    expect(validation.regressions ?? []).toEqual([]);
-    for (const execution of validation.executions) {
-      expect(execution.treeHash).toMatch(/^[a-f0-9]{64}$/); expect(execution.treeAfterHash).toBe(execution.treeHash);
-      expect(execution.commands).toEqual([expect.objectContaining({ exitCode: 1, testsRun: 1, identityOwner: 'runner-json' })]);
-    }
-    expect(validation.pass).toBe(false);
   });
 
   it('records observed work without empty validation facts or receipts when no suite is configured', async () => {
@@ -257,10 +189,10 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('takes an introduced failure to an independent gate and validates the repair once before a fresh re-review', async () => {
     setEngineDefaults({ session_reuse: true });
-    const result = await fixture({ introduce: true, requestBase: true });
+    const result = await fixture({ introduce: true });
     expect(result.final.status).toBe('complete');
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review', 'repair', 'review']);
-    expect(result.executions).toHaveLength(6);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.executions).toHaveLength(2);
     expect(result.validations.map(value => value.stageId)).toEqual(['implement', 'repair']);
     expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[1].executions).toHaveLength(1); expect(result.validations[1].pass).toBe(true);
@@ -292,23 +224,24 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(changes).toEqual([expect.objectContaining({ files: [expect.objectContaining({ path: 'value.txt', content: expect.objectContaining({ sha256: expect.any(String) }) })] })]);
   });
 
-  it('does not infer identity or trigger repairs from invalid readings, and never retries a suite at a gate', async () => {
+  it('rejects a completed nonzero exit with invalid identity and never retries a suite at a gate', async () => {
     const result = await fixture({ baseRed: true, invalidReading: true });
-    expect(result.final.status).toBe('complete');
-    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(3); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.final.status).toBe('incomplete');
+    expect(result.executions).toHaveLength(2);
+    expect(result.validations.every(value => value.executions.length === 1)).toBe(true);
     expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[0].pass).toBe(false);
     const settlement = await settleGateValidationEvidence(result.target, result.final.runId, 'review', { runCommand: () => { throw new Error('decision reran the suite'); } });
-    expect(settlement.kind).toBe('unchanged'); expect(result.executions).toHaveLength(3);
+    expect(settlement.kind).toBe('unchanged'); expect(result.executions).toHaveLength(2);
   });
 
-  it.each([false, true])('invalidates validation when source changes and lets the independent gate judge the stated gap (base red=%s)', async baseRed => {
+  it.each([false, true])('parks validation when its command changes source, before any review (base red=%s)', async baseRed => {
     const result = await fixture({ mutateValidation: true, baseRed });
-    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(baseRed ? 3 : 1);
+    expect(result.final.status).toBe('parked'); expect(result.executions).toHaveLength(1);
     expect(result.validations[0].regressions ?? []).toEqual([]);
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
-    expect(result.final.validation?.every(entry => entry.measurement === 'unverified')).toBe(true);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.validations[0].resourceState).toBe('unfinished');
+    expect(result.calls.map(call => call.stage)).toEqual(['implement']);
   });
 
   it('rejects a stale receipt after a later source write without rerunning validation', async () => {
@@ -321,13 +254,13 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   });
 
   it.each([undefined, 99])('retains unsupported validation receipts for audit without trusting or rerunning them (version=%j)', async validationVersion => {
-    const result = await fixture({ baseRed: true });
+    const result = await fixture();
     const legacy = readEvidence(result.rd).map(fact => fact.kind === 'validation' ? { ...fact, validationVersion } : fact);
     writeFileSync(runRecordPath(result.rd, 'evidence-ledger.jsonl'), legacy.map(fact => JSON.stringify(fact)).join('\n') + '\n');
     expect(readEvidence(result.rd).some(fact => fact.kind === 'validation')).toBe(true);
     expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
     await recordAttemptValidation(result.target, result.final.runId, 'implement', { runCommand: () => { throw new Error('old receipt reran its suite'); } });
-    expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(3);
+    expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
   it('reuses a tree-bound fact on an unchanged tree without repeating uncertain or passing evidence', async () => {
@@ -342,7 +275,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it('returns to an earlier measured tree without rerunning it or consuming the later different tree receipt', async () => {
     const result = await fixture({ returnToFirstTree: true });
     expect(result.final.status, JSON.stringify(result.final.stages.review.gate)).toBe('complete');
-    expect(result.executions.map(execution => execution.value)).toEqual(['write 3\n', 'intermediate\n', 'intermediate\n', 'base\n', 'write 3\n']);
+    expect(result.executions.map(execution => execution.value)).toEqual(['write 3\n', 'intermediate\n']);
     expect(result.validations).toHaveLength(2);
     const [first, later] = result.validations;
     expect(first.treeHash).not.toBe(later.treeHash);

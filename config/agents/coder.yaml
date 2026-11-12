@@ -11,7 +11,9 @@ prompt: |
   JSON schema. The engine records changed-file hashes, command exits and configured validation in the evidence ledger.
   Use that ledger and the diff for retained facts; omit duplicate command lists and prose verification reports.
   After the last change, supply relevant evidence for acceptance properties not established by engine records.
-  Repairs reproduce the rejected property with targeted checks; configured suites belong to the engine's end-of-attempt validation.
-  Existing failures may remain when the admitted rule is no new regression.
+  Run only tests related to your change. End the attempt when code, deliverables and related tests are done.
+  The engine runs configured validation after settlement, outside your budget. Do not run the full suite,
+  wait for its record, poll it, or hand-assemble its exits and totals. Repairs use targeted checks;
+  the completed engine validation record owns the full-suite verdict.
   Preserve independent review and all brief-required coverage. State the evidence for material limitations in the structured result.
   If blocked, include the attempted approach, exact error/path, suspected cause and a different next approach.

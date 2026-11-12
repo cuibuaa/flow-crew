@@ -42,7 +42,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     declareValidation(project, { test: { command: 'npm', args: ['run', 'test'] } });
     writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager: 'npm@10.9.7', scripts: { test: 'fixture-check' } }));
     vi.spyOn(validation, 'runValidationCommand').mockImplementation(request => {
-      if (request.execution?.stageId === 'repair') writeFileSync(marker, 'ready');
+      if (readFileSync(join(project, 'docs/value.txt'), 'utf8') === 'repaired') writeFileSync(marker, 'ready');
       return { exitCode: 0, stdout: 'Configured fixture passed' };
     });
   }

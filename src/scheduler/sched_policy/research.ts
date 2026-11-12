@@ -21,6 +21,7 @@ import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 import { concludeRun, projectResearchConclusion } from './run-completion.js';
 import { literalProjectScope } from '../sched_admission/scope-services.js';
 import { rependContinuingStages } from '../sched_loop/iteration-setup.js';
+import { validateSettledTree } from '../sched_settlement/gate-validation.js';
 
 /** Review criteria are declared identities (P1); the numbered list is stage-readable prose. */
 export function researchReviewContract(research: ResearchConfig): string {
@@ -76,8 +77,7 @@ export async function runResearchLoop(project: string, run: string, directory: s
     const manifest = await finalizeResearchInstrument(directory, reason, { status, reasonCode, detail });
     const conclusion = manifest.conclusion ?? { status, reasonCode, detail };
     state = readRunState(project, run);
-    if (!isTerminalRunStatus(state.status)) state = await concludeRun(state, { ...conclusion, writeCampaignEntry });
-    projectResearchConclusion(state, () => {});
+    if (!isTerminalRunStatus(state.status)) state = await concludeRun(state, { ...conclusion, beforeCommit: current => projectResearchConclusion(current, () => {}), writeCampaignEntry });
     return state;
   };
   try {
@@ -94,6 +94,9 @@ export async function runResearchLoop(project: string, run: string, directory: s
         if (continuationExhausted(state, state.maxContinuations ?? state.maxIterations! - 1)) return finish('continuation_budget_exhausted', RUN_STATUS.INCOMPLETE);
         rependContinuingStages(state, stages, project, run);
       }
+      // Resume settles resource work before review or stop/finalization. Research
+      // budgets bound authors; validation retains its separate resource allowance.
+      if (!await validateSettledTree(project, run)) return readRunState(project, run);
       const measured = researchInstrumentState(directory);
       const stop = researchStopReason(measured);
       if (stop) return finish(stop, measured.error ? RUN_STATUS.FAILED : RUN_STATUS.COMPLETE, measured.error ?? stop);

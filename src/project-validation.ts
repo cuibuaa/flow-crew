@@ -102,28 +102,6 @@ export const ValidationSelectionSchema = z.object({ commands: z.object({
 }).strict(), reason: z.string().min(1).max(4096) }).strict();
 export const VALIDATION_SELECTION_JSON_SCHEMA = z.toJSONSchema(ValidationSelectionSchema) as unknown as Schema;
 
-/** The independent gate owns these judgments. Omitted, invalid, duplicated or
- * unrelated entries confer no causal authority. Exact role/display identifies
- * a selected command; logs and names are never parsed for a disposition. */
-export const ValidationReviewSchema = z.object({
-  commands: z.array(z.object({
-    role: z.enum(ROLES), display: z.string().min(1),
-    disposition: z.enum(['caused_by_change', 'already_failing', 'environment', 'unknown']),
-    reason: z.string().trim().min(1),
-  }).strict()),
-  request_base: z.array(z.object({ role: z.enum(ROLES), display: z.string().min(1) }).strict()),
-}).strict();
-export const VALIDATION_REVIEW_JSON_SCHEMA = z.toJSONSchema(ValidationReviewSchema) as unknown as Schema;
-export function validationDispositions(results: ValidationCommandResult[], value: unknown) {
-  const review = ValidationReviewSchema.safeParse(value);
-  return results.filter(result => projectValidationResult(result).measurement === 'unverified').map(result => {
-    const entries = review.success ? review.data.commands.filter(entry => entry.role === result.role && entry.display === result.display) : [];
-    return { role: result.role, display: result.display, disposition: entries.length === 1 ? entries[0].disposition : 'unknown' as const,
-      reason: entries.length === 1 ? entries[0].reason : 'Gate disposition unavailable or invalid; command remains unknown and unverified' };
-  });
-}
-
-/** One closed declaration contract for project config and brief frontmatter. */
 export function parseValidationCommands(validation: unknown, evidencePathRoot: string, project = false): ValidationParseResult {
   if (validation === undefined) return { commands: [] };
   const parsed = (project ? projectValidationDeclaration : validationDeclaration).safeParse(validation);
@@ -154,10 +132,11 @@ export interface ValidationDiscovery {
 }
 
 export interface ValidationRunRequest extends ValidationCommand {
-  /** Caller-owned deadline; omitted requests use the configured command bound. */
+  /** Engine resource deadline; omitted requests use the configured command bound. */
   timeoutMs?: number;
   abortSignal?: AbortSignal;
   cwd: string;
+  priority?: number;
   /** Parent-supplied run anchor; pre-admission validation uses a private one. */
   runDir?: string;
   /** Attempt whose pre-execution prerequisites this configured command serves. */
@@ -181,8 +160,8 @@ export function projectValidationResult(result: {
   state?: string; storedState?: string;
 }): { state: ValidationCommandResult['state']; measurement: ValidationMeasurement } {
   const completed = Number.isInteger(result.exitCode) && !result.unfinished && result.sourceBound !== false
-    && (result.storedState ?? result.state) !== 'launch_error';
-  const state = !completed ? 'unverified' : result.exitCode === 0 && !result.error && !result.dependencyPreparationFailed ? 'passed' : 'failed';
+;
+  const state = !completed ? 'unverified' : result.exitCode === 0 ? 'passed' : 'failed';
   return { state, measurement: state === 'passed' ? 'verified' : 'unverified' };
 }
 export function validationMeasurement(result: Parameters<typeof projectValidationResult>[0]): ValidationMeasurement {
@@ -241,6 +220,7 @@ export interface ValidationCommandResult {
   identityOwner?: IdentityFacts['owner'];
   failures?: import('./validation-identity.js').FailureReading['failures'];
   testsRun?: number | null;
+  totals?: IdentityFacts['totals'];
   role: ValidationRole;
   display?: string;
   state: 'passed' | 'failed' | 'unverified';
@@ -276,6 +256,7 @@ export interface ProjectValidationBaseline {
 }
 
 export interface ProjectValidationDependencies {
+  priority?: number;
   remainingMs?: () => number;
   abortSignal?: AbortSignal;
   fs?: ValidationFileSystem;
@@ -434,7 +415,7 @@ function boundedOutput(value: string, maxBytes: number): string {
 }
 
 const executeValidationCommand: ValidationCommandRunner = async (request) => {
-  if (request.abortSignal?.aborted || (request.timeoutMs !== undefined && request.timeoutMs <= 0)) return { exitCode: null, unfinished: true, error: 'Validation refused: enclosing stage deadline or control abort', durationMs: 0 };
+  if (request.abortSignal?.aborted || (request.timeoutMs !== undefined && request.timeoutMs <= 0)) return { exitCode: null, unfinished: true, error: 'Validation refused: resource deadline or control abort', durationMs: 0 };
   const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));
   try {
   const environment = validationEnvironment(environmentRoot, process.env, request.env && { ...process.env, ...request.env });
@@ -447,7 +428,8 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   }
   const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
-  const { child, stop } = spawnOwnedCommand(request.command, request.args, {
+  const { child, stop } = spawnOwnedCommand(request.priority === undefined || process.platform === 'win32' ? request.command : 'nice',
+    request.priority === undefined || process.platform === 'win32' ? request.args : ['-n', String(request.priority), request.command, ...request.args], {
     cwd: request.cwd,
     env: environment.env,
   });
@@ -477,7 +459,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   let settled = false;
   let timedOut = false;
   let spawnError: string | undefined;
-  // Keep the configured suite bound; the enclosing attempt may narrow it.
+  // Keep the configured validation resource bound.
   let timeoutMs = 60_000;
   try {
     const configured = loadEngineDefaults().validation_timeout_ms;
@@ -522,12 +504,11 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   child.once('close', (code, signal) => {
     settle(code, signal, spawnError);
   });
-  // Pipes can outlive the executable (for example a detached worker inherited
-  // them). Deadline settlement must not depend on a transport close event.
+  // The raw owner retains capacity and scratch until its consumers retire.
   const onAbort = () => {
-    stop();
-    child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
-    settle(child.exitCode, child.signalCode, spawnError);
+    const retired = stop();
+    child.stdout?.destroy(); child.stderr?.destroy();
+    void Promise.resolve(retired).then(() => settle(child.exitCode, child.signalCode, spawnError));
   };
   timeout = setTimeout(() => { timedOut = true; onAbort(); }, timeoutMs);
   timeout.unref();
@@ -585,8 +566,8 @@ async function failureFacts(command: ValidationCommand, response: ValidationRunR
     try {
       const bytes = response.report ?? (command.report.path ? undefined : response.stdout);
       if (bytes === undefined || Buffer.byteLength(bytes) > 1024 * 1024) throw new Error('Structured report missing or exceeds 1 MiB');
-      const { files, ...reading } = decodeRunnerReport(bytes, command.report.format, root, failed);
-      return { ...identityFacts(reading, 'runner-json', failed), failureFiles: files };
+      const { files, totals, ...reading } = decodeRunnerReport(bytes, command.report.format, root, failed);
+      return { ...identityFacts(reading, 'runner-json', failed), failureFiles: files, totals };
     } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid structured report: ${errorMessage(error)}` }; }
   }
   if (!failed) return { identifiers: [], owner: 'unknown' };
@@ -640,7 +621,7 @@ export async function runProjectValidationBaseline(
       response = dependencies.abortSignal?.aborted || shareMs <= 0
         ? { exitCode: null, unfinished: true, error: 'Validation budget ended before command execution' }
         : await runner({ ...command, cwd: root,
-        timeoutMs: shareMs,
+        timeoutMs: shareMs, priority: dependencies.priority,
         ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
       response = { exitCode: null, ...(dependencies.abortSignal?.aborted ? { unfinished: true } : {}), error: errorMessage(error) };
@@ -666,6 +647,7 @@ export async function runProjectValidationBaseline(
       ...(facts.failures ? { failures: facts.failures } : {}),
       ...(facts.failureFiles ? { failureFiles: facts.failureFiles } : {}),
       testsRun: facts.testsRun ?? null,
+      ...(facts.totals ? { totals: facts.totals } : {}),
       display: command.display,
       exitCode: response.exitCode,
       durationMs,
@@ -707,7 +689,7 @@ export function evaluateValidationDelta(
   return [
     ...current.map(result => ({ role: result.role, display: result.display,
       state: projectValidationResult(result).measurement,
-      reason: projectValidationResult(result).measurement === 'verified' ? 'Command completed with exit 0' : 'Command unverified; independent gate owns disposition',
+      reason: projectValidationResult(result).measurement === 'verified' ? 'Command completed with exit 0' : 'Command did not complete with exit 0',
       newFailureIdentifiers: [] })),
     ...missing.map(command => ({ role: command.role, display: command.display, state: 'unverified' as const,
       reason: 'Selected command did not run', newFailureIdentifiers: [] })),

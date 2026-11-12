@@ -13,7 +13,7 @@ import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, updateRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, readStageStatus, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
@@ -112,8 +112,12 @@ export async function runWorkflow(
     settled = updateRunState(projectDir, runId, state => {
       if (state.status !== RUN_STATUS.RUNNING) return;
       const completedAt = new Date().toISOString();
-      for (const stage of Object.values(state.stages)) {
+      for (const [id, stage] of Object.entries(state.stages)) {
         if (stage.status !== STAGE_STATUS.RUNNING) continue;
+        try {
+          const closed = readStageStatus(projectDir, runId, id);
+          if (closed.status === STAGE_STATUS.COMPLETE) { state.stages[id] = closed; continue; }
+        } catch { /* a pre-worker failure has no settled attempt */ }
         stage.status = STAGE_STATUS.FAILED;
         stage.error = reason;
         stage.completedAt = completedAt;

@@ -23,7 +23,7 @@ export function checkpointConsumers(checkpoint?: EngineCheckpoint, options: { cu
     // A missing/reused leader cannot authorize signalling surviving writers.
     if (options.retire && boot && checkpoint!.bootId === boot && group.processStart
         && processStartTokensMatch(group.processStart, currentStart)) {
-      try { process.kill(-group.pid, 'SIGKILL'); }
+      try { process.kill(group.supervised ? group.pid : -group.pid, group.supervised ? 'SIGTERM' : 'SIGKILL'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
     }
   }

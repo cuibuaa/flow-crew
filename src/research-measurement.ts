@@ -436,9 +436,9 @@ export function reconcileResearchManifest(run: string, control: Pick<import('./s
   return manifest;
 }
 
-/** Terminal-only publisher. A durable attempt precedes the project write; an
- * uncertain acknowledgement is never retried by recovery or land. Replaces the
- * cross-run ordering scan, supersession events and report re-projection. */
+/** Terminal publisher. A durable finalizer and publication attempt precede the
+ * project write; current-tree validation is projected before terminal commit.
+ * Uncertain delivery is never retried by recovery or land. */
 export function writeResearchTerminalReport(state: import('./store.js').StoreState): void {
   const run = runDirForStateLookup(state.projectDir, state.runId);
   const path = runRecordPath(run, 'research_publication.json');

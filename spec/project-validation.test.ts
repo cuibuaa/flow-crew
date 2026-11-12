@@ -305,7 +305,7 @@ describe('configuration-driven project validation baseline', () => {
       result('lint', 'passed'),
     ]);
     expect(regressed).toContainEqual(expect.objectContaining({
-      role: 'build', state: 'unverified', reason: expect.stringContaining('gate owns disposition'),
+      role: 'build', state: 'unverified', reason: expect.stringContaining('did not complete with exit 0'),
     }));
     expect(regressed).toContainEqual(expect.objectContaining({
       role: 'test', state: 'unverified', newFailureIdentifiers: [],

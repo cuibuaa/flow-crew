@@ -7,7 +7,7 @@ import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
 import { projectValidationResult } from './project-validation.js';
-import { projectValidationDelta, readEvidence } from './evidence-ledger.js';
+import { projectValidationDelta, projectValidationFact, readEvidence, VALIDATION_FACT_VERSION } from './evidence-ledger.js';
 import type { GateValidationDeltaArtifact } from './scheduler/sched_settlement/gate-validation.js';
 import {
   STAGE_STATUS,
@@ -320,6 +320,19 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
 function renderValidation(runDir: string, state: StoreState): string {
   const sections: string[] = state.validation?.length ? ['Current tree: ' + state.validation.map(result =>
     `${result.display ?? result.role}: ${projectValidationResult(result).measurement} (direct exit ${result.exitCode ?? 'absent'})`).join('; ')] : [];
+  const records = readEvidence(runDir).filter(entry => entry.kind === 'validation' && entry.validationVersion === VALIDATION_FACT_VERSION);
+  for (const raw of records) {
+    if (raw.kind !== 'validation') continue;
+    const record = projectValidationFact(raw);
+    sections.push(`Engine record ${raw.sequence}: tree ${raw.treeHash}; resource state ${raw.resourceState}; ${raw.recordPath ?? 'ledger'}.\n\n`
+      + record.executions.map((execution, index) => `Execution ${index + 1}: ` + execution.commands.map(result =>
+        `${result.display ?? result.role}: ${result.state} (${result.measurement}); direct exit ${result.exitCode ?? 'absent'}; `
+        + `execution ${JSON.stringify({ command: result.command, args: result.args, env: result.env ?? {} })}; `
+        + `duration ${result.durationMs}ms; error ${JSON.stringify(result.error ?? null)}; load ${JSON.stringify(result.load ?? null)}; `
+        + `totals ${JSON.stringify(result.totals ?? null)}; tests run ${result.testsRun ?? 'unknown'}; failures ${result.failureCount ?? 'unknown'}`
+        + (result.unfinished ? '; Validation unfinished' : '')).join('; ')).join('\n\n'));
+  }
+  if (records.length) return '## Configured validation\n\n' + sections.join('\n\n');
   const seen = new Set<string>();
   for (const name of readdirSync(runRecordPath(runDir, '.')).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
     const raw = readJson<GateValidationDeltaArtifact>(runRecordPath(runDir, name));

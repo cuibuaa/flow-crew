@@ -11,7 +11,7 @@ import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { runDir, readRunState, readStageStatus, writeStageStatus } from '../src/store.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { createRun } from './test-support/create-run.js';
-import { seedAttemptValidation } from './test-support/attempt-validation.js';
+import { seedAttemptValidation as seedValidation } from './test-support/attempt-validation.js';
 import { appendEvidence, evidenceContext, projectValidationFact, readEvidence } from '../src/evidence-ledger.js';
 import { discoverProjectValidation, evaluateValidationDelta, projectValidationResult, reconcileProjectValidation,
   runProjectCommand, runProjectValidationBaseline, type ValidationCommandResult } from '../src/project-validation.js';
@@ -24,6 +24,7 @@ import { readRunStateView } from '../src/run-state-view.js';
 import { summarizeRunStateView } from '../src/run-state-access.js';
 import { renderRunSummary } from '../src/run-summary.js';
 
+const seedAttemptValidation = (...args: Parameters<typeof seedValidation>) => seedValidation(args[0], args[1], args[2], { ...args[3], validationVersion: 3 });
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function project() { const root = mkdtempSync(join(tmpdir(), 'control-validation-')); roots.push(root); return root; }
@@ -168,9 +169,9 @@ async function partialWorkflow(confirmed: boolean) {
 }
 
 describe('repair admission and certification have distinct evidence demands', () => {
-  it('repairs a confirmed reproduction despite partial validation and lets the gate accept its stated limits', { timeout: 60_000 }, async () => {
+  it('repairs a confirmed reproduction and continues rejecting a completed nonzero configured command', { timeout: 60_000 }, async () => {
     const { final, calls, ledger } = await partialWorkflow(true);
-    expect(calls, JSON.stringify({ gate: final.stages.review, decisions: ledger.filter(entry => entry.kind === 'decision'), commands: ledger.filter(entry => entry.kind === 'command') })).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
     const validations = ledger.filter(entry => entry.kind === 'validation');
     expect(validations).toHaveLength(2);
     for (const fact of validations) {
@@ -180,15 +181,15 @@ describe('repair admission and certification have distinct evidence demands', ()
     const original = ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.exitCode === 1)!;
     expect(original).toBeDefined();
     expect(ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)).toMatchObject({ exitCode: 0 });
-    expect(final.status).toBe('complete');
-    expect(final.stages.review.gate).toMatchObject({ pass: true });
+    expect(final.status).toBe('incomplete');
+    expect(final.stages.review.gate).toMatchObject({ pass: false });
   });
 
-  it('lets the independent gate accept unknown comparison without inventing repair or a validation pass', async () => {
+  it('rejects nonzero configured validation even when independent semantic review passes', async () => {
     const { final, calls } = await partialWorkflow(false);
-    expect(calls).toEqual(['implement', 'review']);
-    expect(final.status).toBe('complete');
-    expect(final.stages.review.gate).toMatchObject({ pass: true });
+    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(final.status).toBe('incomplete');
+    expect(final.stages.review.gate).toMatchObject({ pass: false });
   });
 
   it('admits confirmed repair even when a historic effective verdict retained a validation refusal', () => {
@@ -231,7 +232,7 @@ describe('one projection across historic receipts and every reader', () => {
     expect(gate).toMatchObject({ pass: true, validation: [unverified] });
     expect(gate.reason).toContain('Validation unverified');
     const terminal = await concludeRun(readRunState(root, runId), { status: 'complete', reasonCode: 'workflow_complete' });
-    expect(terminal).toMatchObject({ status: 'complete', validation: [unverified] });
+    expect(terminal).toMatchObject({ status: 'incomplete', reasonCode: 'validation_unresolved', validation: [unverified] });
     expect(readRunStateView(root, runId).validation).toMatchObject([unverified]);
     expect(JSON.stringify(summarizeRunStateView(readRunStateView(root, runId)))).toContain('"sourceBound":false');
     const alerts = pollWatch(createWatchState(), { runsRoot: resolve(base, '..'), candidateRunIds: () => [runId] }).alerts;
@@ -336,7 +337,7 @@ describe('one projection across historic receipts and every reader', () => {
       load: { start: { loadAverage1m: 0, cpuCount: 1 }, end: { loadAverage1m: 0, cpuCount: 1 }, ceilingPerCpu: 1, waitBoundSeconds: 0, waitedSeconds: 0 } };
     writeFileSync(path, JSON.stringify({ version: 2, current: [command], delta: [{ role: 'test', state: 'not_measured' }], pass: false }));
     expect(readValidationDelta(path)).toMatchObject({ pass: false, current: [{ state: 'failed', measurement: 'unverified', storedState: 'not_measured' }],
-      delta: [{ state: 'unverified', reason: 'Command unverified; independent gate owns disposition' }] });
+      delta: [{ state: 'unverified', reason: 'Command did not complete with exit 0' }] });
   });
 
   it('never republishes historical unconfigured slots as passing validation', () => {
@@ -367,13 +368,13 @@ describe('one projection across historic receipts and every reader', () => {
     expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
   });
 
-  it('retains runner errors with exit zero and never projects them as a pass', async () => {
+  it('retains auxiliary runner errors while projecting completed exit zero as a pass', async () => {
     const measured = await runProjectValidationBaseline('/workspace', { commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture' }],
       runCommand: () => ({ exitCode: 0, error: 'runner did not complete', load: { start: { loadAverage1m: 0, cpuCount: 1 }, end: { loadAverage1m: 0, cpuCount: 1 }, ceilingPerCpu: 1, waitBoundSeconds: 0, waitedSeconds: 0 } }) });
     const result = measured.results.find(command => command.role === 'test')!;
-    expect(result).toMatchObject({ exitCode: 0, error: 'runner did not complete', state: 'failed' });
-    expect(projectValidationResult(result)).toEqual({ state: 'failed', measurement: 'unverified' });
-    expect(evaluateValidationDelta({ results: [{ ...result, state: 'passed', error: undefined }] }, [result])[0].state).toBe('unverified');
+    expect(result).toMatchObject({ exitCode: 0, error: 'runner did not complete', state: 'passed' });
+    expect(projectValidationResult(result)).toEqual({ state: 'passed', measurement: 'verified' });
+    expect(evaluateValidationDelta({ results: [{ ...result, state: 'passed', error: undefined }] }, [result])[0].state).toBe('verified');
   });
 
   it.each(['overloaded', 'measured', 'missing-load'] as const)('preserves legacy runner errors across repeated projection and readers (%s)', async mode => {
@@ -382,19 +383,19 @@ describe('one projection across historic receipts and every reader', () => {
       output: '', durationMs: 1, failureIdentifiers: [], failureIdentity: 'unknown',
       ...(mode === 'missing-load' ? {} : { load: { start: { loadAverage1m: mode === 'overloaded' ? 2 : 0, cpuCount: 1 },
         end: { loadAverage1m: 0, cpuCount: 1 }, ceilingPerCpu: 1, waitBoundSeconds: 0, waitedSeconds: 0 } }) };
-    const expected = { state: 'unverified', measurement: 'unverified' };
+    const expected = { state: 'passed', measurement: 'verified' };
     const once = { ...command, storedState: command.state, ...projectValidationResult(command) };
     expect(projectValidationResult(once)).toEqual(expected);
     const delta = evaluateValidationDelta(undefined, [command]);
     expect(evaluateValidationDelta(undefined, [once])).toEqual(delta);
-    expect(delta[0].state).toBe('unverified');
+    expect(delta[0].state).toBe('verified');
     const baseline = { version: 1, projectDir: root, results: [command], gateCriteria: [], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
       commands: [{ role: 'test', command: 'fixture', args: [], display: command.display }] } };
     writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
     const fact = seedAttemptValidation(root, runId, [command], { delta });
     const projected = projectValidationFact(fact);
     expect(projectValidationFact(projected)).toEqual(projected);
-    expect(projected).toMatchObject({ pass: false, delta, executions: [{ commands: [{ ...expected, storedState: 'launch_error', exitCode: 0 }] }] });
+    expect(projected).toMatchObject({ pass: true, delta, executions: [{ commands: [{ ...expected, storedState: 'launch_error', exitCode: 0 }] }] });
     expect(currentAuthorValidationRefusal(root, runId)).toBeUndefined();
     writeStageStatus(root, runId, 'review', { status: 'complete', retries: 0,
       gate: { pass: false, validation: [once] } });
@@ -408,20 +409,20 @@ describe('one projection across historic receipts and every reader', () => {
       const raw = JSON.stringify({ version: 2, stageId: 'review', pass: false, current: [command], delta, ledgerSequence });
       writeFileSync(path, raw);
       const receipt = readValidationDelta(path)!;
-      expect(receipt).toMatchObject({ pass: false, delta, current: [{ ...expected, storedState: 'launch_error' }] });
+      expect(receipt).toMatchObject({ pass: true, delta, current: [{ ...expected, storedState: 'launch_error' }] });
       // Re-reading a projected receipt must preserve its raw runner-error fact too.
       writeFileSync(path, JSON.stringify(receipt));
       expect(readValidationDelta(path)).toEqual(receipt);
       const summary = renderRunSummary(root, base, readRunState(root, runId));
       expect(summary).toContain('recorded state launch_error');
-      expect(summary).not.toContain('comparison verified');
+      expect(summary).toContain('comparison verified');
       expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
     }
   });
 });
 
 
-it('accepts an explicitly unrun command as unverified in both review and terminal records', async () => {
+it('retains an explicitly unrun command as unverified and refuses successful terminal publication', async () => {
   const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['review']);
   writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
     version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [
@@ -432,9 +433,10 @@ it('accepts an explicitly unrun command as unverified in both review and termina
     audit_findings: { version: 1, findings: [] }, validation_review: { commands: [{ role: 'test', display: 'declared', disposition: 'unknown', reason: 'No execution was available' }], request_base: [] } }));
   const gate = readGateEvaluation(root, 'review', runId)!;
   expect(gate.pass).toBe(true);
-  expect(gate.validation).toEqual([expect.objectContaining({ exitCode: null, state: 'unverified', measurement: 'unverified', disposition: 'unknown' })]);
+  expect(gate.validation).toEqual([expect.objectContaining({ exitCode: null, state: 'unverified', measurement: 'unverified' })]);
   const terminal = await concludeRun(readRunState(root, runId), { status: 'complete', reasonCode: 'workflow_complete' });
-  expect(terminal.status).toBe('complete');
+  expect(terminal.status).toBe('incomplete');
+  expect(terminal.reasonCode).toBe('validation_unresolved');
   expect(terminal.validation).toEqual([expect.objectContaining({ exitCode: null, state: 'unverified', measurement: 'unverified' })]);
   expect(renderRunSummary(root, base, terminal)).toContain('declared: unverified (direct exit absent)');
   const view = readRunStateView(root, runId);
@@ -445,7 +447,7 @@ it('accepts an explicitly unrun command as unverified in both review and termina
 });
 
 
-it('keeps legacy exit-zero runner and dependency errors unverified through gate and terminal copies', async () => {
+it('retains legacy diagnostics while completed zero exits stay verified through every reader', async () => {
   const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['author', 'review']);
   const commands = [
     { role: 'build', command: 'build', args: [], display: 'build' },
@@ -461,12 +463,12 @@ it('keeps legacy exit-zero runner and dependency errors unverified through gate 
   writeFileSync(runRecordPath(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance with two legacy execution gaps', audit_findings: { version: 1, findings: [] } }));
   const gate = readGateEvaluation(root, 'review', runId)!;
   expect(gate.pass).toBe(true);
-  expect(gate.validation?.map(result => projectValidationResult(result).measurement)).toEqual(['unverified', 'unverified']);
+  expect(gate.validation?.map(result => projectValidationResult(result).measurement)).toEqual(['verified', 'verified']);
   const terminal = await concludeRun(readRunState(root, runId), { status: 'complete', reasonCode: 'workflow_complete' });
-  expect(terminal.validation?.map(result => projectValidationResult(result).measurement)).toEqual(['unverified', 'unverified']);
-  expect(readRunStateView(root, runId).validation?.map(result => result.measurement)).toEqual(['unverified', 'unverified']);
+  expect(terminal.validation?.map(result => projectValidationResult(result).measurement)).toEqual(['verified', 'verified']);
+  expect(readRunStateView(root, runId).validation?.map(result => result.measurement)).toEqual(['verified', 'verified']);
   const alerts = pollWatch(createWatchState(), { runsRoot: resolve(base, '..'), candidateRunIds: () => [runId] }).alerts;
-  expect(alerts.filter(alert => alert.kind === 'validation_measurement').map(alert => alert.measurement)).toEqual(['unverified', 'unverified']);
+  expect(alerts.filter(alert => alert.kind === 'validation_measurement').map(alert => alert.measurement)).toEqual(['verified', 'verified']);
 });
 
 

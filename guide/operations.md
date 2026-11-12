@@ -51,16 +51,23 @@ links are relocated within the target tree. Existing target entries resolving ou
 content/type collisions refuse. Do not replace a refusal with manual source symlinks.
 
 Setup reads project/brief validation declarations without executing a baseline. The ready
-record binds selection to the exact brief and target. Successful author settlement runs one
-bounded batch per tree; each command receives its share so later commands get an allowance.
-An existing tree's facts are reused by later stages, with no automatic dependency install.
+record binds selection to the exact brief and target. Authors and repairs finish their code,
+deliverables and related tests, then return. They do not run or poll configured validation.
 
-Validation records raw exits, bounded logs, duration and start/end load. The independent gate
-uses `validation_review` dispositions to decide causation; it alone may request isolated base
-evidence. Missing or malformed dispositions remain unknown. A failure attributed to the change
-blocks acceptance, and only a confirmed independent reproduction can authorize repair.
-Exit 127 is not universally a refusal. Missing tools, flaky tests and high host load receive no code-owned causal category; the independent gate supplies the disposition.
-Failed, unfinished and unrun commands stay unverified in accepted terminal records and reports.
+The scheduler validates the settled tree outside the author deadline. One durable completed
+record per content hash supplies all stages, reviews, gates and resumes. Records live under
+`FC_HOME/validation/<tree-hash>.json`; run evidence ledgers retain the record and its location.
+All zero command exits accept validation; any completed nonzero exit rejects and opens repair.
+Reporter totals, logs, timing and load are evidence for readers, never verdict inputs.
+There are no candidate confirmations, automatic subset reruns or gate-requested base suites.
+
+Unfinished executions retry within the numeric `validation_attempts` and
+`validation_timeout_ms` engine limits. Exhaustion parks the run without spending another
+author attempt, review verdict or repair round. Increase the declared resource allowance
+before resuming an exhausted tree. Completed nonzero records are retained on resume.
+The shared store FIFO bounds daemon scheduler processes with `validation_concurrency`;
+`validation_priority` sets the Unix niceness adjustment. Dead controller requests release
+queue ownership. Configuration is engine-owned, and no project-specific load policy applies.
 
 Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setup.ts),
 [validation and deltas](../src/project-validation.ts),

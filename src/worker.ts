@@ -27,7 +27,7 @@ import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
 import { createHash } from 'node:crypto';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
-import { recordRequestedBaseValidation, recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
+import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
@@ -135,7 +135,6 @@ export interface StageOpts {
   isGate?: boolean;
   gateContext?: Pick<Parameters<typeof buildGateDispatchPreamble>[0], 'authorIds' | 'fixStageIds' | 'roundDiffPath'>;
   /** A gate reviews this author's result, so a blocked result settles the stage for that gate to confirm or reject. */
-  repairFindings?: import('./scoped-audit-repair.js').FindingAssessment['confirmed'];
   gateReviewed?: boolean;
   dynamicDispatch?: boolean;
   criterionRefs?: string[];
@@ -1056,7 +1055,6 @@ export async function runStage(
   let validatedStageRecord: Record<string, unknown> | undefined;
   let unreviewedGap = false;
   let correctionReinvocations = 0;
-  let baseEvidenceDelivered = false;
   const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
@@ -1115,17 +1113,7 @@ export async function runStage(
       if (combined.exitCode !== 0 || !opts.outputSchema || opts.decisionResult) return combined;
       let recordError: string;
       try {
-        const record = stageRecord(combined.output);
-        if (opts.isGate && !baseEvidenceDelivered && !aggregateAbortSignal.aborted) {
-          const facts = await recordRequestedBaseValidation(opts.projectDir, opts.runId, record.validation_review, {
-            remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
-          });
-          if (facts) {
-            baseEvidenceDelivered = true;
-            invocationPrompt = `# Requested base evidence\n${JSON.stringify(facts)}\nJudge causation yourself. Return your final verdict with dispositions for every unverified command and request_base: []. The engine will not repeat this base batch.`;
-            continue;
-          }
-        }
+        stageRecord(combined.output);
         return combined;
       }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
@@ -1406,25 +1394,6 @@ export async function runStage(
     try { selection = JSON.parse(result.output).validation; } catch { /* unavailable stays unknown */ }
     recordValidationSelection(opts.projectDir, opts.runId, selection);
     attemptValidationPlan = readRunValidationBaseline(opts.runDir);
-  }
-  if (attemptValidationPlan?.baseline.discovery.commands.length && final.status === STAGE_STATUS.COMPLETE && result.exitCode === 0 && !result.engineVoid && !childCloseUnverified && !result.continuation) {
-    await recordAttemptValidation(opts.projectDir, opts.runId, opts.stageId, {
-      remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
-    });
-  }
-  if (result.exitCode === 0 && !result.continuation) {
-    for (const finding of opts.repairFindings ?? []) {
-      const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
-      // Old records without native context cannot authorize an assumed replay.
-      if (!finding.record.context) continue;
-      const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell, args: ['-c', finding.record.command!],
-        display: finding.record.command!, cwd: finding.record.context.cwd, runDir: opts.runDir,
-        timeoutMs: Math.max(1, Math.min(finding.record.timeoutMs ?? 60_000, attemptDeadline.remainingMs())), abortSignal: aggregateAbortSignal });
-      appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex,
-        commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode,
-        outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
-        treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash, reproductionOf: finding.record.sequence });
-    }
   }
   const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
   let finalRecord: Record<string, unknown> | undefined;

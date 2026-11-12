@@ -2,7 +2,6 @@ import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { log } from '../sched_admission/shared.js';
 import { currentValidationResults } from '../sched_settlement/gate-validation.js';
 import { projectValidationResult } from '../../project-validation.js';
-// All research terminal reports share this commit boundary, including failures/cancellation.
 import { writeResearchTerminalReport, reconcileResearchManifest } from '../../research-measurement.js';
 import { appendRunEventAtRunDir, attemptEventFields, recordRunEvent, type RunEvent } from '../../run-events.js';
 import { cancelledRunPublicationError } from '../../cancellation-policy.js';
@@ -24,20 +23,21 @@ interface RunConclusion {
   completedAt?: string;
   /** A terminal decision can supersede work admitted for this iteration. */
   pendingStageNote?: string;
+  beforeCommit?: (state: StoreState) => void;
   eventFields?: () => Omit<RunEvent, 'type' | 'runId' | 'timestamp'>;
   writeCampaignEntry?: (projectDir: string, state: StoreState) => void;
 }
 
 /** A locked operational mutation supplies its existing commit boundary instead
- * of re-entering the run lock. Publication must run only after that commit. */
+ * of re-entering the run lock. */
 type ConclusionCommit = (state: StoreState, publish: (persist: () => void) => void) => void;
 
-/** Publication is attempted only by the terminal publisher. Run-local records
- * remain authoritative; delivery never changes a committed result. */
+/** The terminal publisher delivers the durable finalizer's report before the
+ * current-tree validation projection and terminal result are committed. */
 export function projectResearchConclusion(state: StoreState, _persist: () => void): void {
   if (state.research?.protocol === RESEARCH_PROTOCOL && isTerminalRunStatus(state.status)) {
     try { reconcileResearchManifest(runDir(state.projectDir, state.runId), state); writeResearchTerminalReport(state); }
-    catch (error) { log.warn({ runId: state.runId, error: String(error) }, 'Research publication receipt unavailable; committed run result is unchanged'); }
+    catch (error) { log.warn({ runId: state.runId, error: String(error) }, 'Research publication receipt unavailable'); }
   }
 }
 /** Recovery is read-only with respect to project files, including missing reports. */
@@ -70,20 +70,28 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
         return;
       }
       Object.assign(current, state);
-      current.validation = currentValidationResults(current.projectDir, current.runId).map(result => ({
-        role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed, storedState: result.storedState ?? result.state,
-        load: result.load, sourceBound: result.sourceBound, ...projectValidationResult(result),
-      }));
       current.status = outcome.status;
       current.reasonCode = outcome.reasonCode;
       if (outcome.detail !== undefined) current.failureReason = outcome.detail;
+      outcome.beforeCommit?.(current);
+      current.validation = currentValidationResults(current.projectDir, current.runId).map(result => ({
+        role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, totals: result.totals, testsRun: result.testsRun, failureCount: result.failureCount, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed, storedState: result.storedState ?? result.state,
+        load: result.load, sourceBound: result.sourceBound, ...projectValidationResult(result),
+      }));
+      // Successful publication requires completed current-tree exits. Engine
+      // finalizers may have replaced the tree since the last author settlement.
+      if (isSuccessfulRunStatus(current.status) && current.validation.some(result => result.state !== 'passed')) {
+        current.status = RUN_STATUS.INCOMPLETE;
+        current.reasonCode = 'validation_unresolved';
+        current.failureReason = 'Current-tree validation is unfinished, missing or rejected; successful publication requires completed zero exits.';
+      }
       current.completedAt = outcome.completedAt ?? new Date().toISOString();
     };
     let accepted = false;
     const publish = (_persist: () => void): void => {
       if (!accepted) return;
-      // The terminal decision and destination intent are durable before the
-      // first report is exposed. No proposal or pending project report exists.
+      // The delivered tree and its validation disposition are committed before
+      // publishing terminal events and campaign entries.
       outcome.writeCampaignEntry?.(state.projectDir, state);
       recordRunEvent(state.projectDir, state.runId, {
         type: 'run_completed', runId: state.runId, timestamp: state.completedAt!,

@@ -20,7 +20,7 @@ import { RecordedStageConfigSchema } from './scheduler/sched_admission/configura
 export interface EngineCheckpoint {
   version: 2; runId: string; projectDir: string; bootId?: string; generation?: string;
   pid: number; processStart?: ProcessStartToken; at: string;
-  processes?: { pid: number; processStart?: ProcessStartToken }[];
+  processes?: { pid: number; processStart?: ProcessStartToken; supervised?: true }[];
 }
 export interface RestartRecovery {
   cause?: EndingCause;

@@ -1,6 +1,5 @@
 import { classifyEnding } from '../../attempt-ending.js';
 import { runRecordPath } from '../../run-layout.js';
-import { confirmedRepairFindings } from './gate-archives.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
 // Boundary: Technical attempt budgets and one repair/re-evaluation stage execution; uses existing worker and typed prompt/session/validation boundaries.
@@ -217,7 +216,6 @@ export async function executeSingleStage(
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
       gateContext: { authorIds: gateReviewedAuthorIds(stage, allStages), fixStageIds, roundDiffPath },
-      repairFindings: stage.retry_to && state.gateRetryRound ? confirmedRepairFindings(runDirPath, stage.retry_to, state.gateRetryRound) : [],
       gateReviewed: isGateReviewed(stage, allStages),
       dynamicDispatch: stage.dynamic_dispatch,
       criterionRefs: stage.criterion_refs,

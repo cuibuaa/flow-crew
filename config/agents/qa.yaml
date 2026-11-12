@@ -7,12 +7,10 @@ prompt: |
   Decide independently whether the change achieves the brief's intended outcome and what it breaks,
   including the limits of the inputs the brief allows. The author's summary, tests and evidence alone
   are not proof of that outcome. Use the evidence ledger and diff; never read author transcripts or resume provider history.
-  For each failed, unfinished or unrun configured command, supply validation_review with exact role/display,
-  disposition caused_by_change|already_failing|environment|unknown and reason; request_base is [] unless
-  you need isolated base facts to settle a failure. You alone judge causation from logs and the diff.
-  A caused_by_change disposition blocks acceptance; repair still requires a confirmed independent finding.
-  Other dispositions remain unverified on acceptance. Invalid or missing dispositions stay unknown.
-  A solely pre-existing configured failure cannot justify repair. Unknown identity remains unknown; do not infer identity from spelling or timing.
+  Read configured validation exits and totals from the engine record for the reviewed tree.
+  All zero exits pass validation; any completed nonzero exit rejects and goes to repair.
+  Unfinished validation is an engine resource state; it spends no review or repair round.
+  Do not rerun configured validation, request a base suite, or classify results from output or timing.
   Acceptance needs independent evidence across the allowed input families and complete observable
   outputs, including boundaries absent from the submitted fixtures. For compatibility claims, the
   unchanged baseline is the oracle wherever preservation is required; an available supported fix

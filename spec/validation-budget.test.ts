@@ -58,7 +58,7 @@ describe('completed author work reaches its independent gate within the validati
   });
 
   it.skipIf(process.platform !== 'linux').each(['running', 'exited'] as const)('retires a detached validation worker with its leader %s without waiting for inherited output pipes', async leader => {
-    setEngineDefaults({ default_timeout_ms: 2000, validation_timeout_ms: 1200 });
+    setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 2000, validation_timeout_ms: 1200 });
     const root = project(), childPath = join(project(), 'child.json'), calls: string[] = [];
     let gateInput = '', gateAt = 0, childReadyAt = 0, cleanedAt: number | undefined;
     let owned: { pid: number; token: ProcessStartToken } | undefined;
@@ -77,7 +77,7 @@ describe('completed author work reaches its independent gate within the validati
     const adapter: Adapter = { async run(prompt, _role, opts) {
       calls.push(opts.stageId);
       if (opts.stageId === 'review') { gateAt = Date.now(); gateInput = prompt; return success(verdict(opts)); }
-      setEngineDefaults({ default_timeout_ms: 20000 }); // the gate has its own budget
+      setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 20000, validation_timeout_ms: 1200 }); // the gate has its own budget
       mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
       return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
     } };
@@ -86,11 +86,11 @@ describe('completed author work reaches its independent gate within the validati
       const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n`);
       expect(owned).toBeDefined(); expect(childReadyAt).toBeGreaterThan(0);
       expect(cleanedAt, 'gate required independent cleanup of the validation worker').toBeUndefined();
-      expect(gateAt - childReadyAt).toBeLessThan(8000);
+      expect(gateAt).toBe(0);
       expect(processLiveness(owned!.pid, owned!.token)).toBe('dead');
-      expect(result.final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
+      expect(result.final.status).toBe('parked'); expect(calls).toEqual(['implement']);
       expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ commands: [{ unfinished: true, state: 'unverified' }] }] });
-      expect(gateInput).toContain('"unfinished":true'); expect(gateInput).toContain('"pass":false');
+      expect(gateInput).toBe('');
       expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
     } finally { clearInterval(watch); clearTimeout(cleanupTimer); retire(); }
   });
@@ -98,7 +98,7 @@ describe('completed author work reaches its independent gate within the validati
   it.each(['slow', 'silent', 'failed-build-then-silent'] as const)('retires %s validation, preserves the author and states incomplete evidence', async shape => {
     // Scale the existing timeout, not command-name heuristics. The configured
     // command exceeds the remaining 20-second author deadline; batch ends first.
-    setEngineDefaults({ default_timeout_ms: 20000, validation_timeout_ms: 5000 });
+    setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 20000, validation_timeout_ms: 5000 });
     const root = project();
     const calls: string[] = []; let gateInput = '', authorClosedAt = 0, gateAt = 0;
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -111,49 +111,24 @@ describe('completed author work reaches its independent gate within the validati
     const program = shape === 'slow' ? 'setTimeout(()=>{},30000)' : 'setInterval(()=>{},1000)';
     const validation = `validation:\n  commands:\n${shape === 'failed-build-then-silent' ? `    build:\n      command: /bin/sh\n      args: ['-c', 'exit 2']\n` : ''}    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n`;
     const result = await workflow(root, adapter, validation);
-    expect(result.final.status, JSON.stringify({ final: result.final, validations: result.validations, calls })).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
+    expect(result.final.status).toBe('parked'); expect(calls).toEqual(['implement']);
     // Gate arrival must fit the declared author-stage envelope. Filesystem
     // settlement and prompt capture also consume wall time on a loaded host.
-    expect(gateAt - authorClosedAt).toBeLessThan(20000);
+    expect(gateAt).toBe(0); expect(authorClosedAt).toBeGreaterThan(0);
     expect(readStageStatus(root, result.final.runId, 'implement')).toMatchObject({ status: 'complete', exitCode: 0 });
     const [fact] = result.validations; expect(result.validations).toHaveLength(1); expect(fact.pass).toBe(false);
     expect(fact.executions).toHaveLength(1); // no eager base and no time to compare the build
     const test = fact.executions[0].commands.find(command => command.role === 'test')!;
     expect(test).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified', failureIdentity: 'unknown' });
     expect(test.exitCode).not.toBe(0); expect(test.reason).toContain('unfinished');
-    expect(gateInput).toContain('"unfinished":true'); expect(gateInput).toContain('"pass":false');
+    expect(gateInput).toBe('');
     expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
     if (shape === 'failed-build-then-silent') {
       expect(fact.executions[0].commands[0], JSON.stringify(fact.executions[0].commands[0])).toMatchObject({ role: 'build', exitCode: 2, state: 'failed' });
-      expect(gateInput).toContain('"exitCode":2');
+      expect(gateInput).toBe('');
     }
     const unchanged = await recordAttemptValidation(root, result.final.runId, 'implement', { runCommand: () => { throw Error('identical uncertain evidence reran'); } });
     expect(unchanged).toMatchObject({ sequence: fact.sequence });
-  });
-
-  it('reaches review after validation exhausts the remaining author budget while preserving completed model work', { timeout: 60_000 }, async () => {
-    setEngineDefaults({ default_timeout_ms: 20000, validation_timeout_ms: 60000 });
-    const root = project(), calls: string[] = []; let gateInput = '', gateAt = 0;
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      calls.push(opts.stageId);
-      if (opts.stageId === 'review') { gateAt = Date.now(); gateInput = prompt; return success(verdict(opts)); }
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
-      return success({ status: 'delivered', summary: 'Model work complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'setInterval(()=>{},1000)']\n`);
-    const author = readStageStatus(root, result.final.runId, 'implement');
-    expect(author).toMatchObject({ status: 'complete', exitCode: 0 });
-    expect(author.timeout?.budgetDeadlineAt).toEqual(expect.any(String));
-    expect(gateAt).toBeGreaterThanOrEqual(Date.parse(author.timeout!.budgetDeadlineAt!));
-    expect(result.final.status, JSON.stringify(result.final)).toBe('complete');
-    expect(calls).toEqual(['implement', 'review']);
-    expect(result.validations).toHaveLength(1);
-    expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ target: 'attempt', commands: [{ unfinished: true, state: 'unverified' }] }] });
-    expect(gateInput).toContain('"unfinished":true');
-    expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
-    console.log('BUDGET_CLAMP_FACTS=' + JSON.stringify({ authorExit: author.exitCode,
-      authorDeadlineAt: author.timeout!.budgetDeadlineAt, gateAt: new Date(gateAt).toISOString(),
-      validationCount: result.validations.length, validation: result.validations[0] }));
   });
 
   it('waits for a successful author settlement instead of validating a failed model attempt', async () => {
@@ -172,7 +147,7 @@ describe('completed author work reaches its independent gate within the validati
   });
 
   it('reserves test and lint allowance even when the build hangs silently', { timeout: 60_000 }, async () => {
-    setEngineDefaults({ validation_timeout_ms: 12000 });
+    setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
     const root = project();
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === 'review') return success(verdict(opts));
@@ -183,13 +158,13 @@ describe('completed author work reaches its independent gate within the validati
     const commands = validations[0].executions[0].commands;
     expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified' });
     expect(commands.slice(1).map(command => command.exitCode)).toEqual([0, 0]);
-    expect(final.status).toBe('complete');
+    expect(final.status).toBe('parked');
     expect(final.validation?.[0]).toMatchObject({ measurement: 'unverified' });
     expect(renderRunSummary(root, rd, final)).toContain('unverified');
   });
 
   it('bounds a near-idle suite after its worker dies and still starts the next command', { timeout: 60_000 }, async () => {
-    setEngineDefaults({ validation_timeout_ms: 12000 });
+    setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
     const root = project(); let gateInput = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
       if (opts.stageId === 'review') { gateInput = prompt; return success(verdict(opts)); }
@@ -202,15 +177,15 @@ describe('completed author work reaches its independent gate within the validati
     expect(commands[1]).toMatchObject({ exitCode: 0, state: 'passed' });
     expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified' });
     expect(commands[0].output).toContain('worker died SIGKILL');
-    expect(gateInput).toContain('worker died SIGKILL');
-    expect(result.final.status).toBe('complete');
+    expect(gateInput).toBe('');
+    expect(result.final.status).toBe('parked');
     expect(result.final.validation?.[0].measurement).toBe('unverified');
   });
 
 });
 
 it('reserves each command its share of the remaining batch without a stall detector', async () => {
-  setEngineDefaults({ validation_timeout_ms: 6000 });
+  setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 6000 });
   let elapsed = 0;
   const allowances: number[] = [];
   const batch = await runProjectValidationBaseline(project(), { now: () => elapsed,
@@ -268,7 +243,7 @@ describe('declarations or one repository-reading model choose commands', () => {
 });
 
 async function catchFixture(kind: 'cache' | 'cpu', confirm: boolean) {
-  setEngineDefaults({ validation_timeout_ms: 60000 });
+  setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 60000 });
   const root = project(), calls: string[] = [];
   const git = (...args: string[]) => isolatedProjectCommand('git', args, root, root);
   git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
@@ -291,15 +266,15 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
       if (results.kind !== 'validation') throw Error('No validation facts');
       const test = results.executions[0].commands.find(command => command.role === 'test')!;
       expect(test.exitCode).toBe(1);
-      const review = { commands: [{ role: 'test', display: test.display, disposition: 'caused_by_change',
+      const _review = { commands: [{ role: 'test', display: test.display, disposition: 'caused_by_change',
         reason: kind === 'cache' ? 'The added cache contract is unmet atop two independent environment failures; not proof of a newly introduced business bug' : 'Worker CPU execution differs from the declared constraint; integration mismatch' }], request_base: [] };
-      if (!confirm) return success({ ...verdict(opts), validation_review: review });
+      if (!confirm) return success({ ...verdict(opts) });
       const predicate = `require('fs').readFileSync('resource.txt','utf8')===${JSON.stringify(kind === 'cache' ? 'STATE' : '0-5')}`;
       const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?0:1)`)}`, cwd: root, shell: '/bin/sh' };
       const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
       const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`], display: 'Independent audit predicate', cwd: root, timeoutMs: 30000 });
       expect(response.exitCode).toBe(0); const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1);
-      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]), validation_review: review });
+      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]) });
     }
     if (opts.stageId === 'implement') {
       writeFileSync(join(root, 'contract.txt'), 'new'); if (kind === 'cpu') writeFileSync(join(root, 'resource.txt'), '6-7');
@@ -311,44 +286,26 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
   return { ...result, root, calls };
 }
 
-describe('11/05 useful catches survive delayed validation', () => {
-  it.each(['cache', 'cpu'] as const)('retains the audit %s refusal and admits repair only with a confirmed reproduction', { timeout: 60_000 }, async kind => {
-    const result = await catchFixture(kind, false);
-    if (kind === 'cpu') {
-      // The operator's serial candidate/base pair independently confirms this regression.
-      expect(result.validations[0].regressions).toHaveLength(1);
-      expect(result.final.status).toBe('complete');
-      expect(result.calls).toEqual(['implement', 'review', 'repair', 'review']);
-      expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf === result.validations[0].regressions![0].record.sequence && entry.exitCode === 0)).toBe(true);
-    } else {
-      expect(result.final.status, JSON.stringify({ gate: result.final.stages.review.gate, validations: result.validations })).toBe('incomplete');
-      expect(result.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
-      expect(result.calls).toEqual(['implement', 'review']);
-      expect(result.validations[0].regressions ?? []).toEqual([]);
-    }
-    expect(result.validations[0].delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
-  });
-
-  it.each(['cache', 'cpu'] as const)('authorizes confirmed %s repair while retaining the original assertion and prior failures', { timeout: 120_000 }, async kind => {
+describe('declared project assertions survive engine ownership', () => {
+  it.each(['cache', 'cpu'] as const)('rejects the %s assertion directly and closes repair only when every declared command passes', async kind => {
     const result = await catchFixture(kind, true);
-    expect(result.final.status, JSON.stringify({ gate: result.final.stages.review, validations: result.validations, calls: result.calls })).toBe('complete'); expect(result.calls).toEqual(['implement', 'review', 'repair', 'review']);
-    const first = result.validations[0]; expect(first.delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
-    expect(first.executions.map(execution => execution.commands.map(command => command.role))).toEqual([['build','test'], ['test'], ['test']]);
-    expect(first.executions.map(execution => execution.rerun)).toEqual([undefined, true, true]);
-    expect(first.failures).toEqual([]);
+    expect(result.final.status).toBe(kind === 'cache' ? 'incomplete' : 'complete');
+    expect(result.calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+    const first = result.validations[0];
+    expect(first.executions).toHaveLength(1);
+    expect(first.executions[0].commands.map(command => command.role)).toEqual(['build', 'test']);
+    expect(first.executions[0].commands[1].exitCode).toBe(1);
+    expect(result.validations.every(record => record.executions.length === 1)).toBe(true);
+    expect(result.validations[1].pass).toBe(kind !== 'cache');
     if (kind === 'cache') {
-      expect(first.executions.map(execution => execution.commands.find(command => command.role === 'test')!.failureCount)).toEqual([3, 3, 2]);
-      expect(first.executions[0].commands.find(command => command.role === 'test')!.failureIdentifiers.filter(id => id.includes('environment_missing_key'))).toHaveLength(2);
-      expect(first.delta.find(entry => entry.role === 'test')!.state).toBe('unverified');
-      expect(result.validations[1].executions[0].commands.find(command => command.role === 'test')).toMatchObject({ exitCode: 1, failureCount: 2 });
-      expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 1, measurement: 'unverified' });
+      expect(first.executions[0].commands[1].failureCount).toBe(3);
+      expect(result.validations[1].executions[0].commands[1].failureCount).toBe(2);
+      expect(result.final.validation?.find(command => command.role === 'test')?.exitCode).toBe(1);
     }
-    expect(result.validations).toHaveLength(2); expect(result.validations[1].pass, JSON.stringify(result.validations[1])).toBe(kind !== 'cache');
     expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf !== undefined && entry.exitCode === 0)).toBe(true);
     expect(evidenceContext(result.root, result.rd)).not.toContain('AUTHOR_TRANSCRIPT');
   });
 });
-
 
 describe('declared validation environment preserves data isolation', () => {
   it('keeps outside data unchanged through a worktree symlink and records the isolating input', async () => {
@@ -382,106 +339,25 @@ describe('declared validation environment preserves data isolation', () => {
 });
 
 
-describe('the independent gate owns unconfirmed failure causation', () => {
-  it.each(['already_failing', 'environment', 'unknown', 'omitted', 'invalid', 'duplicate'] as const)('accepts a failed command honestly with %s disposition', async shape => {
-    const root = project(); let gateInput = '';
-    const display = '/bin/sh -c exit 127';
-    const entry = { role: 'test', display, disposition: shape === 'omitted' || shape === 'invalid' || shape === 'duplicate' ? 'unknown' : shape, reason: 'Independent fixture inspected the failure and product' };
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === 'review') {
-        gateInput = prompt;
-        return success({ ...verdict(opts), ...(shape === 'omitted' ? {} : { validation_review: shape === 'invalid' ? { commands: 'invalid', request_base: [] } : {
-          commands: shape === 'duplicate' ? [entry, { ...entry, disposition: 'caused_by_change' }] : [entry], request_base: [],
-        } }) });
-      }
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'correct');
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const result = await workflow(root, adapter, "validation:\n  commands:\n    build: {command: /bin/sh, args: ['-c', 'exit 0']}\n    test: {command: /bin/sh, args: ['-c', 'exit 127']}\n");
-    expect(gateInput).toContain('"exitCode":127');
-    expect(result.final.status).toBe('complete');
-    expect(result.validations).toHaveLength(1);
-    expect(result.validations[0].executions.map(execution => [execution.target, execution.rerun])).toEqual([['attempt', undefined], ['attempt', true], ['base', true]]);
-    expect(result.validations[0].regressions ?? []).toEqual([]);
-    expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 127, state: 'failed', measurement: 'unverified' });
-    expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({
-      exitCode: 127, measurement: 'unverified', disposition: ['omitted', 'invalid', 'duplicate'].includes(shape) ? 'unknown' : shape,
-    });
-    expect(renderRunSummary(root, result.rd, result.final)).toContain('failed (unverified)');
-  });
-
-  it('leaves a known flake unverified after a passing alone rerun and gate-requested failing base', async () => {
-    const root = project(), counter = join(project(), 'flaky-count');
-    const program = "import fs from 'node:fs';const p=process.argv[2];const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8')):0;fs.writeFileSync(p,String(n+1));const code=n%2===0?1:0;console.log('flaky assertion invocation '+n+' exit '+code);process.exitCode=code;";
-    writeFileSync(join(root, 'check.mjs'), program);
-    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'flaky base']]) isolatedProjectCommand('git', args, root, root);
-    // The unchanged base program demonstrably alternates red and green. The
-    // subsequent configured batch/alone pair is red/green without a code change;
-    // the gate's later base supplement is red again.
-    const probes = [];
-    for (let n = 0; n < 2; n++) probes.push((await runProjectCommand({ role: 'test', command: process.execPath, args: ['check.mjs', counter], display: 'independent base flake probe', cwd: root, timeoutMs: 5000 })).exitCode);
-    expect(probes).toEqual([1, 0]);
-    let reviews = 0; const observedTargets: string[][] = [];
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === 'review') {
-        reviews++;
-        const commands = [{ role: 'test', display: `${process.execPath} check.mjs ${counter}`, disposition: reviews === 1 ? 'unknown' : 'already_failing', reason: 'The unchanged base program was independently observed red and green; a green sample cannot establish introduction' }];
-        if (reviews === 1) {
-          const facts = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation');
-          observedTargets.push((facts[0] as ValidationFact).executions.map(execution => execution.target));
-        } else {
-          expect(prompt).toContain('# Requested base evidence');
-          expect(prompt).toContain('flaky assertion invocation');
-          expect(prompt).toContain('"target":"base"');
-        }
-        return success({ ...verdict(opts), validation_review: { commands, request_base: reviews === 1 ? [{ role: 'test', display: `${process.execPath} check.mjs ${counter}` }] : [] } });
-      }
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'correct');
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const result = await workflow(root, adapter, `validation:\n  commands:\n    test: {command: ${JSON.stringify(process.execPath)}, args: [check.mjs, ${JSON.stringify(counter)}]}\n`);
-    expect(observedTargets).toEqual([['attempt', 'attempt']]);
-    expect(reviews).toBe(2); expect(result.final.status).toBe('complete');
-    expect(result.validations).toHaveLength(2);
-    expect(result.validations[1].executions.map(execution => [execution.target, execution.commands[0].exitCode])).toEqual([['attempt', 1], ['attempt', 0], ['base', 1]]);
-    expect(result.validations[1].regressions ?? []).toEqual([]);
-    expect(result.final.stages.review.gate?.validation?.[0]).toMatchObject({ disposition: 'already_failing', measurement: 'unverified' });
-    expect(result.final.validation?.[0]).toMatchObject({ measurement: 'unverified', exitCode: 1 });
-  });
-
-  it('keeps failed, unfinished and unrun commands unknown without a valid gate output', () => {
-    const results = [
-      { role: 'build' as const, display: 'build', state: 'failed' as const, exitCode: 4 },
-      { role: 'test' as const, display: 'test', state: 'unverified' as const, exitCode: 0, unfinished: true },
-      { role: 'lint' as const, display: 'lint', state: 'unverified' as const, exitCode: null },
-    ].map(value => ({ ...value, durationMs: 0, output: '', failureIdentity: 'unknown' as const, failureIdentifiers: [] }));
-    for (const review of [undefined, {}, { commands: [{ role: 'build', display: 'build', disposition: 'made_up', reason: 'no' }], request_base: [] }]) {
-      expect(validationOwner.validationDispositions(results, review).map(entry => entry.disposition)).toEqual(['unknown', 'unknown', 'unknown']);
-      expect(evaluateValidationDelta(undefined, results).map(entry => entry.state)).toEqual(['unverified', 'unverified', 'unverified']);
-    }
-  });
-});
-
-
-it('accepts a repository-selected missing test honestly alongside a working build', async () => {
+it('rejects a repository-selected nonzero test alongside a working build', async () => {
   const root = project(), calls: string[] = []; let gateInput = '';
   writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"', test: 'exit 127' } }));
   const adapter: Adapter = { async run(prompt, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'review') { gateInput = prompt; return success(verdict(opts)); }
-    expect(prompt).toContain('# Validation command selection');
-    mkdirSync(join(root, 'docs')); writeFileSync(join(root, 'docs/value.txt'), 'correct');
+    if (opts.stageId === 'implement') expect(prompt).toContain('# Validation command selection');
+    mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'correct');
     return success({ status: 'delivered', summary: 'Correct value', caveats: [], remaining_work: [], validation: {
       commands: { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'npm', args: ['run', 'test'] } },
       reason: 'Read the repository scripts and select both declared entry points',
     } }, ['docs/value.txt']);
   } };
   const result = await workflow(root, adapter, '');
-  expect(calls).toEqual(['implement', 'review']);
+  expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
   expect(gateInput).toContain('"exitCode":127');
   expect(result.validations[0].executions[0].commands.map(command => command.exitCode)).toEqual([0, 127]);
-  expect(result.final.status).toBe('complete');
-  expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({ disposition: 'unknown', exitCode: 127, measurement: 'unverified' });
+  expect(result.final.status).toBe('incomplete');
+  expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 127, measurement: 'unverified' });
   expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ state: 'failed', exitCode: 127, measurement: 'unverified' });
   expect(renderRunSummary(root, result.rd, result.final)).toContain('npm run test: unverified');
 });

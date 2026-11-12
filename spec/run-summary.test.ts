@@ -356,7 +356,7 @@ describe('engine-assembled terminal reports', () => {
       writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify(accepted));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('direct exit 1');
-      expect(report).toContain('Command unverified; independent gate owns disposition');
+      expect(report).toContain('Command did not complete with exit 0');
       expect(report?.match(/direct exit 0/g)).toHaveLength(1);
       expect(report).toContain('validation_delta_review_attempt_1_failed.json');
       expect(report).toContain('validation_delta_review_attempt_2_passed.json');

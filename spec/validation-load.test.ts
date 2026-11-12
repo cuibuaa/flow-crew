@@ -83,11 +83,12 @@ describe('host load is telemetry, never a command judgment', () => {
     expect(validation.projectValidationResult({ load })).toEqual({ state: 'unverified', measurement: 'unverified' });
   });
 
-  it.each([127, 4, 1, 2, 0])('publishes exit %s under load in gate, run facts, ledger, watch and report with only the required isolated rerun', async exitCode => {
+  it.each([127, 4, 1, 2, 0])('publishes exit %s under load in gate, run facts, ledger, watch and report from the single completed engine record', async exitCode => {
     const measurement = exitCode === 0 ? 'verified' : 'unverified';
     const project = mkdtempSync(join(tmpdir(), 'load-gate-')); roots.push(project);
     const runner = vi.spyOn(validation, 'runValidationCommand').mockResolvedValue({ exitCode, stdout: exitCode === 0 ? '' : 'arbitrary failure', load: load() });
     writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager: 'npm@10.9.7', scripts: { test: 'fixture-check' } }));
+    writeFileSync(join(project, 'fixture-exit.txt'), String(exitCode));
     const calls: string[] = [];
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
@@ -103,20 +104,20 @@ describe('host load is telemetry, never a command judgment', () => {
     const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
     const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Value is independently checked.\"}]\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: fixture-check\n      args: []\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Value is independently checked.\n";
     const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
-    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(exitCode === 0 ? 1 : 2);
-    expect(final.stages.review.gate).toMatchObject({ pass: true, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
+    expect(final.status).toBe(exitCode === 0 ? 'complete' : 'incomplete');
+    expect(calls.slice(0, 2)).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(1);
+    expect(final.stages.review.gate).toMatchObject({ pass: exitCode === 0, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
     if (exitCode !== 0) {
-      expect(final.stages.repair.attempts ?? []).toHaveLength(0);
+      expect(final.stages.repair.attempts?.length).toBeGreaterThan(0);
     }
     else expect(final.stages.review.gate?.reason).not.toContain('Validation not measured (');
     const directory = runDir(project, final.runId), fact = readEvidence(directory).find(entry => entry.kind === 'validation')!;
     if (fact.kind !== 'validation') throw Error('missing validation');
-    expect(fact.executions.map(execution => [execution.target, execution.rerun ?? false, execution.commands[0].exitCode])).toEqual(exitCode === 0
-      ? [['attempt', false, 0]] : [['attempt', false, exitCode], ['attempt', true, exitCode], ['base', true, null]]);
+    expect(fact.executions.map(execution => [execution.target, execution.rerun ?? false, execution.commands[0].exitCode])).toEqual([['attempt', false, exitCode]]);
     expect(fact.regressions ?? []).toEqual([]);
     expect(fact.pass).toBe(exitCode === 0); expect(fact.delta.find(entry => entry.role === 'test')?.state).toBe(exitCode === 0 ? 'verified' : 'unverified');
     expect(fact.executions[0].commands[0]).toMatchObject({ exitCode, state: exitCode === 0 ? 'passed' : 'failed', measurement, load: load() });
-    expect(readFileSync(runRecordPath(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: PASS; validation: test: ${measurement.replaceAll('_', ' ')}`);
+    expect(readFileSync(runRecordPath(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: ${exitCode === 0 ? 'PASS' : 'FAIL'}; validation: test: ${measurement.replaceAll('_', ' ')}`);
     const summary = renderRunSummary(project, directory, final);
     expect(summary).toContain(exitCode === 0 ? 'passed (verified)' : 'failed (unverified)');
     const watched = pollWatch(createWatchState(), { runsRoot: resolve(directory, '..'), candidateRunIds: () => [final.runId] });

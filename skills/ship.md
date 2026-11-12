@@ -48,8 +48,12 @@ measurements, verdicts, diagnostics, early stopping and report content. Do not i
 declarations or reinterpret legacy measurement briefs. Map writable paths for authored stages; leave
 schema details in the canonical references.
 
-Require the complete configured validation with direct exits/totals after the last relevant
-write. For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
+Require engine-owned complete configured validation with direct exits/totals after the last relevant
+write. Authors finish their deliverables and related tests, then end their invocation. Reviews and
+operator reports consume the tree-bound engine record; authors neither rerun the full suite nor wait
+for that record. A report written before settlement references the engine's final projection rather
+than inventing future exits or changing the validated tree to insert them.
+For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
 `within_expected_range` and `method_was_not_adjusted_to_match_expectation` explicitly. The engine does not detect expectations or inject these obligations.
 Use the [evidence authoring policy](../guide/brief-contract.md#evidence-authoring-policy) for
 judgments about statistics, recurrence, concentrated contributions and supplied mechanisms. Do not invent measurements
@@ -87,7 +91,8 @@ last write, with evidence locations:
    base/end and method; each added mechanism with what it replaced, and every unpaired addition
    justified; any special case keyed on an error string or name; each retained restriction or
    special case with the consumer or failure it protects.
-4. Full configured validation after the last write: direct exit codes and totals; direct
+4. Engine-owned full configured validation after the last write: direct exit codes and totals
+   from its record/projection; direct
    import check for every retained module and execution check for every CLI entrypoint under
    the production runtime. List every removed test with the deleted code it exercised.
 5. Final report with criteria 1–4 evidence, behaviour findings left unchanged, ordered operator cutover and rollback.
