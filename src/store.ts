@@ -461,6 +461,8 @@ export interface StoreState {
   briefAdmission?: BriefAdmissionRecord;
   /** Admitted model-input ceiling; absent on historical records (use engine configuration). */
   inputLimitChars?: number;
+  /** Admitted per-attempt ceiling; absent only on historical records. */
+  stageDurationLimitMs?: number;
   currentIteration?: number;
   gateRetryRound?: { iteration: number; round: number };
   maxIterations?: number;

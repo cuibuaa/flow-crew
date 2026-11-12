@@ -105,6 +105,19 @@ reported by parse/preflight before execution.
 
 ## Inputs, outputs and validation
 
+`stage_duration_ms` optionally lowers the engine's `default_timeout_ms` ceiling for one
+stage attempt. Declare a positive safe integer in leading frontmatter, for example
+`stage_duration_ms: 1800000`. Invalid values and values above the engine ceiling refuse
+admission with the supplied value and the ceiling. The admitted number is recorded as
+`stageDurationLimitMs` in `run.json`; all stage kinds and timeout retries use it. A request
+above it returns a typed `duration_limit` refusal with numeric `requestedBudgetMs` and
+`limit` before adapter execution. Retries receive the same admitted budget, including
+when historical attempts recorded larger budgets. Resume preserves a recorded number;
+a pre-change run adopts the installed engine's number without re-admitting its old brief.
+Brief writing uses the same ceiling and any lower declaration before a run exists.
+Warning, finishing and child-retirement timing is unchanged. This limit is separate from
+idle, validation, research-measurement and hook timeouts; it is not a whole-run budget.
+
 `input_limit_chars` optionally lowers the engine's model-input ceiling. Declare a positive
 safe integer in leading frontmatter; a larger value or any other type refuses admission,
 reporting the declared value and the engine ceiling. The engine records the admitted number

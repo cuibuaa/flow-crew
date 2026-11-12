@@ -1,3 +1,4 @@
+import { admitStageDuration, stageDurationLimit } from '../../stage-duration.js';
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { adapterInputLimit, admitInputLimit } from '../../adapter-input.js';
 import { runRecordPath, assertSeparatedRunLayout } from '../../run-layout.js';
@@ -74,6 +75,8 @@ export function prepareWorkflowLaunch(
   }
   // First admission validates declarations before claiming resources; execution
   // resumption and its recovery/cancellation fences retain their existing path.
+  const stageDurationLimitMs = launchState?.stageDurationLimitMs ?? (briefWasAdmitted
+    ? stageDurationLimit() : admitStageDuration(taskDescription ?? ''));
   const inputLimitChars = launchState?.inputLimitChars ?? (briefWasAdmitted
     ? engineInputLimit : admitInputLimit(taskDescription ?? '', engineInputLimit));
   if (taskDescription !== undefined && !briefWasAdmitted) {
@@ -154,6 +157,7 @@ export function prepareWorkflowLaunch(
       initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
       const blocked = readRunState(projectDir, runId);
       blocked.inputLimitChars = inputLimitChars;
+      blocked.stageDurationLimitMs = stageDurationLimitMs;
       if (taskDescription) blocked.taskDescription = taskDescription;
       if (briefAdmission) blocked.briefAdmission = briefAdmission;
       if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
@@ -169,6 +173,7 @@ export function prepareWorkflowLaunch(
       const state = readRunState(projectDir, runId);
       state.briefConfigured = false;
       state.inputLimitChars = inputLimitChars;
+      state.stageDurationLimitMs = stageDurationLimitMs;
       writeRunState(projectDir, runId, state);
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
@@ -206,6 +211,7 @@ export function prepareWorkflowLaunch(
     if (!resumingExistingRun && !reservation) {
       state.status = 'running';
       state.inputLimitChars ??= inputLimitChars;
+      state.stageDurationLimitMs ??= stageDurationLimitMs;
       state.workflowName = workflow.name;
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
@@ -238,6 +244,7 @@ export function prepareWorkflowLaunch(
     const state = readRunState(projectDir, runId);
     state.briefConfigured = false;
     state.inputLimitChars = inputLimitChars;
+    state.stageDurationLimitMs = stageDurationLimitMs;
     writeRunState(projectDir, runId, state);
     if (taskDescription) state.taskDescription = taskDescription;
     if (briefAdmission) state.briefAdmission = briefAdmission;
@@ -339,6 +346,7 @@ export function prepareWorkflowLaunch(
       }
       current.status = 'running';
       current.inputLimitChars ??= inputLimitChars;
+      current.stageDurationLimitMs ??= stageDurationLimitMs;
       current.workflowName = workflow.name;
       current.maxIterations = maxIterations;
       current.currentIteration = resumeAtIteration;

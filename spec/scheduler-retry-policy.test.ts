@@ -90,7 +90,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
         causes: status.attempts?.map(attempt => attempt.terminationCause) });
     }
     expect(observed[0]).toEqual(observed[1]);
-    expect(observed[0]).toEqual({ budgets: [50, 100], retries: 1, status: 'failed', causes: ['attempt_timeout', 'exit'] });
+    expect(observed[0]).toEqual({ budgets: [50, 50], retries: 1, status: 'failed', causes: ['attempt_timeout', 'exit'] });
   });
 
   it.each(paths)('keeps the default ordinary retry allowance in the %s path', async path => {
@@ -139,7 +139,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     });
   });
 
-  it('resumes a persisted pending timeout retry with its consumed allowance and increased budget', async () => {
+  it('resumes a persisted pending timeout retry with its consumed allowance and admitted budget', async () => {
     const f = fixture(), state = readRunState(project, f.runId), now = '2026-10-01T00:00:00.000Z';
     const timedOut = completedStageAttemptStatus(state.stages.work, 0, {
       exitCode: 124, duration_ms: 50, terminationCause: 'attempt_timeout', error: 'synthetic timeout',
@@ -149,7 +149,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     writeStageStatus(project, f.runId, 'work', state.stages.work); writeRunState(project, f.runId, state);
     const budgets = workerResults([ordinaryFailure]);
     await execute('single', f);
-    expect(budgets).toEqual([100]);
+    expect(budgets).toEqual([50]);
     expect(readStageStatus(project, f.runId, 'work')).toMatchObject({ status: 'failed', retries: 1 });
     expect(readStageStatus(project, f.runId, 'work').attempts?.map(attempt => attempt.terminationCause))
       .toEqual(['attempt_timeout', 'exit']);
@@ -205,7 +205,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     const budgets = workerResults([ordinaryFailure]);
     await settleGateRetries(state, workflow.stages, 1, new Set(), project, f.runId, f.runDirPath,
       workflow, adapter, new Map([['coder', role]]), agentsDir, new Map());
-    expect(budgets).toEqual([100]);
+    expect(budgets).toEqual([50]);
     expect(readStageStatus(project, f.runId, 'work')).toMatchObject({ status: 'failed', retries: 1 });
     expect(readStageStatus(project, f.runId, 'work').attempts).toHaveLength(2);
     expect(readRunState(project, f.runId).gateRetryRound).toEqual({ iteration: 1, round: 2 });

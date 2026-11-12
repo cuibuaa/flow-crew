@@ -166,7 +166,8 @@ interface IgnoredSignalObservation {
   exitCode: number;
   timedOut: boolean;
   termCount: number;
-  settlementElapsedMs: number;
+  settlementClockMs: number;
+  processSignal: NodeJS.Signals | null | undefined;
   survived: boolean;
 }
 
@@ -205,73 +206,60 @@ async function runIgnoredSignalTrial(
   root: string,
   trial: number,
   timeoutThenAbort: boolean,
+  signal: AbortSignal,
 ): Promise<IgnoredSignalObservation> {
   const trigger = timeoutThenAbort ? 'timeout_then_abort' : 'timeout';
-  const suffix = `${trigger}-${trial}`;
-  const readyPath = join(root, `ignore-ready-${suffix}`);
-  const pidPath = join(root, `ignore-pid-${suffix}`);
-  const termCountPath = join(root, `ignore-terms-${suffix}`);
   const fixture = [
-    "const fs = require('node:fs');",
-    'const [readyPath, pidPath, termCountPath] = process.argv.slice(1);',
-    'let termCount = 0;',
     "process.on('SIGTERM', () => {",
-    '  termCount += 1;',
-    '  fs.writeFileSync(termCountPath, String(termCount));',
+    "  process.stdout.write('term\\n');",
     '});',
-    "fs.writeFileSync(pidPath, String(process.pid));",
-    "fs.writeFileSync(readyPath, 'ready');",
+    "process.stdout.write('ready\\n');",
     'setInterval(() => {}, 1000);',
   ].join('\n');
   const controller = timeoutThenAbort ? new AbortController() : undefined;
-  const settlementStarted = performance.now();
-  const execution = execWithStdin(process.execPath, [
-    '-e', fixture, readyPath, pidPath, termCountPath,
-  ], '', {
+  let ready!: () => void, terminated!: () => void, rejectEvent!: (error: unknown) => void;
+  const readiness = new Promise<void>(resolve => { ready = resolve; });
+  const termination = new Promise<void>(resolve => { terminated = resolve; });
+  const cancelled = new Promise<never>((_resolve, reject) => { rejectEvent = reject; });
+  const onCancel = () => rejectEvent(signal.reason);
+  signal.addEventListener('abort', onCancel, { once: true });
+  const started = Date.now();
+  let output = '', pid: number | undefined;
+  const execution = execWithStdin(process.execPath, ['-e', fixture], '', {
     cwd: root,
     timeout_ms: IGNORE_TERM_TIMEOUT_MS,
-    env: {
-      HOME: root,
-      FC_HOME: join(root, 'fc-home'),
-    },
+    env: { HOME: root, FC_HOME: join(root, 'fc-home') },
     ...(controller ? { abortSignal: controller.signal } : {}),
     terminationTiming: TEST_TERMINATION_TIMING,
+    onChild: child => { pid = child.pid; },
+    onStdout: text => {
+      output += text;
+      if (output.includes('ready\n')) ready();
+      if (output.includes('term\n')) terminated();
+    },
   });
-  let abortTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    await waitForFile(readyPath, IGNORE_TERM_TIMEOUT_MS - 50);
-    if (controller) {
-      // Schedule from the execution deadline, not from readiness observation.
-      // Under full-suite load the latter can consume most of the short local
-      // grace and let SIGKILL settle before the intended timeout/abort race.
-      const abortAt = settlementStarted
-        + IGNORE_TERM_TIMEOUT_MS
-        + Math.floor(TEST_TERMINATION_GRACE_MS / 2);
-      abortTimer = setTimeout(
-        () => controller.abort('stage_abort'),
-        Math.max(0, abortAt - performance.now()),
-      );
-    }
-    const result = await awaitBounded(
-      execution,
-      IGNORE_TERM_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_500,
-    );
-    const pid = fixturePid(pidPath);
+    // Child startup and signal delivery consume no execution/grace time.
+    await Promise.race([readiness, cancelled]);
+    await vi.advanceTimersByTimeAsync(IGNORE_TERM_TIMEOUT_MS);
+    await Promise.race([termination, cancelled]);
+    await vi.advanceTimersByTimeAsync(Math.floor(TEST_TERMINATION_GRACE_MS / 2));
+    controller?.abort('stage_abort');
+    await vi.advanceTimersByTimeAsync(TEST_TERMINATION_GRACE_MS - Math.floor(TEST_TERMINATION_GRACE_MS / 2) - 1);
+    expect(processSurvived(pid), 'child retains the entire original grace interval').toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await execution;
     return {
-      trial,
-      trigger,
-      exitCode: result.exitCode,
-      timedOut: result.timedOut === true,
-      termCount: existsSync(termCountPath)
-        ? Number.parseInt(readFileSync(termCountPath, 'utf-8'), 10)
-        : 0,
-      settlementElapsedMs: performance.now() - settlementStarted,
+      trial, trigger, exitCode: result.exitCode, timedOut: result.timedOut === true,
+      termCount: output.split('\n').filter(line => line === 'term').length,
+      settlementClockMs: Date.now() - started,
+      processSignal: result.processSignal,
       survived: processSurvived(pid),
     };
   } finally {
-    clearTimeout(abortTimer);
-    hardStopFixture(fixturePid(pidPath));
+    signal.removeEventListener('abort', onCancel);
+    hardStopFixture(pid);
     await execution.catch(() => undefined);
   }
 }
@@ -319,30 +307,25 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('SIGKILLs children that ignore SIGTERM after one bounded grace interval', { timeout: 12_000 }, async () => {
+  it('SIGKILLs children that ignore SIGTERM after one bounded grace interval', { timeout: 12_000 }, async ({ signal }) => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-ignore-'));
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     try {
-      const [timeoutSamples, raceSamples] = await Promise.all([
-        Promise.all(Array.from({ length: CLEANUP_TRIALS }, (_, index) => (
-          runIgnoredSignalTrial(root, index + 1, false)
-        ))),
-        Promise.all(Array.from({ length: CLEANUP_TRIALS }, (_, index) => (
-          runIgnoredSignalTrial(root, index + 1, true)
-        ))),
-      ]);
-      const observations = [...timeoutSamples, ...raceSamples];
+      const observations: IgnoredSignalObservation[] = [];
+      for (const timeoutThenAbort of [false, true]) {
+        for (let trial = 1; trial <= CLEANUP_TRIALS; trial++) {
+          observations.push(await runIgnoredSignalTrial(root, trial, timeoutThenAbort, signal));
+        }
+      }
       process.stdout.write(`SIGTERM_IGNORED_SAMPLES=${JSON.stringify(observations)}\n`);
-
-      const minimumEscalationDuration = IGNORE_TERM_TIMEOUT_MS
-        + TEST_TERMINATION_GRACE_MS - 100;
       expect(observations.every(({ termCount }) => termCount === 1)).toBe(true);
-      expect(observations.every(({ survived }) => !survived)).toBe(true);
-      expect(observations.every(({ settlementElapsedMs }) => (
-        settlementElapsedMs >= minimumEscalationDuration
-      ))).toBe(true);
-      expect(timeoutSamples.every(({ exitCode, timedOut }) => exitCode === 124 && timedOut)).toBe(true);
-      expect(raceSamples.every(({ exitCode, timedOut }) => exitCode === 137 && timedOut)).toBe(true);
+      expect(observations.every(({ survived, processSignal }) => !survived && processSignal === 'SIGKILL')).toBe(true);
+      expect(observations.map(({ settlementClockMs }) => settlementClockMs))
+        .toEqual([IGNORE_TERM_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS, IGNORE_TERM_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS]);
+      expect(observations[0]).toMatchObject({ exitCode: 124, timedOut: true });
+      expect(observations[1]).toMatchObject({ exitCode: 137, timedOut: true });
     } finally {
+      vi.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
   });

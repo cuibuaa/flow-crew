@@ -1,4 +1,5 @@
 /** The single owner of adapter input admission, before input capture or execution. */
+import { refuseStageDuration, stageDurationLimit } from './stage-duration.js';
 import { createHash } from 'node:crypto';
 import { inspect } from 'node:util';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './adapters/base.js';
@@ -42,7 +43,10 @@ export function adapterInputLength(system: string, user: string): number { retur
 export async function runAdapter(
   adapter: Adapter, prompt: string, role: AgentConfig, options: RunOpts,
   admittedLimit?: number, beforeSend?: () => void,
+  duration?: { limit: number; attemptBudgetMs?: number },
 ): Promise<RunResult> {
+  const refusal = refuseStageDuration(duration?.attemptBudgetMs ?? options.timeout_ms, duration?.limit ?? stageDurationLimit());
+  if (refusal) return refusal;
   const limit = adapterInputLimit(adapter, admittedLimit);
   const measuredLength = adapterInputLength(role.prompt, prompt);
   if (measuredLength > limit) {

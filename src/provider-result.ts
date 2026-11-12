@@ -36,7 +36,18 @@ export interface InputLimitRefusal {
   diagnosticSha256: string;
   resetAt?: never;
 }
-export type ProviderFailure = NativeProviderFailure | InputLimitRefusal;
+export interface StageDurationRefusal {
+  kind: 'duration_limit';
+  provider: 'engine';
+  source: 'stage_duration';
+  eventType: 'stage_duration';
+  requestedBudgetMs: number;
+  limit: number;
+  reason: string;
+  diagnosticSha256: string;
+  resetAt?: never;
+}
+export type ProviderFailure = NativeProviderFailure | InputLimitRefusal | StageDurationRefusal;
 
 export function nativeDiagnostic(event: Record<string, any>): string | undefined {
   const primary = [event.message, typeof event.error === 'string' ? event.error : event.error?.message, event.item?.message]

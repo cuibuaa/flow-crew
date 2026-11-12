@@ -222,9 +222,8 @@ export type TechnicalRetryTerminalDecision = 'attempt_timeout';
 
 export interface TechnicalRetryBudgetState {
   initialBudgetMs: number;
-  currentBudgetMs: number;
   previousEffectiveBudgetMs?: number;
-  increaseAfterTimeout: boolean;
+  timedOut: boolean;
   attemptsStarted: number;
 }
 
@@ -244,61 +243,42 @@ export type TechnicalRetryBudgetTransition =
   | { type: 'state_updated' }
   | { type: 'terminal'; terminalDecision: TechnicalRetryTerminalDecision };
 
-export function nextTechnicalRetryBudget(previousBudgetMs: number): number {
-  positiveSafeInteger(previousBudgetMs, 'previous attempt timeout');
-  return positiveSafeInteger(previousBudgetMs * 2, 'retry attempt timeout');
-}
-
 export function createTechnicalRetryBudgetState(input: {
   initialBudgetMs: number;
-  currentBudgetMs?: number;
   previousEffectiveBudgetMs?: number;
-  increaseAfterTimeout?: boolean;
+  timedOut?: boolean;
   attemptsStarted?: number;
 }): TechnicalRetryBudgetState {
   const initialBudgetMs = positiveSafeInteger(input.initialBudgetMs, 'initial attempt timeout');
   return {
     initialBudgetMs,
-    currentBudgetMs: input.currentBudgetMs ?? initialBudgetMs,
     previousEffectiveBudgetMs: input.previousEffectiveBudgetMs,
-    increaseAfterTimeout: input.increaseAfterTimeout ?? false,
+    timedOut: input.timedOut ?? false,
     attemptsStarted: input.attemptsStarted ?? 0,
   };
 }
 
-/** Retry growth is independent of elapsed wall time and has no aggregate balance. */
+/** Every retry receives the admitted budget, independent of prior timeouts. */
 export function transitionTechnicalRetryBudget(
   state: TechnicalRetryBudgetState,
   event: TechnicalRetryBudgetEvent,
 ): TechnicalRetryBudgetTransition {
   if (event.type === 'attempt_finished' || event.type === 'attempt_timed_out') {
     state.previousEffectiveBudgetMs = positiveSafeInteger(event.effectiveBudgetMs, 'effective attempt timeout');
-    state.increaseAfterTimeout = event.type === 'attempt_timed_out';
+    state.timedOut = event.type === 'attempt_timed_out';
     return { type: 'state_updated' };
   }
 
   if (event.type === 'retry_exhausted') {
-    if (!state.increaseAfterTimeout) throw new Error('retry_exhausted requires a preceding attempt_timed_out event');
-    state.increaseAfterTimeout = false;
+    if (!state.timedOut) throw new Error('retry_exhausted requires a preceding attempt_timed_out event');
+    state.timedOut = false;
     return { type: 'terminal', terminalDecision: 'attempt_timeout' };
   }
 
-  if (state.attemptsStarted === 0) {
-    state.attemptsStarted++;
-    return { type: 'attempt_prepared', budgetMs: state.currentBudgetMs };
-  }
-  if (state.increaseAfterTimeout) {
-    const previous = state.previousEffectiveBudgetMs ?? state.currentBudgetMs;
-    const next = nextTechnicalRetryBudget(previous);
-    state.currentBudgetMs = next;
-    state.increaseAfterTimeout = false;
-    state.attemptsStarted++;
-    return {
-      type: 'attempt_prepared',
-      budgetMs: next,
-      retryContext: { previousBudgetMs: previous, nextBudgetMs: next },
-    };
-  }
+  const retryContext = state.timedOut && state.attemptsStarted > 0
+    ? { previousBudgetMs: state.previousEffectiveBudgetMs ?? state.initialBudgetMs, nextBudgetMs: state.initialBudgetMs }
+    : undefined;
+  state.timedOut = false;
   state.attemptsStarted++;
-  return { type: 'attempt_prepared', budgetMs: state.currentBudgetMs };
+  return { type: 'attempt_prepared', budgetMs: state.initialBudgetMs, ...(retryContext ? { retryContext } : {}) };
 }

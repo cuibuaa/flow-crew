@@ -1,3 +1,4 @@
+import { stageDurationLimit } from '../../stage-duration.js';
 import { runRecordPath } from '../../run-layout.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { decisionSchema } from '../../decision-graph.js';
@@ -20,7 +21,7 @@ import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
 import { gateReviewedAuthorIds, isGateReviewed } from '../sched_settlement/gate-recovery.js';
-import { appendStageExecutionContracts, createSchedulerTechnicalRetryState, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult, stageInitialTimeout } from '../sched_settlement/stage-execution.js';
+import { appendStageExecutionContracts, createSchedulerTechnicalRetryState, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult } from '../sched_settlement/stage-execution.js';
 import { StoreState, runDir } from '../../store.js';
 import { runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
@@ -45,7 +46,7 @@ export async function executeOrdinaryStage(
       }
       const agent = agents.get(stage.role)!;
       if (stage.is_gate && state.decisionGraph?.enabled[stage.id] && existsSync(runRecordPath(runDirPath, `verdict_${stage.id}.json`))) unlinkSync(runRecordPath(runDirPath, `verdict_${stage.id}.json`));
-      const initialTimeout = stageInitialTimeout();
+      const initialTimeout = stageDurationLimit(state.stageDurationLimitMs);
       let technicalRetry = technicalRetries.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
       log.info({ stage: stage.id, role: stage.role }, 'Running stage');

@@ -1,3 +1,4 @@
+import { admitStageDuration } from './stage-duration.js';
 import { runRecordPath } from './run-layout.js';
 /** Pre-admission authorship. No task/run is registered until this returns a brief. */
 import { createHash, randomUUID } from 'node:crypto';
@@ -11,12 +12,12 @@ import { parse, stringify } from 'yaml';
 import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import type { Adapter, AgentConfig, RunResult } from './adapters/base.js';
 import { loadAdapterByName } from './adapters/loader.js';
-import { engineConfigDir, loadEngineDefaults } from './config.js';
+import { engineConfigDir } from './config.js';
 import { parseAgent } from './scheduler/sched_admission/configuration.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { fcGlobalDir } from './store.js';
 import { adapterInputLimit, admitInputLimit, runAdapter } from './adapter-input.js';
-import type { InputLimitRefusal } from './provider-result.js';
+import type { InputLimitRefusal, StageDurationRefusal } from './provider-result.js';
 
 // The transport and local validation derive from this single schema.
 const strings = z.array(z.string().min(1));
@@ -48,8 +49,8 @@ const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringi
 export interface WrittenBrief {
   brief: string;
   digest: string;
-  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error' | 'input_too_large';
-  refusal?: InputLimitRefusal;
+  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error' | 'input_too_large' | 'duration_limit';
+  refusal?: InputLimitRefusal | StageDurationRefusal;
   questions: string[];
   reasons: string[];
   evidenceDir?: string;
@@ -77,12 +78,12 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   // Configuration errors are refusals, not failed provider attempts. Resolve
   // before creating invocation evidence or entering the provider-error catch.
   const adapter = options.adapterInstance ?? await loadAdapterByName(adapterName);
+  const durationLimit = admitStageDuration(original);
   const inputLimit = admitInputLimit(original, adapterInputLimit(adapter));
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
-  const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA, inputLimit]));
+  const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA, inputLimit, durationLimit]));
   const root = join(fcGlobalDir(), 'brief-writing');
   const evidenceDir = join(root, identity);
-  const defaults = loadEngineDefaults();
   let reasons: string[] = [];
   const finish = (brief: string, outcome: WrittenBrief['outcome'], questions: string[]): WrittenBrief => {
     const digest = hash(brief);
@@ -117,7 +118,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       try {
         result = await runAdapter(adapter, prompt, reader, {
           workDir: project, runDir: evidenceDir, stageId: `brief_writer_${attempt}`,
-          timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA,
+          timeout_ms: durationLimit, outputSchema: BRIEF_OUTPUT_SCHEMA,
           onInvocationInput: input => save(file(`native-${randomUUID()}.json`), input),
           onRequestEvidence: record => save(file(`requests-${randomUUID()}.json`), record),
         }, inputLimit, () => {
@@ -125,13 +126,13 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
           atomicWrite(join(evidenceDir, 'original.txt'), original, { durability: 'durable' });
           save(file('invocation.json'), { role: reader, adapter: adapterName,
             prompt, replay: options.replay !== false, inputLimitChars: inputLimit,
-            outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
-        });
+            stageDurationLimitMs: durationLimit, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
+        }, { limit: durationLimit });
       } catch (error) {
         result = { output: '', exitCode: 1, duration_ms: 0, friendlyError: String(error) };
       }
-      if (result.providerFailure?.source === 'input_limit') return {
-        brief: original, digest: hash(original), outcome: 'input_too_large', questions: [],
+      if (result.providerFailure?.source === 'input_limit' || result.providerFailure?.source === 'stage_duration') return {
+        brief: original, digest: hash(original), outcome: result.providerFailure.kind, questions: [],
         reasons: [result.providerFailure.reason], refusal: result.providerFailure,
       };
       if (result.exitCode !== 0) {

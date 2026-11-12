@@ -388,18 +388,18 @@ describe('bounded timeout negotiation', () => {
 
     const recovered = await scenario(true);
     expect(recovered.budgets).toHaveLength(1);
-    expect(recovered.budgets[0]).toBe(7_200_000);
+    expect(recovered.budgets[0]).toBe(OWNED_STAGE_TIMEOUT_MS);
     expect(recovered.status.attempts?.at(-1)?.timeout?.attemptId).not.toBe('persisted-attempt');
 
     rmSync(projectDir, { recursive: true, force: true });
     projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-e9-project-resume-missing-'));
     seedEngineDefaults();
     const recoveredFromRetryLedger = await scenario(false);
-    expect(recoveredFromRetryLedger.budgets).toEqual([7_200_000]);
+    expect(recoveredFromRetryLedger.budgets).toEqual([OWNED_STAGE_TIMEOUT_MS]);
     expect(recoveredFromRetryLedger.status.status).toBe('complete');
   });
 
-  it('always prepares a strictly larger timeout retry without a second balance', () => {
+  it('prepares every timeout retry within the admitted budget without a second balance', () => {
     const retry = createTechnicalRetryBudgetState({ initialBudgetMs: 50 });
     const budgets: number[] = [];
     const first = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
@@ -424,7 +424,7 @@ describe('bounded timeout negotiation', () => {
       budgets,
       terminalDecision: terminal.terminalDecision,
     };
-    expect(semantic).toEqual({ budgets: [50, 100], terminalDecision: 'attempt_timeout' });
+    expect(semantic).toEqual({ budgets: [50, 50], terminalDecision: 'attempt_timeout' });
     process.stdout.write(`SINGLE_TIMEOUT_RETRY_SEMANTICS=${JSON.stringify(semantic)}\n`);
   });
 

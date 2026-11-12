@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 45 -->
+<!-- flowcrew-skill-revision: 46 -->
 
 # Ship a conversation to FlowCrew
 
@@ -116,7 +116,7 @@ If bytes change, repeat preflight and rehearsal.
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
 target, base, new branch, research declarations, adapter, foreground/background, campaign/context,
 iteration bound and stage deadline read from engine configuration (`max_iterations`
-and `default_timeout_ms`). Do not hardcode defaults.
+and `default_timeout_ms`), lowered by the brief's `stage_duration_ms` when declared. Do not hardcode defaults.
 Explain unattended shell authority and the scope-versus-host-isolation boundary.
 
 Ask: “Start this exact brief digest `<digest>` with these settings?”

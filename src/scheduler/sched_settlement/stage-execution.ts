@@ -1,3 +1,4 @@
+import { stageDurationLimit } from '../../stage-duration.js';
 import { classifyEnding } from '../../attempt-ending.js';
 import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
@@ -5,11 +6,11 @@ import { appendGateEvidenceInstruction } from './gate-archives.js';
 // Boundary: Technical attempt budgets and one repair/re-evaluation stage execution; uses existing worker and typed prompt/session/validation boundaries.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
-import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
+import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
-import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
@@ -20,16 +21,6 @@ import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
 import { isGateReviewed, gateReviewedAuthorIds } from './gate-recovery.js';
-
-export function stageInitialTimeout(): number {
-  return loadDefaults().default_timeout_ms;
-}
-
-export function budgetAfterTimeouts(initialBudgetMs: number, timeoutCount: number): number {
-  let budget = initialBudgetMs;
-  for (let index = 0; index < timeoutCount; index++) budget = nextTechnicalRetryBudget(budget);
-  return budget;
-}
 
 export function createSchedulerTechnicalRetryState(
   initialBudgetMs: number,
@@ -46,13 +37,12 @@ export function createSchedulerTechnicalRetryState(
   const persistedBudget = priorTimeout?.budgetMs;
   const previousBudgetMs = Number.isSafeInteger(persistedBudget) && Number(persistedBudget) > 0
     ? Number(persistedBudget)
-    : budgetAfterTimeouts(initialBudgetMs, Math.max(0, retries - 1));
+    : initialBudgetMs;
   const priorTimedOut = priorAttempt?.terminationCause === 'attempt_timeout';
   return createTechnicalRetryBudgetState({
     initialBudgetMs,
-    currentBudgetMs: retries > 0 ? previousBudgetMs : initialBudgetMs,
     previousEffectiveBudgetMs: retries > 0 ? previousBudgetMs : undefined,
-    increaseAfterTimeout: priorTimedOut,
+    timedOut: priorTimedOut,
     attemptsStarted: retries,
   });
 }
@@ -87,7 +77,7 @@ export function decideStageRetry(
   const cause = result.endingCause ?? classifyEnding({ ...result, engineVoid: result.engineVoid || result.terminationCause === 'engine_void', cancelled: ['stage_abort', 'cancelled', 'host_restart'].includes(result.terminationCause ?? '') });
   if (cause === 'engine_void') return 'engine_void';
   if (!['work_failed', 'process_death'].includes(cause)) return 'stop';
-  if (result.providerFailure?.kind === 'authentication' || result.providerFailure?.kind === 'input_too_large') return 'stop';
+  if (result.providerFailure?.kind === 'authentication' || result.providerFailure?.kind === 'input_too_large' || result.providerFailure?.kind === 'duration_limit') return 'stop';
   const limit = cause === 'process_death' || result.providerFailure?.kind === 'transient' || result.terminationCause === 'attempt_timeout' ? technicalLimit : failureLimit;
   return retries < limit ? 'retry' : 'stop';
 }
@@ -142,7 +132,7 @@ export async function executeSingleStage(
     agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
   }
   const agent = agents.get(stage.role)!;
-  const initialTimeout = stageInitialTimeout();
+  const initialTimeout = stageDurationLimit(state.stageDurationLimitMs);
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
 
   let resolvedPrompt = stage.prompt_template || '';
@@ -241,7 +231,7 @@ export async function executeSingleStage(
       concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: result.providerFailure.kind === 'input_too_large' ? 'input_too_large' : 'adapter_failure', detail, pendingStageNote: detail, eventFields: () => ({
         iteration: state.currentIteration ?? 1, stageId: stage.id, detail, source: 'scheduler', level: 'warning',
       }) });
-      return;
+      return result;
     }
     if (result.terminationCause === 'attempt_timeout') transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
 

@@ -1,3 +1,4 @@
+import { refuseStageDuration, stageDurationLimit } from './stage-duration.js';
 import { classifyEnding } from './attempt-ending.js';
 import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
 import { runRecordPath, stageWorkPath, stageWritePath, requestPath } from './run-layout.js';
@@ -273,6 +274,17 @@ export async function runStage(
 ): Promise<RunResult> {
   const runState = existsSync(runRecordPath(opts.runDir, 'run.json'))
     ? readRunState(opts.projectDir, opts.runId) : undefined;
+  const durationLimit = stageDurationLimit(runState?.stageDurationLimitMs);
+  const durationRefusal = refuseStageDuration(opts.timeout_ms, durationLimit);
+  if (durationRefusal) {
+    // Publish the refused entry without allocating an execution index or deadline.
+    writeStageStatus(opts.projectDir, opts.runId, opts.stageId, {
+      ...runState?.stages[opts.stageId], status: STAGE_STATUS.FAILED, retries: opts.retries,
+      exitCode: durationRefusal.exitCode, error: durationRefusal.friendlyError,
+      providerFailure: durationRefusal.providerFailure,
+    });
+    return durationRefusal;
+  }
   mkdirSync(stageWritePath(opts.runDir, 'stages', opts.stageId), { recursive: true });
   const direct = runState?.workflowName === 'direct';
   const skillNames = opts.stageSkills ?? [];
@@ -966,7 +978,7 @@ export async function runStage(
           outputSchema: opts.outputSchema,
         }, runState?.inputLimitChars, () => {
           if (!selectedAdapter.capturesInvocationInput) captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt }, 'adapter');
-        });
+        }, { limit: durationLimit, attemptBudgetMs: opts.timeout_ms });
         } finally { await recorder?.close(); }
       }).then(
         (value) => {
