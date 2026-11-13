@@ -63,8 +63,10 @@ beforeEach(() => {
   previousSocket = process.env.FLOWCREW_DAEMON_SOCKET;
   process.env.FLOWCREW_DAEMON_SOCKET = join(root, 'daemon.sock');
   fixture.child = undefined; fixture.onSpawn = undefined; fixture.watch = undefined; fixture.git = new GitStandIn();
-  fixture.git.answer = args => args[0] === 'rev-parse' ? success(args.includes('--show-toplevel') ? project : oid)
-    : args[0] === 'config' ? { status: 1 } : success();
+  // Global options (-c key=value) may precede the subcommand; the answer follows the subcommand.
+  fixture.git.answer = args => args.includes('rev-parse')
+    ? success(args.includes('--show-toplevel') || args.includes('--git-common-dir') ? project : oid)
+    : args.includes('config') ? { status: 1 } : success();
 });
 afterEach(() => {
   closeRollbackBaseline(project); setFcGlobalDir(previous);
