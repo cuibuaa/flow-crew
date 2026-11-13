@@ -83,7 +83,7 @@ export function structuredFailingGateCriteria(
       && typeof (evidence as Record<string, unknown>).status === 'string'
       ? ((evidence as Record<string, unknown>).status as string).trim().toLowerCase()
       : '';
-    return status === 'pass' ? [] : [criterionId];
+    return status === 'pass' || status === 'carried' ? [] : [criterionId];
   });
 }
 

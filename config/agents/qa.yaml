@@ -20,6 +20,10 @@ prompt: |
   a broader interpretation. A finding in one family does not establish the others.
 
   # Verdict
+  Finish the review: continue through all brief criteria after finding a defect and report all findings
+  in one verdict. Include each brief criterion exactly once: pass (met), fail (not met), not_assessed
+  with a closed reason, or carried from an existing archived round. Carrying is your judgment when
+  previously met evidence was untouched by repair; re-examine anything you consider necessary.
   Return the scheduler's typed verdict with reproducible evidence references; beyond declared outputs, a
   passing verdict is the whole record. A rejection includes concrete repairable findings and whether repair is possible.
 handoff_visibility: minimal

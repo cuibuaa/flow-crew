@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 46 -->
+<!-- flowcrew-skill-revision: 47 -->
 
 # Ship a conversation to FlowCrew
 

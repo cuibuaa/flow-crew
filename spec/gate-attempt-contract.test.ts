@@ -129,7 +129,8 @@ describe('explicit gate repairability', () => {
     const result = await runScenario({ maxIterations: 3, includeRepair: true,
       gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
         repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' },
-        criteria: { fact: { status: 'fail', evidence: 'Retained immutable fact' } },
+        criteria: {}, audit_findings: { version: 1, findings: [{ id: 'fact', paths: ['fixture'],
+          reason: 'Retained immutable fact', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] },
       } }),
     });
     expect(result.final.status).toBe('escalated');
@@ -138,7 +139,7 @@ describe('explicit gate repairability', () => {
     expect(result.repairCalls).toBe(0);
     expect(result.final.failureReason).toContain('Irreparable gate rejection');
     const retained = JSON.parse(readFileSync(runRecordPath(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
-    expect(retained.criteria.fact.status).toBe('fail');
+    expect(retained.audit_findings.findings[0].reason).toBe('Retained immutable fact');
     expect(retained.repairability.disposition).toBe('irreparable');
   });
 

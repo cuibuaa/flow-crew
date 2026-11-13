@@ -12,6 +12,7 @@ import { readRunEvents } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { structuredFailingGateCriteria } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
@@ -81,8 +82,8 @@ describe('stage record constraints before settlement', () => {
     expect(AuditFindingsSchema.safeParse(record.audit_findings).success).toBe(false);
   });
 
-  it('expresses passing criteria and no open findings in the supplied schema', () => {
-    const failedCriterion = passed(); failedCriterion.criteria.criterion.status = 'fail';
+  it('expresses closed criterion values and no open findings in the supplied schema', () => {
+    const failedCriterion = passed(); failedCriterion.criteria.criterion.status = 'invented';
     expect(() => parseStageRecord(JSON.stringify(failedCriterion), schema())).toThrow();
     const openFinding = { ...passed(), audit_findings: { version: 1, findings: [finding()] } };
     expect(() => parseStageRecord(JSON.stringify(openFinding), schema())).toThrow();
@@ -132,7 +133,7 @@ describe('record correction uses the existing attempt', () => {
     ['blank evidence', () => { const record = rejected(); record.criteria.criterion.evidence = '   '; return JSON.stringify(record); }],
     ['missing criterion', () => JSON.stringify({ ...rejected(), criteria: {} })],
     ['invalid repairability', () => JSON.stringify({ ...rejected(), repairability: { version: 2 } })],
-    ['passing failed criterion', () => JSON.stringify({ ...passed(), criteria: rejected().criteria })],
+    ['unknown criterion status', () => JSON.stringify({ ...passed(), criteria: { criterion: { status: 'invented', evidence: 'fixture' } } })],
     ['passing open findings', () => JSON.stringify({ ...passed(), audit_findings: rejected().audit_findings })],
     ['unknown field', () => JSON.stringify({ ...rejected(), unexpected: true })],
     ['malformed JSON', () => '{"pass":'],
@@ -162,6 +163,52 @@ describe('record correction uses the existing attempt', () => {
     expect(status.attempts).toHaveLength(1);
     expect(status.attempts?.[0]).toMatchObject({ exitCode: 0, disposition: 'repaired' });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
+  });
+
+  it.each(['omitted', 'extra', 'missing-round', 'open-reason'] as const)('refuses persistently invalid complete-review output: %s', async mode => {
+    writeFileSync(runRecordPath(runDir, 'brief_criteria.json'), JSON.stringify({ version: 1, briefDigest: 'fixture',
+      criteria: [{ id: 'criterion', text: 'First' }, { id: 'second', text: 'Second' }] }));
+    const record = { ...rejected(), criteria: { criterion: rejected().criteria.criterion } as Record<string, unknown> };
+    if (mode !== 'omitted') record.criteria.second = { status: 'pass', evidence: 'second' };
+    if (mode === 'extra') record.criteria.extra = { status: 'pass', evidence: 'extra' };
+    if (mode === 'missing-round') record.criteria.second = { status: 'carried', evidence: 'previous review', from: { iteration: 1, round: 99 } };
+    if (mode === 'open-reason') record.criteria.second = { status: 'not_assessed', evidence: 'unknown', reason: 'stopped_at_first_defect' };
+    let calls = 0;
+    const adapter: Adapter = { async run(prompt) {
+      if (++calls === 2) expect(prompt).toContain('Stage result correction');
+      return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 };
+    } };
+    // Simulate a gate with a narrower admitted assignment: the brief still owns coverage.
+    const result = await runStage(adapter, { ...options(), outputSchema: stageRecordSchema({ isGate: true,
+      criterionRefs: ['criterion'], runDir, extendedVerdict: true }) });
+    expect(result.exitCode).toBe(1);
+    expect(calls).toBe(2);
+    expect(result.friendlyError).toContain(mode === 'missing-round' ? 'missing round' : 'Stage record refused');
+    expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
+  });
+
+  it('allows closed unassessed reasons and reviewer-chosen carrying from an existing round', async () => {
+    const archive = runRecordPath(runDir, 'gate_reevaluation/iteration_2/round_3');
+    mkdirSync(archive, { recursive: true });
+    writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify(rejected()));
+    for (const entry of [
+      { status: 'not_assessed', evidence: 'No instrument', reason: 'capability_unavailable' },
+      { status: 'not_assessed', evidence: 'No receipt', reason: 'evidence_unavailable' },
+      { status: 'carried', evidence: 'Reviewer elects to carry', from: { iteration: 2, round: 3 } },
+    ]) {
+      const record = { ...rejected(), criteria: { criterion: entry } };
+      const result = await runStage({ async run() { return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 }; } }, options());
+      expect(result.exitCode, result.friendlyError).toBe(0);
+      expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
+    }
+  });
+
+  it('keeps carried results out of the next repair obligations', () => {
+    writeFileSync(runRecordPath(runDir, 'verdict_review.json'), JSON.stringify({ ...rejected(), criteria: {
+      criterion: { status: 'fail', evidence: 'Repair me' },
+      stable: { status: 'carried', evidence: 'Previously met', from: { iteration: 1, round: 1 } },
+    } }));
+    expect(structuredFailingGateCriteria(runDir, 'review')).toEqual(['criterion']);
   });
 
   it('wraps up instead of correcting when a malformed result crosses the warning boundary', async () => {

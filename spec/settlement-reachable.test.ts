@@ -222,7 +222,7 @@ describe('criterion discharge boundary', () => {
     expect(changedBrief.pass).toBe(false);
   });
 
-  it('derives discharge from completed ordinary work plus immutable passing gate evidence only', () => {
+  it.each(['pass', 'carried'])('derives discharge from completed work plus immutable %s criterion evidence only', status => {
     const replay = materializeReplay();
     const work = stage({ id: 'round_work', role: 'coder', criterion_refs: [recorded.criterionId] });
     const gate = stage({
@@ -232,7 +232,11 @@ describe('criterion discharge boundary', () => {
     });
     const archivePath = 'stage_evidence/iteration_8/audit_terminal/verdict.json';
     mkdirSync(dirname(runRecordPath(replay.runDirPath, archivePath)), { recursive: true });
-    writeFileSync(runRecordPath(replay.runDirPath, archivePath), `${JSON.stringify(recorded.verdict, null, 2)}\n`, 'utf8');
+    const verdict = { ...recorded.verdict, criteria: { [recorded.criterionId]: {
+      ...recorded.verdict.criteria[recorded.criterionId], status,
+      ...(status === 'carried' ? { from: { iteration: 7, round: 1 } } : {}),
+    } } };
+    writeFileSync(runRecordPath(replay.runDirPath, archivePath), `${JSON.stringify(verdict, null, 2)}\n`, 'utf8');
     replay.state.stages.round_work = { status: STAGE_STATUS.COMPLETE, retries: 0 };
     const evidence: StageEvidenceRecord[] = [{
       stageId: 'audit_terminal', iteration: 8,

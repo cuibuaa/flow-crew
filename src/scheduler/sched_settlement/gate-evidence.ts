@@ -1,5 +1,8 @@
 import { stageWorkPath, runRecordPath } from '../../run-layout.js';
 // Boundary: Contradictory verdict fields and per-criterion evidence validation using admitted assignments; no execution or publication.
+import { CRITERION_ENTRY_SCHEMA, gateCriterionRefs } from '../../handoff.js';
+import { validate } from '../../reality-gate/checks/json-schema-match.js';
+import { archivedGateRejections } from './gate-archives.js';
 import { DispatchAdmissionReport } from '../sched_admission/dispatch.js';
 import { readFileSync } from 'node:fs';
 import type { GateVerdict, StageAttempt } from '../../store.js';
@@ -77,26 +80,23 @@ export function validateGateCriterionEvidence(
   stageId: string,
   verdict: Record<string, unknown>,
 ): string | undefined {
-  const refs = assignedGateCriterionRefs(base, stageId);
-  if (refs.length === 0) return undefined;
+  const refs = gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId));
+  if (refs.length === 0) return undefined; // Legacy records without admitted criteria.
   const criteria = verdict.criteria;
   if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) {
     return `Gate criterion contract violation: missing criteria evidence map for ${refs.join(', ')}`;
   }
-  const evidenceMap = criteria as Record<string, unknown>;
-  for (const ref of refs) {
-    const entry = evidenceMap[ref];
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      return `Gate criterion contract violation: missing evidence for ${ref}`;
-    }
-    const record = entry as Record<string, unknown>;
-    const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : '';
-    const evidence = typeof record.evidence === 'string' ? record.evidence.trim() : '';
-    if (!['pass', 'fail', 'judgement'].includes(status) || !evidence) {
-      return `Gate criterion contract violation: ${ref} needs status pass|fail|judgement and non-empty evidence`;
-    }
-    if (verdict.pass === true && status === 'fail') {
-      return `Gate criterion contract violation: pass=true conflicts with failed criterion ${ref}`;
+  const entries = criteria as Record<string, unknown>;
+  if (Object.keys(entries).length !== refs.length || refs.some(ref => !Object.hasOwn(entries, ref))) {
+    return 'Gate criterion contract violation: every brief criterion must occur exactly once, with no extra IDs';
+  }
+  for (const [ref, entry] of Object.entries(entries)) {
+    const errors = validate(entry, CRITERION_ENTRY_SCHEMA, `criteria.${ref}`);
+    if (errors.length) return `Gate criterion contract violation: ${errors.join('; ')}`;
+    const result = entry as { status: string; from?: { iteration: number; round: number } };
+    if (result.status === 'carried' && !archivedGateRejections(base, stageId).some(prior =>
+      prior.iteration === result.from!.iteration && prior.round === result.from!.round)) {
+      return `Gate criterion contract violation: ${ref} carries from a missing round`;
     }
   }
   return undefined;

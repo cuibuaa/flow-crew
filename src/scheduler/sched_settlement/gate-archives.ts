@@ -241,20 +241,33 @@ export function buildGateDispatchPreamble(input: {
   authorIds?: readonly string[]; fixStageIds?: string[]; roundDiffPath?: string;
   interruptedInputPath?: string; interruptedOutputPath?: string;
 }): string {
+  let repairChangedFiles: string[] | null = null;
+  if (input.roundDiffPath) {
+    try {
+      const diff = JSON.parse(readFileSync(input.roundDiffPath, 'utf8'));
+      repairChangedFiles = diff.files.filter((file: { status: string }) => file.status !== 'reported-touched')
+        .map((file: { path: string }) => file.path);
+    } catch { /* Missing diff means unknown, never an assertion of no changes. */ }
+  }
   return `# Gate evaluation facts\n${JSON.stringify({
     gateId: input.gateId, evaluationRound: input.evaluationRound,
     priorAttemptCount: input.priorAttemptCount,
     rejections: archivedGateRejections(input.runDirPath, input.gateId).map(rejection => rejectionRecord(rejection)),
+    repairChangedFiles,
     ...(input.roundDiffPath ? { repairDiffPath: input.roundDiffPath } : {}),
-  })}\nCheck every assigned criterion against the current tree using your own experiments. Consume configured validation from the ledger without rerunning it. A reported blocker needs independent reproduction; it does not establish irreparability. Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief.
-When structured rejections exist: Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. Consume the repair attempt's configured validation from the ledger without rerunning it.
-Reject again only for a rejected finding the repair did not resolve, a regression the repair introduced, or a failure that a user of the outcome the brief describes would meet; record any other difference you find as a stated limitation in the verdict and pass.
-The repairDiffPath names the complete, untruncated repair-round diff. With no structured rejection, run a complete initial evaluation.`;
+  })}\nCheck every assigned criterion against the current tree using your own experiments. Continue through every brief criterion after finding a defect and report all findings in one verdict. Include exactly one entry for every brief criterion, even on rejection. Consume configured validation from the ledger without rerunning it. A reported blocker needs independent reproduction; it does not establish irreparability. Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief.
+Prior criteria and findings are recorded in rejections; status "fail" means not met last round. Check each rejected finding against the repair diff. Consume the repair attempt's configured validation from the ledger without rerunning it.
+For a criterion met last round whose evidence files the repair did not touch, you may choose status "carried" with from: {iteration, round} naming that archived round. This is your judgment: re-examine any criterion you consider necessary and report every defect you find. The engine checks the value and referenced round's existence, not whether carrying is justified.
+The repairDiffPath names the complete, untruncated repair-round diff. repairChangedFiles comes from that engine tree diff; null means unavailable. With no structured rejection, run a complete initial evaluation.`;
 }
 
 function rejectionRecord(rejection: ArchivedGateRejection): object {
+  let verdict: Record<string, unknown> = {};
+  try { verdict = JSON.parse(readFileSync(rejection.verdictPath, 'utf8')); } catch { /* Historical records may lack the authored verdict. */ }
   return {
     iteration: rejection.iteration, round: rejection.round,
+    criteria: verdict.criteria ?? null,
+    audit_findings: verdict.audit_findings ?? null,
     verdictPath: rejection.verdictPath,
     effectiveVerdictPath: rejection.effectiveVerdictPath,
     ...(existsSync(rejection.metricPath) ? { metricPath: rejection.metricPath } : {}),
@@ -281,5 +294,5 @@ export function buildGateFixCorrectionContract(
       .map(rejection => rejectionRecord(rejection))),
     confirmedFindings: Object.fromEntries(gateIds.map(gateId => [gateId, confirmedRepairFindings(runDirPath, [gateId], coordinate)])),
     ledgerPath: runRecordPath(runDirPath, 'evidence-ledger.jsonl'),
-  })}\nResolve only the confirmed findings against the current diff; unconfirmed observations in the ledger and verdict are not repair requests. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
+  })}\nReceive all criterion entries and findings of this round verbatim in rejections. Resolve all not-met (status "fail") entries and confirmed findings together against the current diff; retain unconfirmed observations as evidence without treating them as confirmed defects. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
 }

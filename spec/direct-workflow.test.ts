@@ -161,6 +161,56 @@ describe('direct workflow', () => {
     expect(existsSync(runRecordPath(directory, 'declared_outputs', 'docs', 'report.md'))).toBe(true);
   });
 
+  it('reviews a two-defect tree once, gives repair both entries and findings verbatim, then carries untouched evidence', async () => {
+    const { config, raw } = loadWorkflow(join(root, 'config', 'workflows', 'direct.yaml'));
+    const task = brief('outputs: [docs/report.md]').replace('}]\noutputs:', '},{"id":"stable","text":"Stable evidence remains valid."}]\noutputs:');
+    const calls: string[] = [];
+    let reviewCount = 0;
+    const completeReviewer: Adapter = { async run(prompt, role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'review') {
+        expect(role.prompt).toContain('continue through all brief criteria after finding a defect');
+        expect(prompt).toContain('report all findings in one verdict');
+        const defects = ['one', 'two'].filter(name => readFileSync(join(projectDir, name), 'utf8') === 'bad');
+        const criteria = Object.fromEntries(['fixture_1', 'fixture_2'].map((id, index) => [id,
+          { status: defects.includes(['one', 'two'][index]) ? 'fail' : 'pass', evidence: `literal evidence ${index}` }]));
+        const stable = ++reviewCount === 1 ? { status: 'pass', evidence: 'stable.txt unchanged' }
+          : { status: 'carried', evidence: 'stable.txt unchanged', from: { iteration: 1, round: 1 } };
+        if (reviewCount === 2) {
+          const facts = JSON.parse(prompt.split('# Gate evaluation facts\n')[1].split('\n')[0]);
+          expect(facts.rejections.at(-1).criteria).toMatchObject({ fixture_1: { status: 'fail' }, fixture_2: { status: 'fail' }, stable: { status: 'pass' } });
+          expect(facts.repairChangedFiles).toEqual(['docs/report.md', 'one', 'two']);
+          expect(prompt).toContain('This is your judgment');
+          expect(prompt).not.toContain('Reject again only');
+        }
+        const findings = defects.map((name, index) => ({ id: name, paths: [name], reason: `verbatim defect ${name}\nwith detail`,
+          criterion_ids: [`fixture_${index + 1}`], invalidates_plan: false, repair_role: 'coder' }));
+        return { output: JSON.stringify({ pass: defects.length === 0, reason: 'Complete independent review',
+          criteria: { ...criteria, stable }, audit_findings: { version: 1, findings },
+          ...(defects.length ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace both bad values' } } : {}) }), exitCode: 0, duration_ms: 1 };
+      }
+      if (opts.stageId === 'repair') {
+        const facts = JSON.parse(prompt.split('# Gate repair facts\n')[1].split('\n')[0]);
+        const original = JSON.parse(readFileSync(facts.rejections[0].verdictPath, 'utf8'));
+        expect(facts.rejections[0].criteria).toEqual(original.criteria);
+        expect(facts.rejections[0].audit_findings).toEqual(original.audit_findings);
+        expect(original.audit_findings.findings.map((finding: { id: string }) => finding.id)).toEqual(['one', 'two']);
+        expect(Object.values(original.criteria as Record<string, { status: string }>).filter(entry => entry.status === 'fail')).toHaveLength(2);
+      } else writeFileSync(join(projectDir, 'stable.txt'), 'stable');
+      for (const name of ['one', 'two']) writeFileSync(join(projectDir, name), opts.stageId === 'repair' ? 'good' : 'bad');
+      mkdirSync(join(projectDir, 'docs'), { recursive: true });
+      writeFileSync(join(projectDir, 'docs/report.md'), opts.stageId);
+      return { output: JSON.stringify({ status: 'delivered', summary: 'Complete author work', caveats: [], remaining_work: [], blocks: null }),
+        exitCode: 0, duration_ms: 1, writes: ['docs/report.md', 'one', 'two', ...(opts.stageId === 'implement' ? ['stable.txt'] : [])], writeAttribution: 'structured' };
+    } };
+    const final = await runWorkflow(config, raw, projectDir, withConfirmedRejections(completeReviewer), new Map(), undefined, agentsDir, undefined, task, true);
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    const directory = runDir(projectDir, final.runId);
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).criteria.stable)
+      .toMatchObject({ status: 'carried', from: { iteration: 1, round: 1 } });
+  });
+
   it('refuses malformed declarations before claiming a run or invoking a stage', async () => {
     const calls: string[] = [];
     await expect(runDirect(brief('inputs: [{path: source.txt, typo: true}]'), calls)).rejects.toThrow('typo');

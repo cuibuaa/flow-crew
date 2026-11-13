@@ -315,7 +315,7 @@ describe('compressed acceptance loop', () => {
     });
     expect(result.finalStatus).toBe('complete');
     expect(touchedCheckProbe).toHaveBeenCalledExactlyOnceWith('fixture-marker-check');
-    expect(result.gatePrompts[1]).toContain('re-check earlier conclusions only where the diff touches them');
+    expect(result.gatePrompts[1]).toContain('re-examine any criterion you consider necessary');
     expect(result.gatePrompts[1]).toContain('Consume the repair attempt\'s configured validation from the ledger without rerunning it');
   });
 
@@ -484,7 +484,7 @@ describe('compressed acceptance loop', () => {
     })).toThrow(`Gate archive ${component} must be a positive integer`);
   });
 
-  it('preserves review acceptance and bounds reevaluation through the gate contract', () => {
+  it('preserves review acceptance and leaves reevaluation scope to reviewer judgment', () => {
     const baseText = readFileSync(join(process.cwd(), 'config', 'agents', '_base.md'), 'utf-8');
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
     const qa = readFileSync(join(process.cwd(), 'config', 'agents', 'qa.yaml'), 'utf-8');
@@ -507,13 +507,13 @@ describe('compressed acceptance loop', () => {
       .toContain('Check every assigned criterion');
     expect(base).toContain('Reviewers say briefly in their reason what they did not examine and why');
     expect(base.split('did not examine')).toHaveLength(2);
-    expect(preamble).toContain('record any other difference you find as a stated limitation');
-    expect(preamble).toContain('a failure that a user of the outcome the brief describes would meet');
+    expect(preamble).toContain('re-examine any criterion you consider necessary and report every defect you find');
+    expect(preamble).not.toContain('Reject again only');
     expect(planner).toContain('returns concrete repairable findings');
     expect(planner).toContain('judgement with its own finite checklist');
     expect(qa).toContain('brief\'s intended outcome');
     expect(preamble).toContain('Check each rejected finding against the repair diff');
-    expect(preamble).toContain('Reject again only for a rejected finding the repair did not resolve');
+    expect(preamble).toContain('This is your judgment');
     expect(preamble).toContain('Consume the repair attempt\'s configured validation from the ledger without rerunning it');
     expect(preamble).toContain('untruncated repair-round diff');
   });

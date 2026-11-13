@@ -273,6 +273,19 @@ describe('engine-assembled terminal reports', () => {
     });
   });
 
+  it.each([
+    { pass: true, reason: 'Old verdict without criterion entries' },
+    { pass: true, reason: 'Old judgment', criteria: { greeting: { status: 'judgement', evidence: 'historical evidence' } } },
+  ])('reads historical verdict bytes unchanged: $reason', async record => {
+    await terminalFixture(async (project, id, directory) => {
+      const path = runRecordPath(directory, 'stages/review/output.md');
+      const bytes = JSON.stringify(record); writeFileSync(path, bytes);
+      const report = await generateRunSummary(project, id);
+      expect(report).toContain(`Independent verdict: PASS — ${record.reason}`);
+      expect(readFileSync(path, 'utf8')).toBe(bytes);
+    });
+  });
+
   it('shows typed changes, literal checks, caveats and independent verdict without a model or Git', async () => {
     await terminalFixture(async (project, id, directory) => {
       writeFileSync(runRecordPath(directory, 'stages/work/output.md'), JSON.stringify(workRecord()));

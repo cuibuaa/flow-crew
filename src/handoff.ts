@@ -1,3 +1,4 @@
+import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { ValidationSelectionSchema } from './project-validation.js';
 import { runRecordPath, stageWorkPath } from './run-layout.js';
 // Module: handoff
@@ -51,19 +52,25 @@ export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
   checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
 } };
 
-/** Ordinary verdicts are closed record variants. Optional legacy
- * campaign/control metadata stays in the same JSON Schema dialect at return;
- * its cross-field authority is still checked by the scheduler. */
-export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionRefs'> & { extendedVerdict?: boolean }): Schema {
+/** pass/fail encode met/not met; unassessed and carried results are explicit facts. */
+export const CRITERION_ENTRY_SCHEMA: Schema = { anyOf: [
+  object({ status: { type: 'string', enum: ['pass', 'fail'] }, evidence: text }),
+  object({ status: { type: 'string', enum: ['not_assessed'] }, evidence: text,
+    reason: { type: 'string', enum: ['capability_unavailable', 'evidence_unavailable'] } }),
+  object({ status: { type: 'string', enum: ['carried'] }, evidence: text,
+    from: object({ iteration: { type: 'integer', minimum: 1 }, round: { type: 'integer', minimum: 1 } }) }),
+] };
+
+/** A gate covers the entire brief even when its work assignment is narrower. */
+export function gateCriterionRefs(runDir: string, fallback: string[] = []): string[] {
+  return readBriefCriteriaArtifact(runDir)?.criteria.map(criterion => criterion.id) ?? fallback;
+}
+
+/** Ordinary verdicts are closed records; extended metadata never opens the criterion map. */
+export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionRefs'> & { extendedVerdict?: boolean; runDir?: string }): Schema {
   if (!opts.isGate) return HANDOFF_SCHEMA;
-  const entry: Schema = object({ status: { type: 'string', enum: ['pass', 'fail', 'judgement'] }, evidence: text });
-  if (opts.extendedVerdict) entry.additionalProperties = true;
-  const criteria = (pass: boolean): Schema => {
-    const allowed = pass ? { ...entry, properties: { ...entry.properties, status: { type: 'string', enum: ['pass', 'judgement'] } } } : entry;
-    const map = object(Object.fromEntries((opts.criterionRefs ?? []).map(id => [id, allowed])));
-    if (opts.extendedVerdict) map.additionalProperties = entry;
-    return map;
-  };
+  const refs = opts.runDir ? gateCriterionRefs(opts.runDir, opts.criterionRefs) : opts.criterionRefs ?? [];
+  const criteria = object(Object.fromEntries(refs.map(id => [id, CRITERION_ENTRY_SCHEMA])));
   const audit_findings = object({ version: { type: 'integer', enum: [1] }, findings: { type: 'array', items: object({
     id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' },
     paths: { type: 'array', minItems: 1, items: text }, reason: text,
@@ -72,10 +79,10 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   }) } });
   const findingSchema = audit_findings.properties!.findings.items as Schema;
   findingSchema.required = findingSchema.required!.filter(key => key !== 'reproduction');
-  const pass = object({ reason: text, criteria: criteria(true), audit_findings: { ...audit_findings,
+  const pass = object({ reason: text, criteria, audit_findings: { ...audit_findings,
     properties: { ...audit_findings.properties, findings: { ...audit_findings.properties!.findings, maxItems: 0 } },
   }, pass: { type: 'boolean', enum: [true] } }, completion);
-  const fail = object({ reason: text, criteria: criteria(false), audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
+  const fail = object({ reason: text, criteria, audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
     version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
   }) }, completion);
   if (opts.extendedVerdict) pass.additionalProperties = fail.additionalProperties = true;
@@ -129,8 +136,9 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {
-    if (!opts.criterionRefs?.length) return '';
-    return `## Canonical brief criteria assigned to this stage\n${JSON.stringify({ criterion_refs: opts.criterionRefs,
+    const refs = opts.isGate ? gateCriterionRefs(opts.runDir, opts.criterionRefs) : opts.criterionRefs;
+    if (!refs?.length) return '';
+    return `## Canonical brief criteria assigned to this stage\n${JSON.stringify({ criterion_refs: refs,
       path: runRecordPath(opts.runDir, 'brief_criteria.json') })}\nRead the assigned criteria at this path; the system brief owns their full context.`;
   })();
   const skillsContent = loadSkills(opts.skillNames || [], opts.projectDir);

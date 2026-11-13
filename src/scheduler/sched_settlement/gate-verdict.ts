@@ -152,7 +152,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   if (!raw) return null;
   const criteria = raw.criteria;
   const criteriaPass = criteria && typeof criteria === 'object' && !Array.isArray(criteria) && Object.keys(criteria).length > 0
-    && Object.values(criteria).every(entry => entry && typeof entry === 'object' && (entry as { status?: string }).status === 'pass');
+    && Object.values(criteria).every(entry => entry && typeof entry === 'object' && ['pass', 'carried'].includes((entry as { status: string }).status));
   const observed = raw.pass === false && criteriaPass
     ? settleFindingAssessment(raw as unknown as GateVerdict, document, projectDir, stageId, runId)?.findings : undefined;
   // Do not turn observations into demands; apply the ordinary pass checks to
@@ -280,7 +280,7 @@ export function deriveCriterionDischarges(input: {
       if (!criterionEvidence || typeof criterionEvidence !== 'object' || Array.isArray(criterionEvidence)) continue;
       const criterionRecord = criterionEvidence as Record<string, unknown>;
       if (typeof criterionRecord.evidence !== 'string' || !criterionRecord.evidence.trim()
-          || criterionRecord.status !== 'pass') continue;
+          || !['pass', 'carried'].includes(criterionRecord.status as string)) continue;
       const worker = input.stages.find((stage) =>
         !stage.is_gate
         && !stage.retry_to?.length

@@ -189,7 +189,7 @@ export async function executeSingleStage(
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
-      outputSchema: stageRecordSchema({ isGate: stage.is_gate,
+      outputSchema: stageRecordSchema({ isGate: stage.is_gate, runDir: runDirPath,
         criterionRefs: stage.criterion_refs, extendedVerdict: !state.research && Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,

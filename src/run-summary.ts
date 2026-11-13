@@ -4,7 +4,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { relative } from 'node:path';
 import { projectRunStageHistory } from './run-state-view.js';
-import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
+import { RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
 import { projectValidationResult } from './project-validation.js';
 import { projectValidationDelta, projectValidationFact, readEvidence, VALIDATION_FACT_VERSION } from './evidence-ledger.js';
@@ -231,13 +231,13 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
           const plan = parseStageRecord(output, RECORDED_PLAN_SCHEMA);
           lines.push(`Plan: ${(plan.stages as Array<{ id: string }>).map(stage => stage.id).join(', ')}.`);
         } else if (typeof value.pass === 'boolean') {
-          const record = parseStageRecord(output, stageRecordSchema({ isGate: true,
-            criterionRefs: Object.keys(value.criteria ?? {}), extendedVerdict: true }));
+          // Display authored history without re-admitting it under today's schema.
+          const record = value;
           lines.push(`Independent verdict: ${record.pass ? 'PASS' : 'FAIL'} — ${record.reason}`);
           const criteria = record.criteria as Record<string, { status: string; evidence: string }>;
-          for (const [id, criterion] of Object.entries(criteria)) lines.push(`- ${id}: ${criterion.status} — ${criterion.evidence}`);
+          for (const [id, criterion] of Object.entries(criteria ?? {})) lines.push(`- ${id}: ${criterion.status} — ${criterion.evidence}`);
           const findings = record.audit_findings as { findings: Array<{ id: string; reason: string; paths: string[] }> };
-          for (const finding of findings.findings) lines.push(`- Finding ${finding.id}: ${finding.reason} (${finding.paths.join(', ')})`);
+          for (const finding of findings?.findings ?? []) lines.push(`- Finding ${finding.id}: ${finding.reason} (${finding.paths.join(', ')})`);
           if (record.repairability) {
             const repair = record.repairability as { disposition: string; evidence: string };
             lines.push(`Repairability: ${repair.disposition} — ${repair.evidence}`);

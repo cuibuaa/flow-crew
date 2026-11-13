@@ -100,6 +100,7 @@ describe('size-independent adapter prompt delivery', () => {
 
   it('delivers a prompt above the OS single-argument limit through every shipped adapter', async () => {
     const root = temporaryRoot('flowcrew-prompt-adapters-');
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }));
     const binDir = join(root, 'bin');
     const captureDir = join(root, 'capture');
     const fixtureDir = join(root, 'fixtures');
@@ -193,7 +194,7 @@ describe('size-independent adapter prompt delivery', () => {
       mock: mock.exitCode,
     };
     expect(Object.keys(results).sort()).toEqual([...AVAILABLE_ADAPTER_NAMES].sort());
-    expect(results).toEqual({ codex: 0, claude: 0, mock: 0 });
+    expect(results, [codexFresh.output, claude.output].join('\n')).toEqual({ codex: 0, claude: 0, mock: 0 });
     expect(codexResume.exitCode).toBe(0);
 
     const receipt = (adapter: string, mode = 'fresh') => JSON.parse(

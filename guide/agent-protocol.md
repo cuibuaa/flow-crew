@@ -191,16 +191,30 @@ Ordinary stages return one JSON document with `status: delivered|blocked`, nonbl
 `evidence`. The injected schema is authoritative; do not handwrite a verdict or a file-list
 handoff instead. The engine records writes with their attribution.
 
-A gate returns `pass` and `reason` plus the assigned criterion entries and other fields
-required by its injected schema. `criteria` maps each assigned canonical ID to `{status: pass|fail|judgement, evidence: <nonblank>}`.
-A passing variant permits pass/judgement entries and requires empty findings; rejection
-permits all three statuses and requires its repairability record. Evidence must be nonblank
-and passing claims consistent. Both verdict variants require `criteria` and `audit_findings: {version: 1, findings: [...]}`;
-a pass has empty findings, and a rejection also requires `repairability`. Extended verdicts
-permit additional declared phase/control metadata; a compact direct gate has a closed schema. Native generation is used when a
-schema is compatible; otherwise the prompt carries it. Invalid JSON/shape uses the existing
-bounded correction in the same execution and deadline; persistent invalidity cannot publish
-an authoritative verdict.
+A gate returns `pass` and `reason` and exactly one `criteria` entry for every canonical
+ID in the brief, including criteria outside its narrower work assignment. Continue through
+all criteria after finding a defect; report all findings in the same verdict.
+Each entry has nonblank `evidence` and a closed `status`:
+
+- `pass` means met; `fail` means not met.
+- `not_assessed` requires `reason: capability_unavailable|evidence_unavailable`.
+- `carried` requires `from: {iteration: <positive integer>, round: <positive integer>}`
+  naming an existing archived review round for this gate.
+
+The criterion map is closed even in extended verdicts. The engine validates shape and
+referenced round existence; it never reads finding prose or decides whether carrying is
+justified. The reviewer owns the overall `pass` judgment. A passing verdict requires empty
+`audit_findings: {version: 1, findings: []}`; rejection requires `repairability`.
+Invalid JSON/shape uses the existing bounded correction in the same execution and deadline;
+persistent invalidity cannot publish an authoritative verdict. Old authored records, including
+ones without criterion entries or with `judgement`, remain readable in summaries and verdict
+settled projections without rewriting or re-admitting their bytes under the current generation schema.
+
+Repair receives the round's complete authored criterion entries and findings verbatim in the
+existing rejection records, alongside confirmed reproduction obligations. Re-review receives
+these records and `repairChangedFiles` from the engine's complete repair tree diff (`null`
+means unavailable). A reviewer may carry a previously met criterion whose evidence files
+were untouched, or re-examine it. No engine rule limits which defects a re-review may report.
 
 An applicable `gate_contract.json` binds metric/name synonyms, threshold, direction and
 optional `appliesToGates`. Accepting gates must supply finite numeric evidence when required;
@@ -229,8 +243,8 @@ that command's sequence. The engine records its exit, output digest and unchange
 project tree hash; it confirms a finding only against a failed command from this reviewer
 attempt on the reviewed tree. Missing execution context, absent/missing citations and passing
 records remain unconfirmed observations. This also applies when reading old verdicts.
-Only confirmed findings enter an admitted repair's correction request. The original verdict
-and unconfirmed observations remain visible in run facts and the report. Unconfirmed
+Only confirmed findings acquire reproduction obligations. The complete authored verdict,
+including unconfirmed observations, remains visible in repair inputs, run facts and the report. Unconfirmed
 observations alone open no repair: passing criteria permit acceptance, failed criteria leave
 work incomplete. Repair closure replays each confirmed command on the repaired tree and
 records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,

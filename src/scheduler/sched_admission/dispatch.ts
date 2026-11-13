@@ -198,7 +198,7 @@ export function validatedCriterionDischarges(
       const criterion = (verdict.criteria as Record<string, unknown>)[record.criterionId];
       if (!criterion || typeof criterion !== 'object' || Array.isArray(criterion)) return false;
       const detail = criterion as Record<string, unknown>;
-      return detail.status === 'pass'
+      return ['pass', 'carried'].includes(detail.status as string)
         && typeof detail.evidence === 'string'
         && detail.evidence.trim().length > 0;
     } catch {
