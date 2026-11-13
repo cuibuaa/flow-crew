@@ -951,16 +951,15 @@ export async function runStage(
           const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
           const response = await runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
             display: request.command, cwd: request.cwd, runDir: opts.runDir,
-            timeoutMs: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())),
             abortSignal: AbortSignal.any([invocationAbortSignal, signal]) });
           const record = appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex, invocationIndex,
             commandId: `recorded-${invocationIndex}-${++recordedCommandIndex}`, command: request.command,
-            context: { cwd: request.cwd, shell: request.shell }, exitCode: response.error ? null : response.exitCode,
+            context: { cwd: request.cwd, shell: request.shell }, exitCode: response.exitCode, unfinished: response.unfinished,
             outputDigest: createHash('sha256').update(JSON.stringify([response.stdout ?? '', response.stderr ?? ''])).digest('hex'),
             treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash });
           return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}) };
         }) : undefined;
-        const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment and a maximum 60-second bound, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
+        const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment, waiting for completion or invocation cancellation, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
         const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
         try {
         return await runAdapter(selectedAdapter, recordedPrompt, invocationRole, {

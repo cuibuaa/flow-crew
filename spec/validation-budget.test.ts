@@ -18,7 +18,6 @@ import * as validationOwner from '../src/project-validation.js';
 import { evaluateValidationDelta, runProjectValidationBaseline, runProjectCommand } from '../src/project-validation.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
-import { processLiveness, processStartToken, type ProcessStartToken } from '../src/process-liveness.js';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -44,92 +43,23 @@ async function workflow(root: string, adapter: Adapter, validation: string) {
 }
 
 describe('completed author work reaches its independent gate within the validation budget', () => {
-  it.each(['timeout', 'abort'] as const)('settles on %s even if process transport never closes', async boundary => {
+  it.each(['timeout', 'abort'] as const)('settles unfinished on declared %s after owner retirement', async boundary => {
     const stdout = new PassThrough(), stderr = new PassThrough(), stop = vi.fn(), unref = vi.fn();
     const child = Object.assign(new EventEmitter(), { stdout, stderr, exitCode: null, signalCode: null, unref });
-    vi.spyOn(commandOwner, 'spawnOwnedCommand').mockReturnValue({ child: child as unknown as commandOwner.ChildProcess, stop });
-    const started = Date.now();
-    const result = await runProjectCommand({ role: 'test', command: 'fixture', args: [], display: 'unclosed transport', cwd: project(),
-      timeoutMs: boundary === 'timeout' ? 60 : 5000, ...(boundary === 'abort' ? { abortSignal: AbortSignal.timeout(60) } : {}) });
-    expect(Date.now() - started).toBeLessThan(2000);
-    expect(result).toMatchObject({ exitCode: null, unfinished: true });
-    // The owner settles after its consumers retire; it no longer detaches from the child.
-    expect(stop).toHaveBeenCalledOnce(); expect(unref).not.toHaveBeenCalled();
-    expect(stdout.destroyed).toBe(true); expect(stderr.destroyed).toBe(true);
-  });
-
-  it.skipIf(process.platform !== 'linux').each(['running', 'exited'] as const)('retires a detached validation worker with its leader %s without waiting for inherited output pipes', async leader => {
-    setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 2000, validation_timeout_ms: 1200 });
-    const root = project(), childPath = join(project(), 'child.json'), calls: string[] = [];
-    let gateInput = '', gateAt = 0, childReadyAt = 0, cleanedAt: number | undefined;
-    let owned: { pid: number; token: ProcessStartToken } | undefined;
-    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-    const retire = () => { if (owned && processLiveness(owned.pid, owned.token) === 'alive') process.kill(owned.pid, 'SIGKILL'); };
-    const watch = setInterval(() => {
-      if (owned || !existsSync(childPath)) return;
-      const { pid } = JSON.parse(readFileSync(childPath, 'utf8'));
-      const token = processStartToken(pid);
-      if (!token) return;
-      owned = { pid, token }; childReadyAt = Date.now();
-      // Independent cleanup makes the old hang bounded and red, while the
-      // passing path must retire its own worker before this timer fires.
-      cleanupTimer = setTimeout(() => { cleanedAt = Date.now(); retire(); }, 8000);
-    }, 25);
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      calls.push(opts.stageId);
-      if (opts.stageId === 'review') { gateAt = Date.now(); gateInput = prompt; return success(verdict(opts)); }
-      setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 20000, validation_timeout_ms: 1200 }); // the gate has its own budget
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const program = `const cp=require('node:child_process'),fs=require('node:fs');const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'inherit'});fs.writeFileSync(${JSON.stringify(childPath)},JSON.stringify({pid:c.pid}));${leader === 'exited' ? 'setTimeout(()=>process.exit(0),200)' : 'setInterval(()=>{},1000)'};`;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(commandOwner, 'spawnOwnedCommand').mockImplementation(() => { entered(); return { child: child as unknown as commandOwner.ChildProcess, stop }; });
+    const control = new AbortController();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n`);
-      expect(owned).toBeDefined(); expect(childReadyAt).toBeGreaterThan(0);
-      expect(cleanedAt, 'gate required independent cleanup of the validation worker').toBeUndefined();
-      expect(gateAt).toBe(0);
-      expect(processLiveness(owned!.pid, owned!.token)).toBe('dead');
-      expect(result.final.status).toBe('parked'); expect(calls).toEqual(['implement']);
-      expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ commands: [{ unfinished: true, state: 'unverified' }] }] });
-      expect(gateInput).toBe('');
-      expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
-    } finally { clearInterval(watch); clearTimeout(cleanupTimer); retire(); }
-  });
-
-  it.each(['slow', 'silent', 'failed-build-then-silent'] as const)('retires %s validation, preserves the author and states incomplete evidence', async shape => {
-    // Scale the existing timeout, not command-name heuristics. The configured
-    // command exceeds the remaining 20-second author deadline; batch ends first.
-    setEngineDefaults({ validation_attempts: 1, default_timeout_ms: 20000, validation_timeout_ms: 5000 });
-    const root = project();
-    const calls: string[] = []; let gateInput = '', authorClosedAt = 0, gateAt = 0;
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      calls.push(opts.stageId);
-      if (opts.stageId === 'review') { gateAt = performance.now(); gateInput = prompt; return success(verdict(opts)); }
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
-      authorClosedAt = performance.now();
-      return success({ status: 'delivered', summary: 'Product complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const program = shape === 'slow' ? 'setTimeout(()=>{},30000)' : 'setInterval(()=>{},1000)';
-    const validation = `validation:\n  commands:\n${shape === 'failed-build-then-silent' ? `    build:\n      command: /bin/sh\n      args: ['-c', 'exit 2']\n` : ''}    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n`;
-    const result = await workflow(root, adapter, validation);
-    expect(result.final.status).toBe('parked'); expect(calls).toEqual(['implement']);
-    // Gate arrival must fit the declared author-stage envelope. Filesystem
-    // settlement and prompt capture also consume wall time on a loaded host.
-    expect(gateAt).toBe(0); expect(authorClosedAt).toBeGreaterThan(0);
-    expect(readStageStatus(root, result.final.runId, 'implement')).toMatchObject({ status: 'complete', exitCode: 0 });
-    const [fact] = result.validations; expect(result.validations).toHaveLength(1); expect(fact.pass).toBe(false);
-    expect(fact.executions).toHaveLength(1); // no eager base and no time to compare the build
-    const test = fact.executions[0].commands.find(command => command.role === 'test')!;
-    expect(test).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified', failureIdentity: 'unknown' });
-    expect(test.exitCode).not.toBe(0); expect(test.reason).toContain('unfinished');
-    expect(gateInput).toBe('');
-    expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
-    if (shape === 'failed-build-then-silent') {
-      expect(fact.executions[0].commands[0], JSON.stringify(fact.executions[0].commands[0])).toMatchObject({ role: 'build', exitCode: 2, state: 'failed' });
-      expect(gateInput).toBe('');
-    }
-    const unchanged = await recordAttemptValidation(root, result.final.runId, 'implement', { runCommand: () => { throw Error('identical uncertain evidence reran'); } });
-    expect(unchanged).toMatchObject({ sequence: fact.sequence });
+      const pending = runProjectCommand({ role: 'test', command: 'fixture', args: [], display: 'unclosed transport', cwd: project(),
+        ...(boundary === 'timeout' ? { timeoutMs: 60 } : { abortSignal: control.signal }) });
+      await ready;
+      if (boundary === 'timeout') await vi.advanceTimersByTimeAsync(60); else control.abort();
+      expect(await pending).toMatchObject({ exitCode: null, unfinished: true });
+      expect(stop).toHaveBeenCalledOnce(); expect(unref).not.toHaveBeenCalled();
+      expect(stdout.destroyed).toBe(true); expect(stderr.destroyed).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 
   it('waits for a successful author settlement instead of validating a failed model attempt', async () => {
@@ -147,49 +77,14 @@ describe('completed author work reaches its independent gate within the validati
     expect(result.validations[0].attemptIndex).toBe(2);
   });
 
-  it('ends the batch unfinished when the build hangs silently and runs no later command', { timeout: 60_000 }, async () => {
-    setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
-    const root = project();
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === 'review') return success(verdict(opts));
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const { final, validations, rd } = await workflow(root, adapter, `validation:\n  commands:\n    build:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'setInterval(()=>{},1000)']\n    test:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n    lint:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n`);
-    const commands = validations[0].executions[0].commands;
-    expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified' });
-    expect(commands.slice(1).map(command => [command.exitCode, command.unfinished])).toEqual([[null, true], [null, true]]);
-    expect(final.status).toBe('parked');
-    expect(final.validation?.[0]).toMatchObject({ measurement: 'unverified' });
-    expect(renderRunSummary(root, rd, final)).toContain('unverified');
-  });
-
-  it('bounds a near-idle suite after its worker dies and leaves the batch unfinished', { timeout: 60_000 }, async () => {
-    setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 12000 });
-    const root = project(); let gateInput = '';
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === 'review') { gateInput = prompt; return success(verdict(opts)); }
-      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
-    } };
-    const program = `const c=require('child_process').spawn(process.execPath,['-e','process.kill(process.pid,"SIGKILL")']);c.once('exit',(_code,signal)=>{console.log('worker died '+signal);setInterval(()=>{},1000)});`;
-    const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n    lint: {command: /bin/sh, args: ['-c', 'exit 0']}\n`);
-    const commands = result.validations[0].executions[0].commands;
-    expect(commands[1]).toMatchObject({ exitCode: null, unfinished: true });
-    expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified' });
-    expect(commands[0].output).toContain('worker died SIGKILL');
-    expect(gateInput).toBe('');
-    expect(result.final.status).toBe('parked');
-    expect(result.final.validation?.[0].measurement).toBe('unverified');
-  });
 
 });
 
 it('gives each command, in order, what remains of the batch allowance', async () => {
-  setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 6000 });
+  setEngineDefaults({ validation_attempts: 1 });
   let elapsed = 0;
   const allowances: number[] = [];
-  const batch = await runProjectValidationBaseline(project(), { now: () => elapsed,
+  const batch = await runProjectValidationBaseline(project(), { timeoutMs: 6000, now: () => elapsed,
     commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: 'fixture', args: [], display: role })),
     runCommand: request => {
       allowances.push(request.timeoutMs!);
@@ -245,7 +140,7 @@ describe('declarations or one repository-reading model choose commands', () => {
 });
 
 async function catchFixture(kind: 'cache' | 'cpu', confirm: boolean) {
-  setEngineDefaults({ validation_attempts: 1, validation_timeout_ms: 60000 });
+  setEngineDefaults({ validation_attempts: 10 });
   const root = project(), calls: string[] = [];
   const git = (...args: string[]) => isolatedProjectCommand('git', args, root, root);
   git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');

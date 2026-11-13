@@ -15,7 +15,6 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { decodeRunnerReport, identityFacts, type IdentityFacts } from './validation-identity.js';
 import { prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
 import { statSync } from 'node:fs';
-import { loadEngineDefaults } from './config.js';
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type FailureEvidence = 'complete' | 'partial';
@@ -68,7 +67,7 @@ export interface BriefValidationCommand {
 }
 
 /** Time one execution of the whole batch may take (its commands run in order within it) and the
- * number of executions of an unfinished batch. Absent fields use the engine defaults. */
+ * number of executions of an unfinished batch. An absent time limit waits for completion. */
 export interface ValidationLimits { timeoutMs?: number; attempts?: number }
 
 export interface ValidationParseResult {
@@ -151,7 +150,7 @@ export interface ValidationDiscovery {
 }
 
 export interface ValidationRunRequest extends ValidationCommand {
-  /** Engine resource deadline; omitted requests use the configured command bound. */
+  /** Declared resource allowance; omitted requests wait for completion or cancellation. */
   timeoutMs?: number;
   abortSignal?: AbortSignal;
   cwd: string;
@@ -224,7 +223,7 @@ export type ValidationCommandRunner = (
   request: ValidationRunRequest,
 ) => Promise<ValidationRunResponse> | ValidationRunResponse;
 
-export interface ValidationCommandResult {
+export interface ValidationCommandResult extends Pick<ValidationRunResponse, 'report' | 'reportError'> {
   /** False when execution cannot cover the source tree; raw exits are retained. */
   sourceBound?: boolean;
   command?: string;
@@ -471,13 +470,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   let settled = false;
   let timedOut = false;
   let spawnError: string | undefined;
-  // Keep the configured validation resource bound.
-  let timeoutMs = 60_000;
-  try {
-    const configured = loadEngineDefaults().validation_timeout_ms;
-    if (Number.isFinite(configured) && configured > 0) timeoutMs = configured;
-  } catch { /* retain the built-in bound if engine configuration is unavailable */ }
-  if (request.timeoutMs !== undefined) timeoutMs = Math.max(1, request.timeoutMs);
+  const timeoutMs = request.timeoutMs;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
     if (settled) return;
@@ -524,8 +517,10 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     child.stdout?.destroy(); child.stderr?.destroy();
     void Promise.resolve(retired).then(() => settle(child.exitCode, child.signalCode, spawnError));
   };
-  timeout = setTimeout(() => { timedOut = true; onAbort(); }, timeoutMs);
-  timeout.unref();
+  if (timeoutMs !== undefined) {
+    timeout = setTimeout(() => { timedOut = true; onAbort(); }, timeoutMs);
+    timeout.unref();
+  }
   request.abortSignal?.addEventListener('abort', onAbort, { once: true });
   if (request.abortSignal?.aborted) onAbort();
   });
@@ -574,6 +569,7 @@ function validationOutputBytes(response: ValidationRunResponse): { stdout: numbe
 
 async function failureFacts(command: ValidationCommand, response: ValidationRunResponse, _output: string,
   root: string, _dependencies: ProjectValidationDependencies): Promise<IdentityFacts> {
+  if (response.unfinished) return { identifiers: [], owner: 'unknown' };
   const failed = response.exitCode !== 0;
   if (response.reportError) return { identifiers: [], owner: 'unknown', reason: `Invalid validation identity evidence: ${response.reportError}` };
   if (command.report) {
@@ -611,7 +607,7 @@ export async function runProjectValidationBaseline(
       : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
   const batchStarted = now();
-  const budgetMs = Math.max(0, Math.min(dependencies.timeoutMs ?? loadEngineDefaults().validation_timeout_ms, dependencies.remainingMs?.() ?? Infinity));
+  const budgetMs = Math.max(0, Math.min(dependencies.timeoutMs ?? discovery.limits?.timeoutMs ?? Infinity, dependencies.remainingMs?.() ?? Infinity));
   for (const command of discovery.commands) {
     const role = command.role;
     if (dependencies.skipExecution) {
@@ -634,7 +630,7 @@ export async function runProjectValidationBaseline(
       response = dependencies.abortSignal?.aborted || remaining <= 0
         ? { exitCode: null, unfinished: true, error: 'Validation budget ended before command execution' }
         : await runner({ ...command, cwd: root,
-        timeoutMs: remaining, priority: dependencies.priority,
+        timeoutMs: Number.isFinite(remaining) ? remaining : undefined, priority: dependencies.priority,
         ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
       rethrowGitNotAnswered(error);
@@ -647,7 +643,8 @@ export async function runProjectValidationBaseline(
     const output = boundedOutput(rawOutput, maxOutputBytes);
     const outputBytes = validationOutputBytes(response);
     const projection = projectValidationResult(response);
-    const recorded = { ...(response.load ? { load: response.load } : {}),
+    const recorded = { ...(response.report !== undefined ? { report: response.report } : {}),
+      ...(response.reportError !== undefined ? { reportError: response.reportError } : {}), ...(response.load ? { load: response.load } : {}),
       ...(response.error ? { error: response.error } : {}),
       ...(response.unfinished ? { unfinished: true } : {}),
       ...(response.dependencyPreparationFailed ? { dependencyPreparationFailed: true } : {}), ...projection };

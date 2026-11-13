@@ -7,7 +7,6 @@ import { dirname } from 'node:path';
 import { writeFileSync } from '../../engine-fs.js';
 import { engineValidation } from '../../engine-validation.js';
 import { confirmedRepairFindings } from './gate-archives.js';
-import { loadEngineDefaults } from '../../config.js';
 import { runProcessAbortSignal } from '../../adapters/base.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
@@ -24,7 +23,7 @@ export interface RunValidationBaselineArtifact {
   capturedAt: string;
   source: 'ship-setup-ready-record' | 'project-declarations' | 'model-selection';
   baseCommit?: string;
-  /** The brief's declared validation limits, else the project's; absent fields use the engine defaults. */
+  /** The brief's validation limits, else the project's; only attempts has an engine default. */
   limits?: ValidationLimits;
   baseline: ProjectValidationBaseline;
 }
@@ -165,7 +164,8 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
 }
 
 /** Called at the scheduler boundary, including resume before any decision.
- * Unfinished resource work parks the run and leaves all stage budgets intact. */
+ * Resource exhaustion releases the recorded facts to the next model stage.
+ * It supplies no product verdict and consumes no model repair attempt. */
 export async function validateSettledTree(projectDir: string, runId: string): Promise<boolean> {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   const state = readRunState(projectDir, runId);
@@ -189,12 +189,8 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
       updateRunState(projectDir, runId, current => {
         if (current.status !== RUN_STATUS.RUNNING) return;
         current.validation = (validationBatch(fact)?.commands ?? []).map(result => ({ ...result, ...projectValidationResult(result) }));
-        if (fact.resourceState === 'complete') return;
-        current.status = RUN_STATUS.PARKED;
-        current.recovery = { kind: 'resumable', cause: 'unknown', at: new Date().toISOString(), interruptedStages: [],
-          reason: `Validation unfinished: ${fact.recordPath}. Resume with sufficient declared resource limits and readable source identity; no review or repair was consumed.` };
       });
-      return fact.resourceState === 'complete';
+      return !control.signal.aborted;
     }
     return true;
   };
@@ -209,9 +205,9 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
         && entry.sequence > author.sequence)) continue;
       const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell,
         args: ['-c', finding.record.command!], display: finding.record.command!, cwd: finding.record.context.cwd, runDir: base,
-        timeoutMs: finding.record.timeoutMs ?? loadEngineDefaults().validation_timeout_ms, abortSignal: control.signal });
+        timeoutMs: finding.record.timeoutMs, abortSignal: control.signal });
       appendEvidence(base, { kind: 'command', owner: 'code', stageId: author.stageId, attemptIndex: author.attemptIndex,
-        commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode,
+        commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode, unfinished: replay.unfinished,
         outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
         treeHash: before.hash, treeAfterHash: captureProjectTree(projectDir, briefAt(base), base).hash, reproductionOf: finding.record.sequence });
     }

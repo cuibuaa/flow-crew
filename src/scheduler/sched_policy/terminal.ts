@@ -356,7 +356,7 @@ export async function runPostTerminateHook(
     verdictPath: string;
   },
 ): Promise<void> {
-  const timeoutMs = (hook.timeoutSeconds ?? 300) * 1000;
+  const timeoutMs = hook.timeoutSeconds === undefined ? undefined : hook.timeoutSeconds * 1000;
   const hookEnv: Record<string, string> = {
     ...process.env as Record<string, string>,
     FC_PHASE: ctx.terminalStatus,
@@ -374,6 +374,7 @@ export async function runPostTerminateHook(
     stageId: '_terminal_hook',
   }, () => new Promise<void>((resolve, reject) => {
     let spawnError: Error | undefined;
+    let unfinished = false;
     const { child, stop, publication } = spawnOwnedCommand(hook.command, args, {
       cwd: ctx.projectDir,
       env: hookEnv,
@@ -383,13 +384,14 @@ export async function runPostTerminateHook(
       `started_at: ${startedAt}\n`,
       `command: ${hook.command}\n`,
       `args: ${JSON.stringify(args)}\n`,
-      `timeout_seconds: ${hook.timeoutSeconds ?? 300}\n`,
+      `timeout_seconds: ${hook.timeoutSeconds ?? 'undeclared'}\n`,
       `\n--- stdout/stderr ---\n`,
     ];
     child.stdout?.on('data', (d) => chunks.push(d.toString()));
     child.stderr?.on('data', (d) => chunks.push(d.toString()));
-    const timer = setTimeout(() => {
-      log.warn({ runId: ctx.runId, command: hook.command, timeoutMs }, 'post_terminate_hook exceeded timeout, killing');
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      unfinished = true;
+      log.warn({ runId: ctx.runId, command: hook.command, timeoutMs }, 'post_terminate_hook unfinished at declared allowance');
       stop();
     }, timeoutMs);
     child.once('error', (err) => { spawnError = err; });
@@ -404,9 +406,11 @@ export async function runPostTerminateHook(
           resolve();
           return;
         }
-        chunks.push(`\n--- exit ---\ncode: ${code}\nsignal: ${signal}\ncompleted_at: ${new Date().toISOString()}\n`);
+        chunks.push(`\n--- exit ---\ncode: ${code}\nsignal: ${signal}\nunfinished: ${unfinished}\ncompleted_at: ${new Date().toISOString()}\n`);
         try { writeFileSync(logPath, chunks.join(''), 'utf-8'); } catch { /* noop */ }
-        if (code !== 0) {
+        if (unfinished) {
+          log.info({ runId: ctx.runId, command: hook.command }, 'post_terminate_hook unfinished (best-effort, recorded)');
+        } else if (code !== 0) {
           log.warn({ runId: ctx.runId, command: hook.command, exitCode: code, signal }, 'post_terminate_hook exited non-zero (best-effort, ignored)');
         } else {
           log.info({ runId: ctx.runId, command: hook.command }, 'post_terminate_hook completed');

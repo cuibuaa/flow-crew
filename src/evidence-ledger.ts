@@ -109,12 +109,13 @@ export type EvidenceFact = ValidationFact | {
   caveats: string[]; owner: 'declaration';
 } | {
   kind: 'command'; stageId: string; attemptIndex: number; invocationIndex?: number; commandId: string; command: string | null;
+  unfinished?: boolean;
   exitCode: number | null; owner: 'adapter-event' | 'declaration' | 'code'; evidence?: string;
   context?: CommandContext;
   outputDigest?: string; treeHash?: string | null; treeAfterHash?: string | null;
   /** A repair replay cites the original failed command, using the same ledger primitive. */
   reproductionOf?: number;
-  /** Reproduction hang allowance; the enclosing attempt may narrow it. */
+  /** Declared reproduction allowance; omission waits for completion or cancellation. */
   timeoutMs?: number;
   validationRecord?: number;
 } | {
@@ -258,7 +259,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
       const attempt = entries.find(fact => fact.kind === 'attempt' && fact.stageId === entry.stageId && fact.attemptIndex === entry.attemptIndex && fact.attemptStartedAt === entry.attemptStartedAt);
       if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
         || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
-      return [projectValidationFact(entry)];
+      return [entry];
     }
     if (entry.kind === 'attempt') {
       const { finalRecord: _finalRecord, guidanceIds: _guidanceIds, remainingWork: _remainingWork, ...fact } = entry;

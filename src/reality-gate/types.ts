@@ -14,6 +14,8 @@ export interface CheckContext {
 
 export interface CheckResult {
   pass: boolean;
+  /** An exhausted declared allowance supplies no product verdict. */
+  unfinished?: boolean;
   details: string;
   /**
    * A handler may identify an execution-environment defect that makes its
@@ -57,13 +59,9 @@ export interface RealityGateExit {
   timedOut: boolean;
 }
 
-export interface RealityGateCheckReport {
+export interface RealityGateCheckReport extends CheckResult {
   name: string;
   type: string;
-  pass: boolean;
-  details: string;
-  advisory?: boolean;
-  evidence?: object;
 }
 
 export interface RealityGateReport {

@@ -16,9 +16,9 @@ export interface EngineValidationRecord {
   resourceState: 'complete' | 'unfinished';
   recordPath: string;
   executions: ValidationExecution[];
-  /** The numbers in force for the latest execution: the declaration, else the engine defaults. */
-  limits: Required<ValidationLimits>;
-  /** Allowance consumed: each execution is charged the full time limit it ran under. */
+  /** The numbers in force for the latest execution: the declaration; only the attempt count has an engine default. */
+  limits: ValidationLimits & { attempts: number };
+  /** Declared allowance consumed: each bounded execution is charged its full limit. */
   spentMs: number;
   pass: boolean;
 }
@@ -32,18 +32,18 @@ interface Queue { tickets: Ticket[] }
 export async function engineValidation(input: ProjectValidationDependencies & {
   projectDir: string; treeHash: string; commands: readonly ValidationCommand[];
   treeAfter: () => string | null;
-  /** Declared by the brief; absent fields use the engine defaults. */
+  /** Declared by the brief/project; only attempts has an engine default. */
   limits?: ValidationLimits;
   completed?: ValidationExecution;
   run?: Ticket['run'];
 }): Promise<EngineValidationRecord> {
   const defaults = loadEngineDefaults();
-  const limits: Required<ValidationLimits> = { timeoutMs: input.limits?.timeoutMs ?? defaults.validation_timeout_ms,
-    attempts: input.limits?.attempts ?? defaults.validation_attempts };
-  // The allowance is the declared time of one execution times the declared executions.
-  // A record is exhausted when that allowance is no larger than what it already spent.
-  const allowance = limits.timeoutMs * limits.attempts;
-  const exhausted = (record: EngineValidationRecord): boolean => !(record.spentMs < allowance);
+  const limits = { ...input.limits, attempts: input.limits?.attempts ?? defaults.validation_attempts };
+  // Declared time is charged per batch; without a duration, only completed
+  // execution/interrupt events consume attempts, never elapsed engine time.
+  const allowance = limits.timeoutMs === undefined ? undefined : limits.timeoutMs * limits.attempts;
+  const exhausted = (record: EngineValidationRecord): boolean => allowance === undefined
+    ? record.executions.length >= limits.attempts : !(record.spentMs < allowance);
   const root = join(fcGlobalDir(), 'validation');
   mkdirSync(root, { recursive: true });
   const queuePath = join(root, 'queue.json'), recordPath = join(root, `${input.treeHash}.json`);
@@ -108,7 +108,7 @@ export async function engineValidation(input: ProjectValidationDependencies & {
       const execution: ValidationExecution = { target: 'attempt', cwd: input.projectDir,
         treeHash: input.treeHash, treeAfterHash: null, commands: [] };
       record.executions.push(execution);
-      record.limits = limits; record.spentMs += limits.timeoutMs;
+      record.limits = limits; record.spentMs += limits.timeoutMs ?? 0;
       atomicWrite(recordPath, JSON.stringify(record));
       const measured = await runProjectValidationBaseline(input.projectDir, { ...input,
         commands: input.commands, skipExecution: false, remainingMs: undefined,

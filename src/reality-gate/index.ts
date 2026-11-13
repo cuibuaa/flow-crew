@@ -272,6 +272,7 @@ function validateRealityGateReport(value: unknown, artifactPath: string): Realit
     if (check.advisory !== undefined && typeof check.advisory !== 'boolean') {
       invalidArtifact(artifactPath, `report.results[${index}].advisory must be boolean when present`);
     }
+    if (check.unfinished !== undefined && typeof check.unfinished !== 'boolean') invalidArtifact(artifactPath, `report.results[${index}].unfinished must be boolean when present`);
     let executionExitCode: number | null | undefined;
     if (check.evidence !== undefined) {
       const evidence = requireRecord(check.evidence, `report.results[${index}].evidence`, artifactPath);
@@ -281,7 +282,9 @@ function validateRealityGateReport(value: unknown, artifactPath: string): Realit
       if (check.pass && executionExitCode === undefined) {
         invalidArtifact(artifactPath, `report.results[${index}] cannot pass without complete execution evidence`);
       }
-      if (executionExitCode !== undefined && check.pass !== (executionExitCode === 0)) {
+      const timedOut = (check.evidence as { exit?: RealityGateExit } | undefined)?.exit?.timedOut;
+      if (timedOut) check.unfinished = true; // Legacy typed timeout receipts also remain unfinished.
+      if (executionExitCode !== undefined && check.pass !== (executionExitCode === 0 && !check.unfinished)) {
         invalidArtifact(artifactPath, `report.results[${index}].pass disagrees with evidence.exit.code`);
       }
     }

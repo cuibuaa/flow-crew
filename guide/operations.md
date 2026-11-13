@@ -61,14 +61,15 @@ All zero command exits accept validation; any completed nonzero exit rejects and
 Reporter totals, logs, timing and load are evidence for readers, never verdict inputs.
 There are no candidate confirmations, automatic subset reruns or gate-requested base suites.
 
-Unfinished executions retry within `attempts` and `timeoutMs`, declared by the brief's
-`validation` block, else the project's `config/validation.json`, else the engine's
-`validation_attempts` and `validation_timeout_ms`. The record keeps the limits in force and the allowance spent
-(`spentMs`, each execution charged its full `timeoutMs`). Exhaustion parks the run without
-spending another author attempt, review verdict or repair round. A completed record is reused
-whatever limits ask for it. An unfinished record runs again only when the requesting
-allowance (`timeoutMs × attempts`) is larger than its `spentMs`; declare a larger allowance
-in the brief or project before relaunching an exhausted tree. Completed nonzero records are retained on resume.
+Unfinished executions retry within `attempts` and any declared `timeoutMs`. Per field, the brief's
+`validation` block overrides the project's `config/validation.json`. Only attempts falls back to
+engine `validation_attempts`; an omitted duration waits for completion or cancellation.
+The record keeps limits and spent allowance (`spentMs`, each bounded execution charged its full
+`timeoutMs`). Exhaustion passes the original command records, output and reporter text to the next
+independent model for review and repair decisions. A completed record is reused whatever limits ask
+for it. A bounded unfinished record executes again only if `timeoutMs × attempts` exceeds `spentMs`;
+without a duration, interruption/exit events consume attempts. Resume preserves those records and
+allowance. Engine-recorded `recovery.kind: resumable` authorizes an operator resume of parked work.
 The shared store FIFO bounds daemon scheduler processes with `validation_concurrency`;
 `validation_priority` sets the Unix niceness adjustment. Dead controller requests release
 queue ownership. Configuration is engine-owned, and no project-specific load policy applies.

@@ -113,6 +113,18 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
   // output of this decision, never a proposed input to its verification.
   return evaluateRealityGate(state.projectDir, state.runId, outcome.status).then(gate => {
     Object.assign(state, gate);
+    if (gate.realityGate?.results.some(item => item.unfinished && !item.advisory)) {
+      // A resource receipt cannot publish the candidate's success or failure.
+      const parked = updateRunState(state.projectDir, state.runId, current => {
+        if (current.status === RUN_STATUS.CANCELLED) return;
+        current.realityGate = gate.realityGate;
+        current.status = RUN_STATUS.PARKED;
+        current.recovery = { kind: 'resumable', cause: 'work_unfinished', at: new Date().toISOString(), interruptedStages: [],
+          reason: `Reality check unfinished; recorded command facts: ${gate.realityGate!.artifactPath}` };
+      });
+      Object.assign(callerState, parked);
+      return callerState;
+    }
     if (gate.realityGate?.pass === false) {
       outcome = { ...outcome, status: 'reality_gate_failed', reasonCode: 'reality_gate_failed', detail: gate.failureReason };
     }

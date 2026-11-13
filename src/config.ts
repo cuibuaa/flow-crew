@@ -13,7 +13,6 @@ const nonempty = z.string().min(1);
 const EngineDefaultsSchema = z.object({
   default_timeout_ms: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   stage_idle_timeout_ms: positive,
-  validation_timeout_ms: positive,
   validation_attempts: z.number().int().positive(),
   validation_concurrency: z.number().int().positive(),
   validation_priority: z.number().int().min(0).max(19),

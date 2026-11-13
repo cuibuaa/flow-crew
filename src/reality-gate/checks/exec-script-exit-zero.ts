@@ -39,7 +39,7 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
     const params = raw as Params;
     if (typeof params.script !== 'string') return result(false, '`params.script` must be provided; add a failure-capable script and rerun the check.');
     const args = Array.isArray(params.args) ? params.args : [];
-    const timeoutMs = Math.max(1, params.timeout_seconds ?? 60) * 1000;
+    const timeoutMs = params.timeout_seconds === undefined ? undefined : Math.max(1, params.timeout_seconds) * 1000;
     // Run the script BODY through the shell from the project dir, so inline scripts and
     // relative paths (docs/...) work. A bare command is still valid → backward-compatible.
     // Edge: a bare relative filename (no slash) that exists in the project dir is a project
@@ -54,6 +54,7 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
       ? `${scriptText} ${args.map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`).join(' ')}`
       : scriptText;
     const execution = await run('bash', ['-c', cmd], context.projectDir, timeoutMs, cmd);
+    if (execution.exit.timedOut) return { ...result(false, 'script unfinished: declared allowance exhausted', execution), unfinished: true };
     const diagnostic = execution.exit.code !== 0
       && execution.stdout.trim().length === 0
       && execution.stderr.trim().length === 0
@@ -72,11 +73,9 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
     }
     const status = execution.exit.code === 0
       ? 'script exited 0'
-      : execution.exit.timedOut
-        ? 'script timed out'
-        : execution.exit.signal
-          ? `script ended on signal ${execution.exit.signal}`
-          : `script exited ${execution.exit.code ?? 'without code'}`;
+      : execution.exit.signal
+        ? `script ended on signal ${execution.exit.signal}`
+        : `script exited ${execution.exit.code ?? 'without code'}`;
     const actionableFailure = execution.exit.code === 0 || diagnostic
       ? status
       : `${status} for script ${scriptExcerpt(cmd)}. Rerun it from the project root, inspect the captured stdout/stderr, and fix the named failing condition.`;
@@ -116,7 +115,7 @@ function run(
   command: string,
   args: string[],
   cwd: string,
-  timeoutMs: number,
+  timeoutMs: number | undefined,
   evidenceCommand: string,
 ): Promise<Execution> {
   return new Promise((resolve) => {
@@ -138,7 +137,7 @@ function run(
         exit,
       });
     };
-    const timer = setTimeout(() => {
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
       stop();
     }, timeoutMs);

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { TaskRegistry, type TaskEntry } from '../task-registry.js';
 import { runsRoot } from '../store.js';
 import { parseChecksFromBrief, runAllChecks } from './index.js';
-import type { CheckDecl } from './types.js';
+import type { CheckDecl, RealityGateReport } from './types.js';
 
 interface AuditRow {
   task: string;
@@ -80,8 +80,7 @@ async function auditRunState(name: string, runPath: string, state: Record<string
   return {
     ...base,
     checksRun: escapeCell(formatChecks(decls, report.results)),
-    realStatus: report.pass ? 'PASS' : 'FAKE',
-    mismatch: report.pass ? '—' : '⚠ FABRICATED',
+    ...auditOutcome(report),
   };
 }
 
@@ -97,8 +96,7 @@ async function auditTask(task: TaskEntry): Promise<AuditRow> {
   if (decls.length === 0) return baseRow(task, projectDir, '(no checks declared)', 'UNVERIFIABLE', '—');
   const report = await runAllChecks(decls, { taskDir: runPath ?? projectDir, projectDir, briefPath });
   const checks = formatChecks(decls, report.results);
-  const realStatus = report.pass ? 'PASS' : 'FAKE';
-  const mismatch = report.pass ? '—' : '⚠ FABRICATED';
+  const { realStatus, mismatch } = auditOutcome(report);
   return baseRow(task, projectDir, checks, realStatus, mismatch);
 }
 
@@ -121,8 +119,13 @@ function resolveBriefPath(task: TaskEntry, runPath?: string): string | undefined
   return candidates.find((candidate) => existsSync(candidate));
 }
 
-function formatChecks(decls: CheckDecl[], results: Array<{ name: string; pass: boolean }>): string {
-  const statusByName = new Map(results.map((item) => [item.name, item.pass ? 'PASS' : 'FAIL']));
+function auditOutcome(report: RealityGateReport) {
+  if (report.results.some(item => item.unfinished && !item.advisory)) return { realStatus: 'UNFINISHED', mismatch: '—' };
+  return { realStatus: report.pass ? 'PASS' : 'FAKE', mismatch: report.pass ? '—' : '⚠ FABRICATED' };
+}
+
+function formatChecks(decls: CheckDecl[], results: RealityGateReport['results']): string {
+  const statusByName = new Map(results.map((item) => [item.name, item.unfinished ? 'UNFINISHED' : item.pass ? 'PASS' : 'FAIL']));
   return decls.map((decl) => `${decl.name}:${statusByName.get(decl.name) ?? 'MISS'}`).join(', ');
 }
 

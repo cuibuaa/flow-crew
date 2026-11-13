@@ -134,7 +134,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
     const original = ledger.find(entry => entry.sequence === finding.record.sequence);
     const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence).at(-1);
     return original?.kind !== 'command' || !original.context || closure?.kind !== 'command' || closure.owner !== 'code'
-      || closure.exitCode !== 0 || !closure.outputDigest || !treeHash || !closure.treeHash || closure.treeAfterHash !== closure.treeHash
+      || closure.unfinished || closure.exitCode !== 0 || !closure.outputDigest || !treeHash || !closure.treeHash || closure.treeAfterHash !== closure.treeHash
       || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
       || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
   });

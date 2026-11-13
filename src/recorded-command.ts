@@ -17,7 +17,6 @@ export type RecordedCommand = z.infer<typeof RecordedCommandSchema>;
 const client = `const net = require('node:net');
 const socket = net.connect(process.argv[2]);
 let response = '';
-socket.setTimeout(65000, () => socket.destroy(new Error('Recorder response timed out')));
 socket.on('connect', () => socket.end(process.argv[3]));
 socket.on('data', chunk => { response += chunk; process.stdout.write(chunk); });
 socket.on('end', () => { try { if (JSON.parse(response).code === 'GIT_NOT_ANSWERED') process.exitCode = 1; } catch {} });
@@ -38,7 +37,6 @@ export async function startCommandRecorder(runDir: string,
     sockets.add(socket);
     socket.on('error', () => { /* a disconnected caller cannot publish facts */ });
     socket.on('close', () => sockets.delete(socket));
-    socket.setTimeout(65000, () => socket.destroy());
     let input = '';
     socket.setEncoding('utf8');
     socket.on('data', chunk => {

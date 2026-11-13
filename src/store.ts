@@ -341,6 +341,7 @@ export interface RealityGateOutputTail {
 }
 
 export interface RealityGateCheckDiagnostic {
+  unfinished?: boolean;
   name: string;
   type: string;
   pass: boolean;
@@ -650,6 +651,7 @@ function realityGateDiagnostics(report: RealityGateReport): RealityGateDiagnosti
         name: stripVTControlCharacters(item.name),
         type: stripVTControlCharacters(item.type),
         pass: item.pass,
+        ...(item.unfinished ? { unfinished: true } : {}),
         advisory: item.advisory === true,
         details: stripVTControlCharacters(item.details),
       };
@@ -711,7 +713,7 @@ export async function evaluateRealityGate(
     });
   }
   const diagnostics = realityGateDiagnostics(durableReport);
-  if (durableReport.pass) return { realityGate: diagnostics };
+  if (durableReport.pass || durableReport.results.some(item => item.unfinished && !item.advisory)) return { realityGate: diagnostics };
   appendFileSync(runRecordPath(dir, '.reality-gate.failures.md'), failureMarkdown(durableReport, targetStatus), 'utf-8');
   return { realityGate: diagnostics, failureReason: realityGateFailureReason(diagnostics, targetStatus) };
 }

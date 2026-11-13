@@ -342,8 +342,8 @@ export class Orchestrator {
       ? readRunState(task.projectDir, bound.runId).deploymentHold : undefined;
     const status = resolveRunStatus(bound.status);
     if (status.kind !== 'known' || !status.semantics.resumable
-        || (bound.status === RUN_STATUS.PARKED && !(heldContinuation || bound.retryExemptContinuation))) {
-      throw new Error(`Cannot resume a ${bound.status} run; resume requires cancelled, failed, incomplete or parked work`);
+        || (bound.status === RUN_STATUS.PARKED && !(heldContinuation || bound.resumeAuthorized))) {
+      throw new Error(`Cannot resume a ${bound.status} run; resume requires cancelled, failed, incomplete or parked work with recorded continuation authority`);
     }
     if (task.status === TASK_STATUS.CANCELLING || this.launchingTaskIds.has(id)
         || !['dead', 'missing', 'reused'].includes(inspectRunScheduler(bound.runId, bound.path).kind)) {
@@ -361,7 +361,7 @@ export class Orchestrator {
     // reconciling the previous terminal outcome before this launch occurs.
     return this.registry.update(id, {
       status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
-      not_before: undefined, defer_reason: undefined, defer_kind: bound.status === RUN_STATUS.PARKED && (heldContinuation || bound.retryExemptContinuation) ? 'wait' : 'retry',
+      not_before: undefined, defer_reason: undefined, defer_kind: bound.status === RUN_STATUS.PARKED && (heldContinuation || bound.resumeAuthorized) ? 'wait' : 'retry',
       notes: undefined, completing_commit: undefined,
       summary_one_liner: undefined, summary_full: undefined,
       summary_source: undefined, summary_parsed_at: undefined,

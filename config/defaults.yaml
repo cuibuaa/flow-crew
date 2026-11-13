@@ -7,10 +7,9 @@ default_timeout_ms: 10800000
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
 stage_idle_timeout_ms: 600000
 
-# Bound the configured batch; each remaining command receives a share.
-# Unfinished executions retry within this engine resource allowance.
+# Only project/brief declarations bound validation time.
+# Unfinished executions retry this many times unless the project declares attempts.
 # Gates consume recorded results and never rerun the configured suite.
-validation_timeout_ms: 60000
 validation_attempts: 3
 validation_concurrency: 1
 validation_priority: 19

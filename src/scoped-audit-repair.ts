@@ -42,7 +42,7 @@ export function assessFindings(findings: AuditFinding[], ledger: EvidenceEntry[]
   for (const finding of findings) {
     const record = ledger.find(entry => entry.sequence === finding.reproduction);
     if (record?.kind === 'command' && (record.owner === 'adapter-event' || record.owner === 'code') && record.reproductionOf === undefined && record.stageId === gate.stageId
-        && record.attemptIndex === gate.attemptIndex && record.command && Number.isInteger(record.exitCode) && record.exitCode! > 0
+        && record.attemptIndex === gate.attemptIndex && record.command && !record.unfinished && Number.isInteger(record.exitCode) && record.exitCode! > 0
         && record.context && typeof record.context.cwd === 'string' && isAbsolute(record.context.cwd)
         && typeof record.context.shell === 'string' && isAbsolute(record.context.shell)
         && record.outputDigest && record.treeHash && record.treeHash === gate.treeHash && record.treeAfterHash === record.treeHash) {

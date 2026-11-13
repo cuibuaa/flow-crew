@@ -4,11 +4,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Orchestrator } from '../src/orchestrator.js';
+import { TaskRegistry } from '../src/task-registry.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { engineValidation } from '../src/engine-validation.js';
 import { runProjectCommand, projectValidationResult, parseBriefValidationCommands, parseValidationCommands, type ValidationCommand } from '../src/project-validation.js';
 import * as validationOwner from '../src/project-validation.js';
+import * as gateValidation from '../src/scheduler/sched_settlement/gate-validation.js';
+import { validationReport } from './test-support/structured-validation.js';
+import { createRun } from './test-support/create-run.js';
+import * as recorderOwner from '../src/recorded-command.js';
+import { assessFindings } from '../src/scoped-audit-repair.js';
 import { loadWorkflow, runWorkflow, snapshotShipSetupValidationBaseline } from '../src/scheduler.js';
-import { runDir, fcGlobalDir, readStageStatus } from '../src/store.js';
+import { runDir, fcGlobalDir, readStageStatus, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import * as evidenceOwner from '../src/evidence-ledger.js';
 import { captureProjectTree, projectValidationFact, validationBatch, readEvidence, type ValidationFact } from '../src/evidence-ledger.js';
@@ -58,6 +66,18 @@ describe('engine validation ownership', () => {
     expect(projectValidationFact({ ...fact, executions: [execution([command('test', 1)]), fact.executions[1]] }).pass).toBe(false);
     expect(projectValidationFact({ ...fact, validationVersion: 4 }).pass).toBe(true);
   });
+  it('model context carries a stored validation record verbatim, including legacy labels', () => {
+    const root = project(), { runDirPath } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', []);
+    const treeHash = captureProjectTree(root, '', runDirPath).hash;
+    evidenceOwner.appendEvidence(runDirPath, { kind: 'attempt', stageId: 'author', attemptIndex: 1, attemptStartedAt: 'start',
+      exitCode: 0, status: 'complete', treeHash, files: [], measurements: { inputTokens: null, outputTokens: null, durationMs: 0, provenance: 'adapter-reported' } });
+    const fact = evidenceOwner.appendEvidence(runDirPath, { kind: 'validation', validationVersion: 4, stageId: 'author', attemptIndex: 1,
+      attemptStartedAt: 'start', treeHash, resourceState: 'unfinished', executions: [{ target: 'attempt', cwd: root, treeHash, treeAfterHash: treeHash,
+        commands: [{ role: 'test', command: 'fixture', args: [], state: 'unverified', exitCode: null, unfinished: true,
+          durationMs: 0, output: '  completed A\nwaiting B\n', failureIdentifiers: [], failureIdentity: 'unknown' }] }], delta: [], failures: [], pass: false });
+    expect(evidenceOwner.evidenceContext(root, runDirPath)).toContain(JSON.stringify(fact));
+  });
+
   it('once-per-tree: joins simultaneous requests and reuses a completed record across owners', async () => {
     const f = fixture();
     const entered = deferred(), release = deferred(); let calls = 0;
@@ -281,7 +301,7 @@ describe('scheduler owns validation after author settlement', () => {
     writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: Object.fromEntries(['build', 'test', 'lint'].map(role =>
       [role, { command: process.execPath, args: ['check.cjs'] }])) }));
     const budget = 30_000; let elapsed = 0;
-    setEngineDefaults({ default_timeout_ms: budget, validation_timeout_ms: budget, validation_attempts: 1 });
+    setEngineDefaults({ default_timeout_ms: budget, validation_attempts: 1 });
     const clock = { monotonicNow: () => elapsed, wallNow: () => Date.now() + elapsed,
       setTimer: () => ({} as ReturnType<typeof setTimeout>), clearTimer: () => {} };
     vi.spyOn(validationOwner, 'runValidationCommand').mockImplementation(async command => {
@@ -301,40 +321,150 @@ describe('scheduler owns validation after author settlement', () => {
     expect(record.resourceState).toBe('complete'); expect(final.stages.implement.attempts).toHaveLength(1);
   });
 
-  it('unfinished-is-resource-state: exhausts resources without review or repair and resumes without another author attempt', async () => {
+  it('unfinished command cannot confirm repair despite a positive raw exit', () => {
+    const record: evidenceOwner.EvidenceEntry = { version: 1, sequence: 1, at: 'recorded', kind: 'command', owner: 'code', stageId: 'review',
+      attemptIndex: 1, commandId: 'fixture', command: 'predicate', exitCode: 7, unfinished: true,
+      context: { cwd: '/workspace', shell: '/bin/sh' }, outputDigest: 'digest', treeHash: 'tree', treeAfterHash: 'tree' };
+    const finding = { id: 'value', paths: ['value.txt'], reason: 'Opaque predicate', reproduction: 1,
+      criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
+    const gate = { stageId: 'review', attemptIndex: 1, treeHash: 'tree' };
+    expect(assessFindings([finding], [record], gate).confirmed).toEqual([]);
+    expect(assessFindings([finding], [{ ...record, unfinished: false }], gate).confirmed).toHaveLength(1);
+  });
+
+  it.each([null, 7])('recorded command copies unfinished with raw exit %s and supplies no implicit duration', async exitCode => {
+    const root = project(); projectValidation(root);
+    vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
+    const command = vi.spyOn(validationOwner, 'runProjectCommand').mockResolvedValue({ exitCode, unfinished: true, error: 'auxiliary diagnostic', stdout: 'partial reporter bytes' });
+    let execute!: Parameters<typeof recorderOwner.startCommandRecorder>[1];
+    vi.spyOn(recorderOwner, 'startCommandRecorder').mockImplementation(async (_directory, callback) => {
+      execute = callback; return { command: 'fixture-recorder', close: async () => {} };
+    });
+    const final = await engineering(root, { async run(_prompt, _role, opts) {
+      if (opts.stageId === 'review') {
+        const response = await execute({ command: 'finite experiment', cwd: root, shell: '/bin/sh' }, new AbortController().signal) as { record: evidenceOwner.EvidenceEntry };
+        expect(command.mock.calls[0][0].timeoutMs).toBeUndefined();
+        expect(response.record).toMatchObject({ kind: 'command', exitCode, unfinished: true });
+        expect(readEvidence(opts.runDir).find(entry => entry.sequence === response.record.sequence)).toEqual(response.record);
+        const finding = { id: 'observation', paths: ['value.txt'], reason: 'Opaque command facts', reproduction: response.record.sequence,
+          criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
+        expect(assessFindings([finding], readEvidence(opts.runDir), { stageId: opts.stageId, attemptIndex: 1,
+          treeHash: captureProjectTree(root, '', opts.runDir).hash }).confirmed).toEqual([]);
+        return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      writeFileSync(join(root, 'value.txt'), 'good');
+      return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
+    } });
+    expect(final.status).toBe('complete');
+  });
+
+  it('repair replay copies unfinished and cannot close a finding on an unfinished zero exit', async () => {
+    const root = project(); projectValidation(root); let reviews = 0;
+    vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
+    const command = vi.spyOn(validationOwner, 'runProjectCommand').mockResolvedValueOnce({ exitCode: 1 })
+      .mockResolvedValue({ exitCode: 0, unfinished: true });
+    let execute!: Parameters<typeof recorderOwner.startCommandRecorder>[1];
+    vi.spyOn(recorderOwner, 'startCommandRecorder').mockImplementation(async (_directory, callback) => {
+      execute = callback; return { command: 'fixture-recorder', close: async () => {} };
+    });
+    const final = await engineering(root, { async run(_prompt, _role, opts) {
+      if (opts.stageId !== 'review') {
+        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair' ? 'good' : 'bad');
+        return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
+      }
+      const first = ++reviews === 1;
+      const response = first ? await execute({ command: 'independent predicate', cwd: root, shell: '/bin/sh' }, new AbortController().signal) as { record: evidenceOwner.EvidenceEntry } : undefined;
+      return { output: JSON.stringify({ ...verdict(opts.runDir), pass: !first,
+        ...(first ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Completed independent predicate' } } : {}),
+        audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Replace bad value', reproduction: response!.record.sequence,
+          criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+    } });
+    const closure = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
+    expect(closure).toMatchObject({ exitCode: 0, unfinished: true });
+    expect(command.mock.calls[1][0].timeoutMs).toBeUndefined();
+    expect(final.status).toBe('incomplete'); expect(reviews).toBe(2);
+  });
+
+  it('unfinished reporter bytes are retained without interpreting completed-test totals', async () => {
+    const report = '  ' + validationReport(['opaque reporter observation'], { complete: false, passed: 1 }) + '\n';
+    const batch = await validationOwner.runProjectValidationBaseline(project(), { now: () => 0,
+      commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' } }],
+      runCommand: () => ({ exitCode: null, unfinished: true, report, stdout: '  opaque progress\n' }) });
+    expect(batch.results[0]).toMatchObject({ report, output: '  opaque progress\n', state: 'unverified',
+      identityOwner: 'unknown', testsRun: null, failureIdentity: 'unknown' });
+  });
+
+  it.each([false, true])('three unfinished validations reach the next model as untouched records (legacy parked=%s)', async legacy => {
     const root = project(); projectValidation(root); const calls: string[] = [];
-    setEngineDefaults({ validation_attempts: 1 });
-    const capture = evidenceOwner.captureProjectTree; let identityUnavailable = false;
-    const identity = vi.spyOn(evidenceOwner, 'captureProjectTree').mockImplementation((...args) => identityUnavailable
-      ? { hash: null, files: [], reason: 'Injected unavailable identity' } : capture(...args));
-    const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: null, unfinished: true });
-    const adapter: Parameters<typeof engineering>[1] = { async run(_prompt, _role, opts) {
+    const declaration = JSON.parse(readFileSync(join(root, 'config/validation.json'), 'utf8'));
+    declaration.timeoutMs = 1_800_000; declaration.attempts = 3;
+    declaration.commands = Object.fromEntries(['build', 'test', 'lint'].map(role => [role, { command: 'fixture', args: [role] }]));
+    writeFileSync(join(root, 'config/validation.json'), JSON.stringify(declaration));
+    const output = 'completed: alpha\n  pending: beta\nnot a hang diagnosis\n';
+    const report = '  ' + validationReport([], { complete: false, passed: 1 }) + '\n';
+    declaration.commands.test.report = { format: 'vitest-json' };
+    writeFileSync(join(root, 'config/validation.json'), JSON.stringify(declaration));
+    let elapsed = 0;
+    const baseline = validationOwner.runProjectValidationBaseline;
+    vi.spyOn(validationOwner, 'runProjectValidationBaseline').mockImplementation((project, dependencies) =>
+      baseline(project, { ...dependencies, now: () => elapsed }));
+    const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockImplementation(async request => {
+      if (request.role !== 'test') return { exitCode: 0 };
+      elapsed += request.timeoutMs!;
+      return { exitCode: null, unfinished: true, stdout: output, report };
+    });
+    let seen: ValidationFact | undefined;
+    const adapter: Parameters<typeof engineering>[1] = { async run(prompt, _role, opts) {
       calls.push(opts.stageId);
-      if (opts.stageId === 'review') return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-      writeFileSync(join(root, 'value.txt'), 'good'); identityUnavailable = true;
+      if (opts.stageId === 'review') {
+        seen = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1) as ValidationFact;
+        // Whole record equality catches projections that rewrite opaque facts.
+        expect(prompt).toContain(JSON.stringify(seen));
+        expect(seen.executions).toHaveLength(3); expect(seen.resourceState).toBe('unfinished');
+        for (const execution of seen.executions) {
+          expect(execution.commands.map(command => command.exitCode)).toEqual([0, null, null]);
+          expect(execution.commands[1]).toMatchObject({ unfinished: true, output, report, failureIdentity: 'unknown', identityOwner: 'unknown', testsRun: null });
+        }
+        return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
+      writeFileSync(join(root, 'value.txt'), 'good');
       return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
     } };
-    const parked = await engineering(root, adapter);
-    expect(parked.status).toBe('parked'); expect(calls).toEqual(['implement']);
-    expect(parked.stages.implement.attempts).toHaveLength(1); expect(parked.stages.repair.attempts ?? []).toHaveLength(0);
-    identity.mockRestore();
-    const interrupted = await engineering(root, adapter, parked.runId);
-    expect(interrupted.status).toBe('parked'); expect(calls).toEqual(['implement']);
-    setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(runProjectCommand);
-    const resumed = await engineering(root, adapter, parked.runId);
-    expect(resumed.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
-    expect(resumed.stages.implement.attempts).toHaveLength(1); expect(resumed.stages.repair.attempts ?? []).toHaveLength(0);
+    const validate = gateValidation.validateSettledTree;
+    // Reproduce the historical parking boundary before any model sees the record.
+    const parking = legacy ? vi.spyOn(gateValidation, 'validateSettledTree').mockImplementation(async (project, runId) => {
+      const ready = await validate(project, runId);
+      if (!readEvidence(runDir(project, runId)).some(entry => entry.kind === 'validation')) return ready;
+      updateRunState(project, runId, current => {
+        current.status = 'parked'; current.recovery = { kind: 'resumable', cause: 'unknown',
+          at: new Date().toISOString(), interruptedStages: [], reason: 'Validation unfinished…' };
+      });
+      return false;
+    }) : undefined;
+    let final = await engineering(root, adapter);
+    parking?.mockRestore();
+    if (legacy) {
+      expect(final.status).toBe('parked'); expect(calls).toEqual(['implement']); expect(seen).toBeUndefined();
+      const registry = new TaskRegistry({ baseDir: project() });
+      const brief = readFileSync(runRecordPath(runDir(root, final.runId), 'task_brief.md'), 'utf8');
+      const task = registry.create({ projectDir: root, run_id: final.runId, status: 'stuck', brief_text: brief,
+        brief_admission: createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() }) });
+      updateRunState(root, final.runId, current => { current.briefAdmission = task.brief_admission; });
+      const orchestrator = new Orchestrator({ registry, isProjectBusy: () => null });
+      try {
+        expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', run_id: final.runId, defer_kind: 'wait' });
+        expect(runner).toHaveBeenCalledTimes(6);
+      } finally { await orchestrator.stop(); }
+      final = await engineering(root, adapter, final.runId);
+    }
+    expect(seen).toBeDefined(); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(6);
+    expect(final.status).toBe('incomplete'); // No successful publication from an unfinished receipt.
+    expect(final.stages.implement.attempts).toHaveLength(1); expect(final.stages.repair.attempts ?? []).toHaveLength(0);
   });
+
 });
 
 describe('the project declares its validation limits', () => {
-  // Engine defaults are made small so a half-second script exceeds them; the
-  // declaration, not the engine, grants the time.
-  const slow = (code = 0) => {
-    const f = fixture();
-    writeFileSync(join(f.root, 'check.cjs'), `require('node:fs').appendFileSync(${JSON.stringify(f.counter)},'x');setTimeout(()=>process.exit(${code}),1200);`);
-    return f;
-  };
   const killed = () => {
     const f = fixture();
     f.input.commands[0] = { role: 'test', command: '/bin/sh', args: ['-c', 'printf x >> "$1"; kill -s KILL $$', 'declared-check', f.counter], display: 'declared check' };
@@ -343,22 +473,12 @@ describe('the project declares its validation limits', () => {
   const brief = (validation: string) => `---\nvalidation: ${validation}\n---\nDeliver the value.`;
   const command = '{test: {command: node, args: [check.cjs]}}';
 
-  it('declared-limits: a command needing longer than the engine default completes under a larger declared timeout', async () => {
-    setEngineDefaults({ validation_timeout_ms: 500, validation_attempts: 1 });
-    const f = slow(3);
-    const record = await engineValidation({ ...f.input, limits: { timeoutMs: 20_000 } });
+  it.each([undefined, 20_000])('only a declaration supplies the command allowance (%s)', async timeoutMs => {
+    const f = fixture(); const runCommand = vi.fn(() => ({ exitCode: 3 }));
+    const record = await engineValidation({ ...f.input, limits: { timeoutMs, attempts: 1 }, runCommand, now: () => 0 });
+    expect(runCommand.mock.calls[0][0].timeoutMs).toBe(timeoutMs);
     expect(record.resourceState).toBe('complete'); expect(record.pass).toBe(false);
-    expect(record.executions.map(execution => execution.commands[0].exitCode)).toEqual([3]);
-    expect(record.limits).toEqual({ timeoutMs: 20_000, attempts: 1 }); expect(record.spentMs).toBe(20_000);
-  });
-
-  it('declared-limits: the same command is unfinished without the declaration', async () => {
-    setEngineDefaults({ validation_timeout_ms: 500, validation_attempts: 1 });
-    const f = slow();
-    const record = await engineValidation(f.input);
-    expect(record.resourceState).toBe('unfinished'); expect(record.pass).toBe(false);
-    expect(record.executions.map(execution => execution.commands[0])).toEqual([expect.objectContaining({ exitCode: null, unfinished: true })]);
-    expect(record.limits).toEqual({ timeoutMs: 500, attempts: 1 });
+    expect(record.limits).toEqual({ timeoutMs, attempts: 1 }); expect(record.spentMs).toBe(timeoutMs ?? 0);
   });
 
   it.skipIf(process.platform !== 'linux')('declared-limits: declared attempts bound the retries in either direction', async () => {
@@ -444,7 +564,7 @@ describe('the project declares its validation limits', () => {
       expect(both.limits).toEqual({ timeoutMs: 1_800_000, attempts: 4 });
       expect(both.baseline.discovery.commands[0].provenance?.corroboratedBy).toHaveLength(1);
     });
-    it('declared-limits: limits stated nowhere leave the engine defaults to apply', () => {
+    it('declared-limits: limits stated nowhere impose no duration', () => {
       expect(plan({}).limits).toBeUndefined();
       expect(plan(undefined, `{commands: ${command}}`).limits).toBeUndefined();
     });
@@ -458,8 +578,9 @@ describe('the project declares its validation limits', () => {
     expect(parsed.error).toContain(field.split(':')[0]); expect(parsed.commands).toEqual([]); expect(parsed.limits).toBeUndefined();
   });
 
-  it('declared-limits: the scheduler carries the declaration to the engine record; without it the run parks', async () => {
-    setEngineDefaults({ validation_timeout_ms: 600, validation_attempts: 1 });
+  it('declared-limits: the scheduler carries declarations and leaves undeclared commands unbounded', async () => {
+    setEngineDefaults({ validation_attempts: 1 });
+    const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
     const run = async (limits: string) => {
       const root = project();
       // Content identity is shared across projects: distinct text keeps the two runs on distinct trees.
@@ -479,7 +600,8 @@ describe('the project declares its validation limits', () => {
     const record = readEvidence(runDir(declared.root, declared.final.runId)).find(entry => entry.kind === 'validation') as ValidationFact & { limits: unknown };
     expect(record.limits).toEqual({ timeoutMs: 20000, attempts: 1 });
     const undeclared = await run('');
-    expect(undeclared.final.status).toBe('parked');
+    expect(undeclared.final.status).toBe('complete');
+    expect(runner.mock.calls.at(-1)![0].timeoutMs).toBeUndefined();
     expect(undeclared.final.stages.implement.attempts).toHaveLength(1);
   });
 });

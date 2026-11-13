@@ -236,13 +236,14 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(settlement.kind).toBe('unchanged'); expect(result.executions).toHaveLength(2);
   });
 
-  it.each([false, true])('parks validation when its command changes source, before any review (base red=%s)', async baseRed => {
-    const result = await fixture({ mutateValidation: true, baseRed });
-    expect(result.final.status).toBe('parked'); expect(result.executions).toHaveLength(1);
+  it('hands source-changing validation facts to review and validates the resulting tree', async () => {
+    const result = await fixture({ mutateValidation: true });
+    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(2);
     expect(result.validations[0].regressions ?? []).toEqual([]);
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
     expect(result.validations[0].resourceState).toBe('unfinished');
-    expect(result.calls.map(call => call.stage)).toEqual(['implement']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.calls[1].prompt).toContain(JSON.stringify(result.validations.at(-1)));
   });
 
   it('rejects a stale receipt after a later source write without rerunning validation', async () => {

@@ -183,23 +183,22 @@ limits, both optional positive integers: `timeoutMs` (the time one execution of 
 batch may take, shared among its commands; at most 2147483647) and `attempts` (the executions
 of an unfinished batch). A non-number, a non-positive or fractional value, or any other field
 refuses parsing with its name. The project's own `config/validation.json` accepts the same two
-fields. Per field, the brief's value wins, else the project's, else the engine's
-`validation_timeout_ms` or `validation_attempts`. A brief may state limits without `commands`;
+fields. Per field, the brief's value wins, else the project's. Omitted time limits wait for
+completion or cancellation; only `attempts` falls back to engine `validation_attempts`. A brief may state limits without `commands`;
 the commands then come from the project declaration. Concurrency and priority are not brief fields. Without declarations, setup discovers
 commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
 command selection semantics. Do not replace the full configured suite with a subset.
 The engine validates settled author and repair trees outside author budgets. One completed
 record per content hash supplies every review and gate with direct exits and structured
-reporter totals. All zero exits accept validation; any nonzero exit rejects. Unfinished
-executions retry within the declared `attempts` and `timeoutMs` (engine defaults when absent);
-exhaustion parks the run without spending a review or repair round. A suite that needs longer
-than the engine default declares its own `timeoutMs` (project or brief); the record shows the limits in force. The
-store-wide FIFO uses engine `validation_concurrency` and `validation_priority` (niceness),
-across daemon scheduler processes. Resume reuses completed records and preserves spent resource allowance.
-A completed record is reused under any limits and is never executed again. The record's
-allowance is `timeoutMs × attempts`; each execution is charged its full `timeoutMs`. An
-unfinished record runs again only while its spent total is below the requesting declaration's
-allowance, so the same or a smaller allowance never reopens an exhausted record.
+reporter totals. All completed zero exits accept validation; a completed nonzero exit rejects. Unfinished
+executions retry within the declared allowance. Exhaustion hands the original records, including
+unfinished output and reporter text, to the next model for independent review and repair decisions;
+it supplies no product failure. The record shows the limits in force. The store-wide FIFO uses
+engine `validation_concurrency` and `validation_priority` (niceness), across daemon scheduler processes.
+Resume reuses completed records and preserves spent resource allowance. A completed record is
+never executed again. When time is declared, allowance is `timeoutMs × attempts`; each execution
+is charged its full `timeoutMs`. Without a duration, interruption/exit events consume attempts.
+The same or a smaller allowance never reopens an exhausted record.
 Authors run related tests and end their invocation; they never run or poll full validation.
 
 Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/cli-ship-setup.ts),
@@ -574,9 +573,9 @@ and criteria rather than elapsed time as evidence of work.
 
 `post_terminate_hook` accepts `command`, optional string-array `args`, positive
 `timeout_seconds` and string-valued `env`. It runs after terminal commit under the command
-boundary, with a default 300-second timeout and `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
+boundary, waiting for completion unless `timeout_seconds` is declared, with `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
 `FC_PROJECT_DIR`, `FC_RUN_ID` defaulting to the committed terminal context; explicit hook
-`env` can override them. A failed/timed-out hook is
+`env` can override them. An exhausted declared allowance is recorded as unfinished; a completed failure is
 recorded without turning the already committed terminal into a live run. Treat it as real
 execution authority and review it before launch.
 
@@ -597,11 +596,13 @@ discover every dynamic read.
 
 | Type | Parameters |
 |---|---|
-| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` (default 60) |
+| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` (no duration limit when omitted) |
 | `file-exists-nonempty` | `paths` list or `{from_manifest, field}` |
 | `json-schema-match` | `file`, `schema` object or schema-file reference |
 
-A script runs via Bash from the project directory. Exit 127 with command-not-found diagnostics
+A script runs via Bash from the project directory. A declared allowance may stop it with
+unfinished evidence; required unfinished checks park the candidate with recorded resumable authority.
+They cannot publish a product pass or failure. Exit 127 with command-not-found diagnostics
 becomes advisory with the failed execution retained. Versioned-JSON shape failures remain
 failures unless the check explicitly declares `advisory: true`. This limits what a passing
 Reality Gate proves. Rejected terminal candidates are quarantined; prose reports do not create

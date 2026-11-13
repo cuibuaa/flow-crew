@@ -234,7 +234,7 @@ Run a targeted command, where exit 0 means the defect is absent and a positive e
 means it is present. Each reviewer invocation receives an engine-recorded command endpoint:
 call its supplied client through the native shell tool with a JSON object containing
 `command`, absolute `cwd` and absolute `shell`. The parent executes it with the isolated
-command environment and the attempt's remaining time, capped at 60 seconds; the response
+command environment, waiting for command completion or invocation cancellation; the response
 returns output and `record.sequence` to cite. This works when native events omit context.
 Native command events are also eligible when they carry explicit absolute cwd and shell,
 exit and output. Replay uses that shell with `-c` in that cwd. Put required shell options
@@ -278,9 +278,10 @@ author invocation and its deadline. Authors run related tests, finish code and d
 and return; they neither execute full validation nor poll its record. The scheduler requests
 one content-addressed record and reuses every completed result across stages, gates and resume.
 
-Engine configuration declares `validation_timeout_ms`, `validation_attempts`,
-`validation_concurrency` and `validation_priority` (Unix niceness adjustment); the brief's
-`validation.timeoutMs` and `validation.attempts`, else the project's `config/validation.json`, replace the first two. A store-wide
+Engine configuration declares `validation_attempts`, `validation_concurrency` and
+`validation_priority` (Unix niceness adjustment). The brief's `validation.timeoutMs` and
+`validation.attempts` override the project's `config/validation.json` per field. An omitted
+time limit waits for completion or cancellation; only attempts has an engine default. A store-wide
 FIFO coordinates separate daemon scheduler processes. Duplicate requests share their tree's
 owner. Commands run in order; each may use what remains of the batch allowance. An opaque command that
 combines build and tests remains one declared command; its text is never parsed.
@@ -294,7 +295,8 @@ cannot override those exits. Independent review still examines every assigned cr
 No candidate confirmation, base suite or model failure-disposition handshake runs.
 
 An unfinished batch is engine resource work. The engine retries within its numeric allowance;
-exhaustion parks the run without another author attempt, review verdict or repair round.
+exhaustion hands the recorded facts verbatim to the next independent model stage. The existing
+closed review/repair result decides further work; unfinished output never establishes a failed product.
 Resume preserves spent resource attempts; completed nonzero records remain rejected.
 Cancellation removes queued requests and retires owned commands. Dead scheduler slots remain
 occupied until their checkpoint-owned commands have retired. Historical record fields remain

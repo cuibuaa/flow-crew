@@ -49,11 +49,13 @@ declarations or reinterpret legacy measurement briefs. Map writable paths for au
 schema details in the canonical references.
 
 Require engine-owned complete configured validation with direct exits/totals after the last relevant
-write. Authors finish their deliverables and related tests, then end their invocation. Reviews and
+write. Authors finish their deliverables and related tests, then end their invocation. Unfinished
+commands retain their original output and reporter records for the next independent model;
+elapsed time supplies no product verdict. Reviews and
 operator reports consume the tree-bound engine record; authors neither rerun the full suite nor wait
 for that record. A report written before settlement references the engine's final projection rather
 than inventing future exits or changing the validated tree to insert them.
-A suite that needs longer than the engine default declares `timeoutMs` (and, if needed,
+A project that needs a resource allowance declares `timeoutMs` (and, if needed,
 `attempts`) once in the project's `config/validation.json`, or per run in the brief's `validation` block; see the [validation declaration](../guide/brief-contract.md#inputs-outputs-and-validation).
 For projects that require anti-anchoring, separate an operator numeric expectation from measured evidence and author result requirements such as
 `within_expected_range` and `method_was_not_adjusted_to_match_expectation` explicitly. The engine does not detect expectations or inject these obligations.

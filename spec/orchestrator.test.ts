@@ -787,6 +787,17 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(1);
   });
 
+  it.each(['unknown', 'work_unfinished', 'process_death'])('resumes engine-recorded parked %s work without a deployment hold', async cause => {
+    const runId = 'resource-continuation'; writeRun(runId, 'parked');
+    updateRunState(tempDir, runId, state => {
+      state.recovery = { kind: 'resumable', cause, at: new Date(clock).toISOString(), interruptedStages: [], reason: 'Recorded continuation' };
+    });
+    const task = registry.create({ ...admittedBrief('Continue work.'), projectDir: tempDir, run_id: runId, status: 'stuck' });
+    updateRunState(tempDir, runId, state => { state.briefAdmission = task.brief_admission; state.taskDescription = readFileSync(task.brief_path!, 'utf8'); state.stages = { work: { status: 'pending', retries: 0 } }; });
+    expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', defer_kind: 'wait', run_id: runId });
+    expect(systemd.runs).toHaveLength(0);
+  });
+
   it.each(['running', 'parked', 'complete', 'unknown'])('refuses task resume of a %s run without changing its task', async status => {
     const runId = 'ineligible-continuation';
     writeRun(runId, status);

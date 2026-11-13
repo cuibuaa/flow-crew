@@ -137,7 +137,17 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '47', digest: '68e2212b7acc' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '47', digest: '2921f6e84b12' });
+  });
+
+  it('documents declared command allowances and the unfinished handoff', () => {
+    expect(read('guide/configuration.md')).not.toContain('validation_timeout_ms');
+    expect(protocol).toContain('waiting for command completion or invocation cancellation');
+    expect(protocol).toContain('hands the recorded facts verbatim');
+    expect(operations).toContain('recovery.kind: resumable');
+    expect(briefGuide).toContain('required unfinished checks park the candidate');
+    expect(briefGuide).not.toContain('default 300-second');
+    expect(briefGuide).not.toContain('timeout_seconds` (default 60)');
   });
 
   it('contains no private measured case studies', () => {
