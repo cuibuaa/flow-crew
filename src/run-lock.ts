@@ -1,3 +1,4 @@
+import { readLockWaits } from './lock-publication.js';
 import { runRecordPath } from './run-layout.js';
 import { atomicWrite, writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
@@ -30,7 +31,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { fcGlobalDir, runsRoot, updateRunState, withRunStateLock } from './store.js';
+import { fcGlobalDir, runsRoot, updateRunState, withRunStateLock, readGlobalLockWaits, RUN_STATE_LOCK_FILE } from './store.js';
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 import { canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
@@ -58,6 +59,12 @@ function launchIntentPath(projectDir: string): string {
 // The retained owner and admission/restore lock share the existing project key.
 const projectOwnershipDirectory = (projectDir: string, storeRoot = fcGlobalDir()) =>
   join(storeRoot, 'launch-intents', `${createHash('sha256').update(normalizedProjectDir(projectDir)).digest('hex')}.ownership`);
+
+/** Run and project admission/restore share these existing lock locations. */
+export function readRunLockWaits(projectDir: string | undefined, directory: string) {
+  return [...readGlobalLockWaits(), ...readLockWaits(runRecordPath(directory, RUN_STATE_LOCK_FILE)),
+    ...(projectDir ? readLockWaits(runRecordPath(projectOwnershipDirectory(projectDir), RUN_STATE_LOCK_FILE)) : [])];
+}
 
 /**
  * Read an unexpired cross-process launch claim. A fresh malformed claim is

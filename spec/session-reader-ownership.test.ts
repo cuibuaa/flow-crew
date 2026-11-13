@@ -61,7 +61,7 @@ it('registry inspection and maintenance dry-runs do not participate in a live wr
   const f = fixture();
   const owner = JSON.stringify({ pid: process.pid, token: 'fixture-live-writer' });
   writeFileSync(f.registry.lockPath, owner);
-  const reader = new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 });
+  const reader = new TaskRegistry({ baseDir: f.fc });
   expect(reader.get(f.task.id)?.id).toBe(f.task.id);
   expect(reader.list()).toHaveLength(1);
   expect(reader.snapshot().tasks).toHaveLength(1);
@@ -91,7 +91,7 @@ fs.readFileSync = function(path, ...args) {
   await kill(child);
   expect(readdirSync(f.fc).filter(name => name.startsWith('tasks.lock') || name.includes('.tmp'))).toEqual([]);
   expect(readdirSync(join(f.fc, 'tasks', '1')).filter(name => name.includes('.tmp'))).toEqual([]);
-  const next = new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 }).create({ projectDir: f.root });
+  const next = new TaskRegistry({ baseDir: f.fc }).create({ projectDir: f.root });
   expect(next.id).toBe(2);
 });
 
@@ -105,7 +105,7 @@ new TaskRegistry({ baseDir: process.env.FC_HOME, syncFile: fd => { fsyncSync(fd)
   await ready(child);
   expect(existsSync(f.registry.lockPath)).toBe(true);
   await kill(child);
-  const writer = new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 });
+  const writer = new TaskRegistry({ baseDir: f.fc });
   expect(writer.create({ projectDir: f.root }).id).toBe(3);
   expect(writer.list().map(task => task.id)).toEqual([1, 2, 3]);
   const recoveries = readFileSync(join(f.fc, 'infrastructure-recoveries.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -134,7 +134,7 @@ import { TaskRegistry } from ${JSON.stringify(module)}; import { fsyncSync } fro
 new TaskRegistry({ baseDir: process.env.FC_HOME, syncFile: fd => { fsyncSync(fd); process.kill(process.pid, 'SIGKILL'); } }).update(1, ${patch});
 `], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, encoding: 'utf8', timeout: 15_000 });
   expect(child.signal, child.stderr).toBe('SIGKILL');
-  const writer = new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 });
+  const writer = new TaskRegistry({ baseDir: f.fc });
   writer.ensureSessionTaskIndexes();
   const push = new SessionPush(writer);
   expect(push.sessionTasks('claude', 'reader-session')).toEqual([]);
@@ -288,7 +288,7 @@ fs.renameSync = function(source, target) {
   expect(push.acknowledged(event.eventId)).toBe(true);
   expect(push.pending('reader-session', 'claude')).toEqual([]);
   const warnings: string[] = [];
-  new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0, warn: message => warnings.push(message) }).create({ projectDir: f.root });
+  new TaskRegistry({ baseDir: f.fc, warn: message => warnings.push(message) }).create({ projectDir: f.root });
   expect(warnings).toHaveLength(1);
   push.enqueue(f.task, source);
   expect(push.pending('reader-session', 'claude')).toEqual([]);
@@ -356,7 +356,7 @@ fs.statSync = function(path, ...args) {
   for (let i = 0; i < 300 && !existsSync(waiting); i++) await new Promise(resolve => setTimeout(resolve, 50));
   expect(existsSync(waiting), `stdout=${out} stderr=${err}`).toBe(true); // the Stop is now inside its 4 s registration wait
   await kill(writer); // the writer loses the lock ...
-  expect(new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 }).create({ projectDir: f.root }).id).toBeGreaterThan(1); // ... and the next writer takes it over
+  expect(new TaskRegistry({ baseDir: f.fc }).create({ projectDir: f.root }).id).toBeGreaterThan(1); // ... and the next writer takes it over
   await closed; children.delete(stop);
   expect(readFileSync(join(f.fc, 'infrastructure-recoveries.jsonl'), 'utf8')).toContain('"component":"registry"');
   const verdict = JSON.parse(out);

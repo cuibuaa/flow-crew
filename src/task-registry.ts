@@ -1,5 +1,5 @@
 import type { EndingCause } from './attempt-ending.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeSync } from './engine-fs.js';
 import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readdirSync, readSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
@@ -9,7 +9,7 @@ import { TASK_STATUS, isActiveTaskStatus, isKnownTaskStatus, type TaskStatus } f
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { LaunchTarget } from './session-push.js';
 import { processLiveness, type ProcessStartToken } from './process-liveness.js';
-import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
+import { withProcessLock, inspectProcessLock } from './lock-publication.js';
 export { TASK_STATUS, isActiveTaskStatus } from './lifecycle-status.js';
 export type { TaskStatus } from './lifecycle-status.js';
 
@@ -219,9 +219,6 @@ export interface TaskRegistryOptions {
   /** Observers skip eager directory creation; writers create their own parents. */
   createDirectories?: boolean;
   now?: () => Date;
-  /** Maximum time to wait for an active registry owner. Production default: 5 seconds. */
-  lockTimeoutMs?: number;
-  lockPollMs?: number;
   warn?: (message: string) => void;
   /** Fault-injection seam. Returning means the append is durable and may be acknowledged. */
   syncFile?: (fd: number) => void;
@@ -306,18 +303,8 @@ interface CompactPlan {
   after: TaskRegistryMetrics;
 }
 
-const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
-const DEFAULT_LOCK_POLL_MS = 10;
-
 export function defaultFcDir(): string {
   return fcGlobalDir();
-}
-
-function sleepSync(ms: number): void {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, end - Date.now()));
-  }
 }
 
 export class TaskRegistry {
@@ -327,8 +314,6 @@ export class TaskRegistry {
   readonly tasksDir: string;
   readonly lockPath: string;
   private readonly now: () => Date;
-  private readonly lockTimeoutMs: number;
-  private readonly lockPollMs: number;
   private readonly warn: (message: string) => void;
   private readonly syncFile: (fd: number) => void;
   private registryCache?: RegistryCache;
@@ -341,8 +326,6 @@ export class TaskRegistry {
     this.tasksDir = join(this.baseDir, 'tasks');
     this.lockPath = join(this.baseDir, 'tasks.lock');
     this.now = opts.now ?? (() => new Date());
-    this.lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
-    this.lockPollMs = opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     this.warn = opts.warn ?? ((message) => appendFileSync(join(this.baseDir, 'infrastructure-recoveries.jsonl'),
       `${JSON.stringify({ at: new Date().toISOString(), component: 'registry', message })}\n`, { mode: 0o600, flush: true }));
     this.syncFile = opts.syncFile ?? fsyncSync;
@@ -485,9 +468,9 @@ export class TaskRegistry {
     recover: (assertUnbound: () => void) => void,
   ): void {
     this.withLock(() => {
-      const token = this.inspectLock()?.owner?.token;
+      const token = inspectProcessLock(this.lockPath)?.owner?.token;
       const assertUnbound = (): void => {
-        if (!token || this.inspectLock()?.owner?.token !== token) {
+        if (!token || inspectProcessLock(this.lockPath)?.owner?.token !== token) {
           throw new Error('RECOVERY_REGISTRY_CHANGED: registry lock ownership changed');
         }
         const registry = this.readLatestUnlocked();
@@ -1221,74 +1204,13 @@ export class TaskRegistry {
   }
 
   private withLock<T>(fn: () => T): T {
-    mkdirSync(this.baseDir, { recursive: true });
-    const started = Date.now();
-    const token = randomUUID();
-    for (;;) {
-      try {
-        publishLockOwner(this.lockPath, { ...lockOwnerIdentity(), acquiredAt: new Date().toISOString(), token });
-        break;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-        const observed = this.inspectLock();
-        const reason = observed && recoverStaleLock(observed, () => this.inspectLock(), () => unlinkSync(this.lockPath));
-        if (reason) {
-          const owner = observed.owner ? ` left by pid=${observed.owner.pid}` : '';
-          try {
-            this.warn(`TaskRegistry: took over stale lock${owner} at ${this.lockPath} (${reason}).`);
-          } catch { /* diagnostics must not turn a successful recovery into another outage */ }
-          continue;
-        }
-        if (Date.now() - started >= this.lockTimeoutMs) throw this.lockTimeoutError(observed);
-        sleepSync(this.lockPollMs);
-      }
-    }
-    try {
+    return withProcessLock(this.lockPath, 'task-registry', () => {
       const dirty = join(this.baseDir, 'session-push', 'task-index', 'dirty');
       if (existsSync(dirty)) {
         this.rebuildSessionTaskIndexes();
         unlinkSync(dirty);
       }
       return fn();
-    } finally {
-      try {
-        const current = this.inspectLock();
-        if (current?.owner?.token === token) unlinkSync(this.lockPath);
-      } catch { /* best effort; an old owner must never remove a replacement owner's lock */ }
-    }
-  }
-
-  private inspectLock(): LockObservation | undefined {
-    let fd: number | undefined;
-    try {
-      fd = openSync(this.lockPath, 'r');
-      const stat = fstatSync(fd);
-      const raw = readFileSync(fd, 'utf-8');
-      return {
-        owner: parseLockOwner(raw),
-        mtimeMs: stat.mtimeMs,
-        signature: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${raw}`,
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw error;
-    } finally {
-      try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
-    }
-  }
-
-  private lockTimeoutError(observed: LockObservation | undefined): Error {
-    if (observed?.owner) {
-      const since = observed.owner.acquiredAt ? ` since ${observed.owner.acquiredAt}` : '';
-      return new Error(
-        `Timed out after ${this.lockTimeoutMs}ms waiting for task registry lock ${this.lockPath}; `
-        + `it is held by active pid=${observed.owner.pid}${since}. Wait for that process to finish or inspect it `
-        + `with "ps -p ${observed.owner.pid}"; do not delete a live lock.`,
-      );
-    }
-    return new Error(
-      `Timed out after ${this.lockTimeoutMs}ms waiting for task registry lock ${this.lockPath}; owner metadata is unreadable. `
-      + 'Wait for the writer to finish and confirm no process owns the lock before removing a stale lock.',
-    );
+    }, { recovered: (owner, reason) => this.warn(`TaskRegistry: took over lock left by pid=${owner.pid} at ${this.lockPath} (${reason}).`) });
   }
 }

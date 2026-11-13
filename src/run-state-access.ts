@@ -1,3 +1,4 @@
+import { readRunLockWaits } from './run-lock.js';
 import { runRecordPath } from './run-layout.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { resolve } from 'node:path';
@@ -5,12 +6,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { readRunState, runDir } from './store.js';
 import { readAdmittedBriefContract } from './ship-inputs.js';
 import { declaredOutputSource } from './declared-output-archive.js';
-import { readRunStateView, type RunStateView } from './run-state-view.js';
+import { readRunStateView, RunStateViewError, type RunStateView } from './run-state-view.js';
 
 /** A bounded projection of the same read view; omissions are explicit. */
 export function summarizeRunStateView(view: RunStateView): object {
   return {
-    version: view.version, observedAt: view.observedAt, snapshot: view.snapshot.runStateSha256, run: view.run,
+    lockWaits: view.lockWaits, version: view.version, observedAt: view.observedAt, snapshot: view.snapshot.runStateSha256, run: view.run,
     plan: { revision: view.plan.revision, stages: view.plan.stages.length, historyEntries: view.plan.history.length },
     ...(view.validation ? { validation: view.validation } : {}),
     stages: Object.fromEntries(Object.entries(view.stages).map(([id, stage]) => [id, { status: stage.status, attempt: stage.attempts?.at(-1)?.index, error: stage.error,
@@ -63,7 +64,15 @@ export function cmdState(args: string[], output: Pick<NodeJS.WriteStream, 'write
     }
     const project = parsed.values.get('--project'), runId = parsed.values.get('--run');
     if (!project || !runId) throw new Error('STATE_QUERY_REQUIRED: supply --project <path> and --run <run-id>');
-    const view = readRunStateView(resolve(project), runId, { includePromptText: parsed.flags.has('--prompts') });
+    let view: RunStateView;
+    try { view = readRunStateView(resolve(project), runId, { includePromptText: parsed.flags.has('--prompts') }); }
+    catch (error) {
+      if (error instanceof RunStateViewError && error.code === 'STATE_RUN_ABSENT') {
+        const lockWaits = readRunLockWaits(resolve(project), runDir(resolve(project), runId));
+        if (lockWaits.length) output.write(`${JSON.stringify({ lockWaits }, null, 2)}\n`);
+      }
+      throw error;
+    }
     output.write(`${JSON.stringify(parsed.flags.has('--summary') ? summarizeRunStateView(view) : view, null, 2)}\n`);
     return 0;
   } catch (error) {

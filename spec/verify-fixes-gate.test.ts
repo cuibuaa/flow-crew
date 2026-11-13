@@ -132,20 +132,26 @@ describe('independent session-ledger release gate', () => {
 
   it('uses one transaction lock for case-folded aliases of the same session directory', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-verify-casefold.'));
+    const runner = join(root, 'casefold.mjs');
     const source = String.raw`
       import fs from 'node:fs';
+      import { spawn } from 'node:child_process';
       import { syncBuiltinESMExports } from 'node:module';
+      import { fileURLToPath } from 'node:url';
       import { join, sep } from 'node:path';
-      const [moduleUrl, root] = process.argv.slice(1);
-      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const [moduleUrl, root, mode] = process.argv.slice(2);
       const storeRoot = join(root, 'store');
       const canonical = join(storeRoot, 'Case');
       const alias = join(storeRoot, 'case');
-      fs.mkdirSync(canonical, { recursive: true });
-      fs.writeFileSync(join(canonical, 'shared.json'), JSON.stringify({
-        id: 'shared', subject: 'original', description: 'original', activeForm: '',
-        status: 'pending', blocks: [], blockedBy: [],
-      }) + '\n');
+      if (mode === 'outer') {
+        fs.mkdirSync(canonical, { recursive: true });
+        fs.writeFileSync(join(canonical, 'shared.json'), JSON.stringify({
+          id: 'shared', subject: 'original', description: 'original', activeForm: '',
+          status: 'pending', blocks: [], blockedBy: [],
+        }) + '\n');
+      }
+      // Model only case-insensitive filesystem lookup. Keep the real platform
+      // so the native process-identity probe can observe the lock's holder.
       const originals = {};
       const mapPath = (value) => typeof value === 'string'
         && (value === alias || value.startsWith(alias + sep))
@@ -164,68 +170,67 @@ describe('independent session-ledger release gate', () => {
         };
       }
       syncBuiltinESMExports();
-      const module = await import(moduleUrl + '?casefold=' + Date.now());
-      let outer = 'not-run';
-      let inner = 'not-run';
-      try {
-        module.updateTaskEntry({
-          storeRoot,
-          session: 'Case',
-          id: 'shared',
-          entry: { subject: 'outer' },
-          publication: {
-            update: (temporary, target) => {
-              try {
-                module.updateTaskEntry({
-                  storeRoot,
-                  session: 'case',
-                  id: 'shared',
-                  entry: { description: 'inner' },
-                });
-                inner = 'acknowledged';
-              } catch (error) {
-                inner = error.message;
-              }
+      const module = await import(moduleUrl);
+      const { readLockWaits } = await import(new URL('./lock-publication.js', moduleUrl));
+      const queued = join(root, 'queued');
+      const cell = new Int32Array(new SharedArrayBuffer(4));
+      if (mode === 'inner') {
+        const wait = Atomics.wait;
+        Atomics.wait = (...args) => {
+          if (!fs.existsSync(queued)) {
+            fs.writeFileSync(queued + '.tmp', JSON.stringify(readLockWaits(module.ledgerLockPath(storeRoot, 'case'))));
+            fs.renameSync(queued + '.tmp', queued);
+          }
+          return wait(...args);
+        };
+        module.updateTaskEntry({ storeRoot, session: 'case', id: 'shared', entry: { description: 'inner' } });
+      } else {
+        let child, closed, errors = '', waiting;
+        try {
+          module.updateTaskEntry({ storeRoot, session: 'Case', id: 'shared', entry: { subject: 'outer' },
+            publication: { update: (temporary, target) => {
+              child = spawn(process.execPath, [fileURLToPath(import.meta.url), moduleUrl, root, 'inner'], {
+                cwd: root, env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
+                stdio: ['ignore', 'ignore', 'pipe'],
+              });
+              closed = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+              child.stderr.on('data', data => { errors += data; });
+              // Observe contention, then finish the held publication. Never
+              // wait for the inner transaction to finish while holding it out.
+              while (!fs.existsSync(queued)) Atomics.wait(cell, 0, 0, 10);
+              waiting = JSON.parse(fs.readFileSync(queued, 'utf8'));
               fs.renameSync(temporary, target);
-            },
-          },
-        });
-        outer = 'acknowledged';
-      } catch (error) {
-        outer = error.message;
+            } },
+          });
+          await closed;
+          if (child.exitCode !== 0) throw new Error(errors);
+          const final = JSON.parse(fs.readFileSync(join(canonical, 'shared.json'), 'utf8'));
+          process.stdout.write(JSON.stringify({ holder: process.pid, waiter: child.pid, waiting, final }));
+        } finally {
+          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+          await closed;
+        }
       }
-      const final = JSON.parse(fs.readFileSync(join(canonical, 'shared.json'), 'utf-8'));
-      process.stdout.write(JSON.stringify({ outer, inner, final }));
     `;
 
     try {
-      const child = spawnSync(
-        process.execPath,
-        ['--input-type=module', '-e', source, fcTasksModuleUrl, root],
-        {
-          cwd: projectRoot,
-          encoding: 'utf-8',
-          timeout: 12_000,
-          env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
-        },
-      );
+      writeFileSync(runner, source);
+      const child = spawnSync(process.execPath, [runner, fcTasksModuleUrl, root, 'outer'], {
+        cwd: projectRoot, encoding: 'utf-8', timeout: 120_000,
+        env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
+      });
       expect(child.status, child.stderr).toBe(0);
-      const observed = JSON.parse(child.stdout) as {
-        outer: string;
-        inner: string;
-        final: FcTaskEntry;
-      };
-      const bothAcknowledged = observed.outer === 'acknowledged' && observed.inner === 'acknowledged';
-      const bothPatchesSurvived = observed.final.subject === 'outer'
-        && observed.final.description === 'inner';
-      expect(
-        bothAcknowledged && !bothPatchesSurvived,
-        JSON.stringify(observed),
-      ).toBe(false);
+      const observed = JSON.parse(child.stdout);
+      expect(observed.waiting).toEqual([expect.objectContaining({
+        lock: expect.objectContaining({ kind: 'session-ledger' }),
+        holder: expect.objectContaining({ pid: observed.holder }),
+        waiter: expect.objectContaining({ pid: observed.waiter }),
+      })]);
+      expect(observed.final).toMatchObject({ subject: 'outer', description: 'inner' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 150_000);
 
   it('refuses a non-finite maxEntries value before it can poison the default reader', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-verify-nan-limit.'));

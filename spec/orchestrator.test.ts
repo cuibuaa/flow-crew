@@ -157,7 +157,7 @@ describe('Orchestrator', () => {
       import { existsSync, writeFileSync } from 'node:fs';
       import { TaskRegistry } from './dist/task-registry.js';
       const [baseDir, heldPath, releasePath] = process.argv.slice(1);
-      const tasks = new TaskRegistry({ baseDir, lockTimeoutMs: 10000, lockPollMs: 5 });
+      const tasks = new TaskRegistry({ baseDir });
       const original = tasks.createVerifiedBackup.bind(tasks);
       tasks.createVerifiedBackup = (...args) => {
         original(...args);
@@ -172,7 +172,7 @@ describe('Orchestrator', () => {
       import { TaskRegistry } from './dist/task-registry.js';
       const [baseDir, taskId, startedPath, finishedPath] = process.argv.slice(1);
       writeFileSync(startedPath, 'started');
-      const tasks = new TaskRegistry({ baseDir, lockTimeoutMs: 10000, lockPollMs: 5 });
+      const tasks = new TaskRegistry({ baseDir });
       tasks.update(Number(taskId), { notes: 'append launched during compaction' });
       writeFileSync(finishedPath, 'finished');
     `;

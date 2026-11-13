@@ -32,13 +32,21 @@ describe('scheduler identity policies', () => {
   it('keeps an unreadable scheduler identity busy and preserves its run during clean', () => {
     const runId = 'unreadable-owner', path = fixture(runId);
     const before = readFileSync(join(path, 'run.json'), 'utf8');
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(undefined);
+    const observation = vi.spyOn(liveness, 'processStartToken').mockReturnValue(undefined);
     expect(inspectRunScheduler(runId, path).kind).toBe('unverifiable');
     expect(schedulerProcessIsAliveForCancellation(process.pid, runId, path)).toBe(true);
     expect(findLiveRunOwnerForProject(project)).toMatchObject({ runId, pid: process.pid });
     expect(isProjectBusy(project)).toBe(`${runId}, scheduler pid ${process.pid}`);
     vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const pause = vi.spyOn(Atomics, 'wait').mockImplementation(() => {
+      // An observer can withhold ownership evidence, but a writer also needs
+      // its own complete identity. Release that preparation explicitly.
+      expect(readFileSync(join(path, 'run.json'), 'utf8')).toBe(before);
+      observation.mockRestore();
+      return 'ok';
+    });
     expect(cmdPrune(['clean', '--keep', '0'])).toBe(0);
+    expect(pause).toHaveBeenCalledOnce();
     expect(readFileSync(join(path, 'run.json'), 'utf8')).toBe(before);
   });
 

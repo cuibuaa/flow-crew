@@ -1,3 +1,5 @@
+import type { LockWait } from './lock-publication.js';
+import { readRunLockWaits } from './run-lock.js';
 import { projectValidationResult } from './project-validation.js';
 import { runRecordPath } from './run-layout.js';
 import { parseJsonlWithDiagnostics } from './jsonl.js';
@@ -301,6 +303,7 @@ export interface GuidanceView { envelope: GuidanceEnvelope; sourcePath: string; 
 export interface RunStateView {
   version: 1;
   observedAt: string;
+  lockWaits: LockWait[];
   snapshot: { runStateRevision: number | null; runStateSha256: string; evidenceSha256: string; sources: EvidenceSource[] };
   run: { runId: string; projectDir: string; workflowName: string; status: unknown; statusResolution: ReturnType<typeof readArchivedRunState>['status']; startedAt: string; completedAt?: string; currentIteration: number | null; failureReason?: string };
   plan: { stages: unknown[]; source: 'dispatchedStages' | 'plan' | 'unavailable'; revision: z.infer<typeof PlanRevisionSchema> | null; history: z.infer<typeof PlanRevisionSchema>[]; decisions: Record<string, import('./plan-revisions.js').PlanRevisionDecision>; admissionClaim: 'recorded' | 'unknown' };
@@ -531,6 +534,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     const source = state.dispatchedStages ? 'dispatchedStages' : state.plan ? 'plan' : 'unavailable';
     const view: RunStateView = {
       version: 1, observedAt,
+      lockWaits: readRunLockWaits(projectDir, runDirectory),
       snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
       run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },

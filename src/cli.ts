@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readRunLockWaits } from './run-lock.js';
 import { readResearchHistory, readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
@@ -1546,6 +1547,7 @@ function cmdStatus() {
   const statusResolution = resolveRunStatus(state.status);
   const mismatch = terminalArtifactStatusMismatch(state, { runDir });
   const operational = readOperationalProjection(runDir, { state });
+  for (const waiting of readRunLockWaits(state.projectDir, runDir)) console.log(JSON.stringify(waiting));
   console.log(`Run: ${id}`);
   console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
   console.log(`Status: ${statusResolution.kind === 'known' ? statusResolution.status : `unrecognized ${statusResolution.display}`}`);

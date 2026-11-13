@@ -31,11 +31,11 @@ import { renderRunSummary } from '../src/run-summary.js';
 import { scheduleDeadline, stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { controlResearchTime, manualResearchClock as manualClock } from './test-support/research-clock.js';
 import type { Adapter } from '../src/adapters/base.js';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, LAUNCH_INTENT_TTL_MS } from '../src/run-lock.js';
+import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, readRunLockWaits, LAUNCH_INTENT_TTL_MS } from '../src/run-lock.js';
 import { readEvidence, captureProjectTree, validationForTree } from '../src/evidence-ledger.js';
 import * as validationOwner from '../src/project-validation.js';
 
@@ -745,23 +745,44 @@ describe('terminal publication is separate and never recovered into project file
       await Promise.all(children.map(entry => entry.closed));
     }
   }, 30000);
-  it('excludes admission throughout a restoration even beyond the launch intent TTL', () => {
+  it('excludes admission throughout a restoration even beyond the launch intent TTL', async () => {
     const home = fcGlobalDir(), current = createRun(project, 'fixture', '', []), next = createRun(project, 'fixture', '', []);
     const unknownWrite = vi.fn(); expect(withProjectWriteOwnership(project, current.runDirPath, unknownWrite)).toBe(false);
     expect(unknownWrite).not.toHaveBeenCalled();
     expect(claimLaunchIntent(project, current.runId).claimed).toBe(true); releaseLaunchIntent(project, current.runId);
-    expect(withProjectWriteOwnership(project, current.runDirPath, () => {
-      const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
+    const queued = join(root, 'admission-queued');
+    let child: ReturnType<typeof spawn> | undefined, closed: Promise<unknown> | undefined;
+    let output = '', errors = '';
+    try {
+      expect(withProjectWriteOwnership(project, current.runDirPath, () => {
+        child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
+        import fs from 'node:fs';
         import { claimLaunchIntent } from ${JSON.stringify(join(import.meta.dirname, '../src/run-lock.ts'))};
         import { setFcGlobalDir } from ${JSON.stringify(join(import.meta.dirname, '../src/store.ts'))};
         setFcGlobalDir(${JSON.stringify(home)});
-        try { console.log(JSON.stringify({ blocked: !claimLaunchIntent(${JSON.stringify(project)}, ${JSON.stringify(next.runId)}, Date.now() + ${2 * LAUNCH_INTENT_TTL_MS}).claimed })); }
-        catch { console.log(JSON.stringify({ blocked: true })); }
-      `], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: home }, encoding: 'utf8' });
-      expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout), 'Admission must not enter while restoration owns the project mutex').toEqual({ blocked: true });
-    })).toBe(true);
-    expect(claimLaunchIntent(project, next.runId).claimed).toBe(true); releaseLaunchIntent(project, next.runId);
+        const wait = Atomics.wait;
+        Atomics.wait = (...args) => { fs.writeFileSync(${JSON.stringify(queued)}, 'queued'); return wait(...args); };
+        console.log(JSON.stringify(claimLaunchIntent(${JSON.stringify(project)}, ${JSON.stringify(next.runId)}, Date.now() + ${2 * LAUNCH_INTENT_TTL_MS})));
+      `], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: home } });
+        closed = new Promise((resolve, reject) => { child!.once('error', reject); child!.once('close', resolve); });
+        child.stdout!.on('data', data => { output += data; });
+        child.stderr!.on('data', data => { errors += data; });
+        // Wait only for queue entry. Waiting for child completion here would
+        // prevent this synchronous restoration from ever releasing its lock.
+        while (!existsSync(queued)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        expect(readRunLockWaits(project, current.runDirPath)).toEqual([expect.objectContaining({
+          holder: expect.objectContaining({ pid: process.pid }), waiter: expect.objectContaining({ pid: child.pid }),
+        })]);
+        expect(output).toBe('');
+      })).toBe(true);
+      await closed;
+      expect(child!.exitCode, errors).toBe(0);
+      expect(JSON.parse(output)).toEqual({ claimed: true });
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await closed;
+    }
+    releaseLaunchIntent(project, next.runId);
     const staleWrite = vi.fn(); expect(withProjectWriteOwnership(project, current.runDirPath, staleWrite)).toBe(false);
     expect(staleWrite).not.toHaveBeenCalled();
   });

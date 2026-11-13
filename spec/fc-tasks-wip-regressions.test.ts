@@ -17,7 +17,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readLockWaits } from '../src/lock-publication.js';
 import { cmdFcTasks } from '../src/cli-fc-tasks.js';
 import {
   FcTasksRefusal,
@@ -286,20 +287,15 @@ describe('session ledger publication regressions', () => {
       import { syncBuiltinESMExports } from 'node:module';
       const [moduleUrl, storeRoot, field, value, releasePath] = process.argv.slice(1);
       let reportedContention = false;
-      for (const operation of ['mkdirSync', 'symlinkSync']) {
-        const original = fs[operation];
-        fs[operation] = (...args) => {
-          try { return original(...args); }
-          catch (error) {
-            const target = args[operation === 'symlinkSync' ? 1 : 0];
-            if (!reportedContention && error.code === 'EEXIST' && String(target).includes('.fc-tasks-lock-')) {
-              reportedContention = true;
-              process.stdout.write('CONTENDED\\n');
-            }
-            throw error;
-          }
-        };
-      }
+      const renameLock = fs.renameSync;
+      fs.renameSync = (from, to, ...args) => {
+        const result = renameLock(from, to, ...args);
+        if (!reportedContention && String(to).includes('.fc-tasks-lock-') && String(to).includes('.wait-')) {
+          const state = JSON.parse(fs.readFileSync(to, 'utf8'));
+          if (state.waiting?.kind === 'lock_wait') { reportedContention = true; process.stdout.write('CONTENDED\\n'); }
+        }
+        return result;
+      };
       syncBuiltinESMExports();
       const { updateTaskEntry } = await import(moduleUrl);
       const wait = new Int32Array(new SharedArrayBuffer(4));
@@ -366,7 +362,7 @@ describe('session ledger publication regressions', () => {
     }
   });
 
-  it('F02 fails safe for a live lock owner and recovers only a definitely dead owner', { timeout: 15_000 }, () => {
+  it('F02 waits for live ownership release and recovers only a definitely dead owner', () => {
     const lockPath = (session: string) => join(
       root,
       `.fc-tasks-lock-${createHash('sha256').update(session).digest('hex')}`,
@@ -382,13 +378,19 @@ describe('session ledger publication regressions', () => {
     };
 
     installLock('live-owner', process.pid);
-    expect(() => createTaskEntry({
-      storeRoot: root,
-      session: 'live-owner',
-      entry: task('must-not-publish'),
-      lockTiming: { waitMs: 25, pollMs: 5 },
-    })).toThrow(/busy|lock|concurrent/iu);
-    expect(existsSync(join(root, 'live-owner', 'must-not-publish.json'))).toBe(false);
+    let observed = false;
+    const pause = vi.spyOn(Atomics, 'wait').mockImplementation(() => {
+      expect(readLockWaits(lockPath('live-owner'))[0]).toMatchObject({ kind: 'lock_wait', holder: { pid: process.pid } });
+      expect(existsSync(join(root, 'live-owner', 'must-not-publish.json'))).toBe(false);
+      observed = true;
+      rmSync(lockPath('live-owner'), { recursive: true });
+      return 'ok';
+    });
+    try {
+      createTaskEntry({ storeRoot: root, session: 'live-owner', entry: task('must-not-publish') });
+      expect(observed).toBe(true);
+      expect(existsSync(join(root, 'live-owner', 'must-not-publish.json'))).toBe(true);
+    } finally { pause.mockRestore(); }
 
     installLock('dead-owner', 2_147_483_647);
     expect(createTaskEntry({
@@ -430,20 +432,15 @@ describe('session ledger publication regressions', () => {
       const originalOpen = fs.openSync;
       const originalFsync = fs.fsyncSync;
       let reportedContention = false;
-      for (const operation of ['mkdirSync', 'symlinkSync']) {
-        const original = fs[operation];
-        fs[operation] = (...args) => {
-          try { return original(...args); }
-          catch (error) {
-            const target = args[operation === 'symlinkSync' ? 1 : 0];
-            if (!reportedContention && error.code === 'EEXIST' && String(target).includes('.fc-tasks-lock-')) {
-              reportedContention = true;
-              process.stdout.write('CONTENDED\\n');
-            }
-            throw error;
-          }
-        };
-      }
+      const renameLock = fs.renameSync;
+      fs.renameSync = (from, to, ...args) => {
+        const result = renameLock(from, to, ...args);
+        if (!reportedContention && String(to).includes('.fc-tasks-lock-') && String(to).includes('.wait-')) {
+          const state = JSON.parse(fs.readFileSync(to, 'utf8'));
+          if (state.waiting?.kind === 'lock_wait') { reportedContention = true; process.stdout.write('CONTENDED\\n'); }
+        }
+        return result;
+      };
       fs.openSync = (...args) => { const fd = originalOpen(...args); opened.set(fd, String(args[0])); return fd; };
       fs.fsyncSync = (fd) => { events.push(['fsync', opened.get(fd) ?? 'unknown']); return originalFsync(fd); };
       syncBuiltinESMExports();

@@ -16,6 +16,14 @@ let root: string, run: string, state: StoreState, previousStore: string;
 const contracts = () => ['done', 'later'].map(id => ({ id, depends_on: [],
   artifact_contract: { version: 1, produces: [], reads: [] } }));
 
+const ownProcessStartToken = liveness.processStartToken;
+function mockOtherProcessToken(token: ReturnType<typeof liveness.processStartToken>): void {
+  // Model the checkpoint/group observation without withholding the writer's
+  // real identity, which is required before it can publish a current lock.
+  vi.spyOn(liveness, 'processStartToken').mockImplementation((pid, kind) => pid === process.pid
+    ? ownProcessStartToken(pid, kind) : token);
+}
+
 function persist(): void {
   writeFileSync(runRecordPath(run, 'run.json'), JSON.stringify(state));
   for (const [id, status] of Object.entries(state.stages)) put(`stages/${id}/status.json`, JSON.stringify(status));
@@ -74,18 +82,18 @@ describe('run retention authority guards', () => {
   });
   it('R03 refuses a live checkpoint controller even when its scheduler marker is absent', () => {
     vi.mocked(liveness.processLiveness).mockReturnValue('alive');
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(state.engineCheckpoint!.processStart);
+    mockOtherProcessToken(state.engineCheckpoint!.processStart);
     rejectWithoutWrites(/controller may still be alive/);
   });
   it('R04 refuses unverifiable live controller identity', () => {
     vi.mocked(liveness.processLiveness).mockReturnValue('unknown');
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(undefined);
+    mockOtherProcessToken(undefined);
     rejectWithoutWrites(/controller may still be alive/);
   });
   it.each([true, false])('R05 refuses an alive command group with known identity=%s without sending signals', known => {
     state.engineCheckpoint!.processes = [{ pid: 48101, processStart: known ? { kind: 'linux', value: '101' } : undefined }];
     vi.mocked(liveness.processGroupIsAlive).mockReturnValue(true);
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(known ? { kind: 'linux', value: '101' } : undefined);
+    mockOtherProcessToken(known ? { kind: 'linux', value: '101' } : undefined);
     const signal = vi.spyOn(process, 'kill').mockImplementation(() => { throw new Error('retention must never signal'); });
     rejectWithoutWrites(/commands may still be alive/);
     expect(signal).not.toHaveBeenCalled();
@@ -132,7 +140,7 @@ describe('run retention authority guards', () => {
     vi.mocked(liveness.processLiveness).mockRestore();
     vi.spyOn(process, 'kill').mockReturnValue(true);
     vi.mocked(liveness.processGroupIsAlive).mockReturnValue(true);
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(current);
+    mockOtherProcessToken(current);
     expect(plan().removeBytes).toBe(3072);
     state.engineCheckpoint!.processStart = current;
     rejectWithoutWrites(/controller may still be alive/);
@@ -150,7 +158,7 @@ describe('run retention authority guards', () => {
     { owner: 'group', token: { kind: 'posix-lstart', value: '' } },
     { owner: 'group', token: { kind: 'posix-lstart', value: 'different token kind' } },
   ] as const)('R41 refuses malformed or incompatible $owner identity $token without writes', ({ owner, token }) => {
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue({ kind: 'linux', value: '100' });
+    mockOtherProcessToken({ kind: 'linux', value: '100' });
     if (owner === 'controller') {
       state.engineCheckpoint!.processStart = token;
       vi.mocked(liveness.processLiveness).mockReturnValue('alive');
@@ -300,7 +308,7 @@ describe('invocation scratch retirement preserves durable products', () => {
   it.each(['invalid-boot', {}, 17, ''])('refuses malformed boot identity %j instead of inferring owner death', bootId => {
     (state.engineCheckpoint as unknown as { bootId: unknown }).bootId = bootId;
     vi.mocked(liveness.processLiveness).mockReturnValue('alive');
-    vi.spyOn(liveness, 'processStartToken').mockReturnValue(state.engineCheckpoint!.processStart);
+    mockOtherProcessToken(state.engineCheckpoint!.processStart);
     rejectWithoutWrites(/RETENTION_PROCESS/);
   });
 });

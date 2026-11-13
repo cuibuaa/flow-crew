@@ -1,13 +1,13 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
-import { processLiveness } from './process-liveness.js';
+import { withProcessLock, readLockWaits } from './lock-publication.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
 import { observeRunStatusChange } from './run-events.js';
 import { latestInvocationInput } from './run-state-view.js';
 import { atomicWrite, writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
 import { retireRunScratch } from './invocation-scratch.js';
 import { stageLiveLogPath } from './stage-live-log.js';
-import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
@@ -1010,8 +1010,13 @@ function captureGitHead(projectDir: string): string | undefined {
 
 export const RUN_HISTORY_FILE = 'run-history.jsonl' as const;
 export const RUN_STATE_LOCK_FILE = '.run-state.lock';
-const RUN_STATE_LOCK_TIMEOUT_MS = 5_000;
-const RUN_STATE_STALE_LOCK_MS = 30_000;
+
+/** Store-wide users of the same mutex remain visible without a daemon RPC. */
+export function readGlobalLockWaits(baseDir = fcGlobalDir()) {
+  const waits = [...new Set([fcGlobalDir(), baseDir])].flatMap(root => [join(root, 'tasks.lock'),
+    runRecordPath(root, RUN_STATE_LOCK_FILE), runRecordPath(join(root, 'validation'), RUN_STATE_LOCK_FILE)].flatMap(readLockWaits));
+  return [...new Map(waits.map(wait => [wait.waiter.token, wait])).values()];
+}
 
 type RunHistoryKind = keyof RunHistoryRef['counts'];
 
@@ -1155,58 +1160,8 @@ function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): Arch
   return parsed;
 }
 
-function stateLockSleep(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 export function withRunStateLock<T>(directory: string, fn: () => T): T {
-  const path = runRecordPath(directory, RUN_STATE_LOCK_FILE);
-  mkdirSync(dirname(path), { recursive: true });
-  const token = randomBytes(12).toString('hex');
-  const started = Date.now();
-  let fd: number | undefined;
-  while (fd === undefined) {
-    try {
-      fd = openSync(path, 'wx');
-      try {
-        writeFileSync(fd, `${JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() })}\n`, 'utf-8');
-      } catch (error) {
-        try { closeSync(fd); } catch { /* best effort */ }
-        fd = undefined;
-        try { unlinkSync(path); } catch { /* best effort */ }
-        throw error;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      let stale = false;
-      try {
-        const owner = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown; acquiredAt?: unknown };
-        const acquiredAt = typeof owner.acquiredAt === 'string' ? Date.parse(owner.acquiredAt) : Number.NaN;
-        stale = typeof owner.pid === 'number'
-          ? processLiveness(owner.pid) === 'dead'
-          : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= RUN_STATE_STALE_LOCK_MS;
-      } catch {
-        try { stale = Date.now() - statSync(path).mtimeMs >= RUN_STATE_STALE_LOCK_MS; } catch { /* leave the lock non-stale */ }
-      }
-      if (stale) {
-        try { unlinkSync(path); } catch { /* another owner won */ }
-        continue;
-      }
-      if (Date.now() - started >= RUN_STATE_LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for run state lock ${path}`, { cause: error });
-      }
-      stateLockSleep(10);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
-    try {
-      const owner = JSON.parse(readFileSync(path, 'utf-8')) as { token?: unknown };
-      if (owner.token === token) unlinkSync(path);
-    } catch { /* an old owner never removes a replacement lock */ }
-  }
+  return withProcessLock(runRecordPath(directory, RUN_STATE_LOCK_FILE), 'run-state', fn);
 }
 
 function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | undefined): T[] {

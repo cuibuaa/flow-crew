@@ -1,3 +1,4 @@
+import { readLockWaits } from './lock-publication.js';
 import { EXIT_CODE } from './exit-code.js';
 import { commandUsage, parseCommandArgs, type ParsedCliArguments as ParsedArguments } from './cli-args.js';
 import { readSync, readFileSync } from 'node:fs';
@@ -5,6 +6,7 @@ import { resolve, join } from 'node:path';
 import { estimateProgress, progressLine, type ProgressRun, type ProgressHistory } from './task-progress.js';
 import {
   FcTasksRefusal,
+  ledgerLockPath,
   createEngineTaskRunResolver,
   createTaskEntry,
   defaultFcEngineRoot,
@@ -313,6 +315,7 @@ export function cmdFcTasks(
       const runLinks = resolveFcTaskRuns(entries, resolver);
       stdout.write(`${JSON.stringify({
         state: ledger.state,
+        lockWaits: readLockWaits(ledgerLockPath(storeRoot(parsed, dependencies), session.session)),
         session: session.session,
         entries,
         runLinks: entries.map((entry, index) => ({ entryId: entry.id, ...runLinks[index] })),

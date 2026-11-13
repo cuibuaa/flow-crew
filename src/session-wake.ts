@@ -71,7 +71,7 @@ function readWaiter(path: string): { waiter?: Waiter; observation: LockObservati
     const raw = readFileSync(path, 'utf8');
     const owner = parseLockOwner(raw);
     return { waiter: owner ? JSON.parse(raw) as Waiter : undefined,
-      observation: { owner, mtimeMs: stat.mtimeMs, signature: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${raw}` } };
+      observation: { owner, signature: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${raw}` } };
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 export function hasClaudeWakeWaiter(root: string, session: string, now = Date.now()): boolean {

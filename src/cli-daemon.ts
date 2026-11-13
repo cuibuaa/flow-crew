@@ -42,7 +42,7 @@ import { runsRoot } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { readOperationalProjection, type OperationalRunState } from './cli-events.js';
 import { inspectRunScheduler } from './run-lock.js';
-import { fcGlobalDir } from './store.js';
+import { fcGlobalDir, readGlobalLockWaits } from './store.js';
 import { markDeploymentStopping, readDeploymentHold } from './deployment-hold.js';
 import { readRunIndexRecords } from './run-index.js';
 import { assertDistFresh, buildProjectRoot, pinBuildRuntime } from './build-manifest.js';
@@ -541,6 +541,9 @@ async function reportDaemonStatus(
   stdout: NodeJS.WriteStream,
   controls: DaemonProcessControls,
 ): Promise<number> {
+  // Read independently of the daemon event loop: it may itself be the waiter.
+  const lockWaits = readGlobalLockWaits(dirname(socketPath));
+  if (lockWaits.length) stdout.write(`${JSON.stringify({ lockWaits })}\n`);
   let response: RpcResponse;
   try {
     response = await controls.sendRpc(socketPath, { cmd: 'status' });

@@ -545,11 +545,8 @@ describe('independent restart crash-window falsifier', () => {
         import fs from 'node:fs'; import { join } from 'node:path'; import { pathToFileURL } from 'node:url';
         import { syncBuiltinESMExports } from 'node:module';
         const [dist, project, fc, runId, ack, waiting] = process.argv.slice(1);
-        const lock = join(fc, 'runs', runId, 'engine', '.run-state.lock'), open = fs.openSync;
-        fs.openSync = function(file, ...args) {
-          try { return open(file, ...args); }
-          catch (error) { if (String(file) === lock && error.code === 'EEXIST') fs.writeFileSync(waiting, 'queued on live recovery lock'); throw error; }
-        }; syncBuiltinESMExports();
+        const nativeWait = Atomics.wait;
+        Atomics.wait = function(...args) { fs.writeFileSync(waiting, 'queued on live recovery lock'); return nativeWait(...args); };
         const store = await import(pathToFileURL(join(dist, 'store.js'))); store.setFcGlobalDir(fc);
         const { RunCancellationCoordinator } = await import(pathToFileURL(join(dist, 'run-control.js')));
         const coordinator = new RunCancellationCoordinator({ registry: { list: () => [] }, units: { getStatus: async () => ({ kind: 'absent' }), stopUnit: async () => {}, listUnits: async () => [] }, runsDir: join(fc, 'runs') });
@@ -584,23 +581,27 @@ describe('independent restart crash-window falsifier', () => {
           || (point.startsWith('blocked_') && record.recovery?.kind === 'blocked');
       }
       fs.renameSync = function(from, to) {
+        // Before the choosing record becomes visible, no shared queue position
+        // is held. This is the new equivalent of the old pre-open boundary.
+        if (!hit && String(to).startsWith(lock + '.wait-') && String(to).endsWith('.json')
+            && !JSON.parse(fs.readFileSync(from, 'utf8')).ticket && ['final_lock_before', 'blocked_lock_before'].includes(point)) {
+          const state = JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json')));
+          if (point === 'blocked_lock_before' || state.stages.work.status === 'pending') cancel(false);
+        }
         if (!hit && point.endsWith('_before') && matches(to, from)) cancel(true);
         const result = rename(from, to);
         if (!hit && point.endsWith('_after') && matches(to)) cancel(true);
         return result;
       };
       fs.openSync = function(file, ...args) {
-        if (!hit && String(file) === lock && ['final_lock_before', 'blocked_lock_before'].includes(point)) {
-          const state = JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json')));
-          if (point === 'blocked_lock_before' || state.stages.work.status === 'pending') cancel(false);
-        }
         const descriptor = open(file, ...args);
         descriptorPaths.set(descriptor, String(file));
         return descriptor;
       };
       fs.unlinkSync = function(file) {
         const result = unlink(file);
-        if (String(file) === lock) {
+        // The shared contender retires after canonical release and is the final exclusion boundary.
+        if (String(file).startsWith(lock + '.wait-') && String(file).endsWith('.json')) {
           if (hit && child) wait(ack);
           if (!hit) {
             const state = JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json'))), stage = state.stages.work;

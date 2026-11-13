@@ -20,7 +20,7 @@ async function waitFor(check: () => boolean, child: ChildProcess, diagnostics: (
 }
 
 it.each(['startup', 'interval', 'response'])(
-  'survives a real registry lock timeout from the %s tick and runs the next tick', async source => {
+  'survives a registry publication failure from the %s tick and runs the next tick', async source => {
     const root = mkdtempSync(join(tmpdir(), 'fc-tick-'));
     const home = join(root, 'fc');
     const dist = join(root, 'dist');
@@ -32,11 +32,11 @@ it.each(['startup', 'interval', 'response'])(
     mkdirSync(home); mkdirSync(dist);
     writeFileSync(join(dist, 'runtime.js'), 'export const fixture = true;\n');
     if (source === 'startup') writeFileSync(arm, 'arm');
-    // Exercise the real daemon entry points and real five-second writer-lock timeout.
-    // Health reads do not lock; the push service publishes its task view under the writer lock.
-    // Only shorten the producer interval; the filesystem and failure stay real.
+    // Exercise all daemon tick entrypoints. A filesystem error remains a tick
+    // failure; live lock contention now waits, covered by lock-liveness.test.ts.
     writeFileSync(runner, `
 import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 const interval = globalThis.setInterval;
 globalThis.setInterval = (callback, ms, ...args) => interval(callback, ${source === 'response' ? 'ms' : '100'}, ...args);
 const { Orchestrator } = await import(${JSON.stringify(pathToFileURL(resolve('src/orchestrator.ts')).href)});
@@ -44,10 +44,15 @@ const tick = Orchestrator.prototype.tickOnce;
 Orchestrator.prototype.tickOnce = function() {
   if (fs.existsSync(${JSON.stringify(arm)})) {
     fs.rmSync(${JSON.stringify(arm)});
-    const lock = ${JSON.stringify(join(home, 'tasks.lock'))};
-    fs.writeFileSync(lock, '');
+    const link = fs.linkSync;
+    fs.linkSync = function(from, to, ...args) {
+      if (String(to) === ${JSON.stringify(join(home, 'tasks.lock'))}) throw Object.assign(new Error('fixture registry publication fault'), { code: 'EIO' });
+      return link(from, to, ...args);
+    };
+    syncBuiltinESMExports();
     return tick.call(this).finally(() => {
-      fs.rmSync(lock, { force: true });
+      fs.linkSync = link;
+      syncBuiltinESMExports();
       fs.writeFileSync(${JSON.stringify(failed)}, 'failed');
     });
   }
@@ -75,7 +80,7 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
         writeFileSync(arm, 'arm');
         if (source === 'response') await sendRpc(socket, { cmd: 'hold' });
       }
-      await waitFor(() => existsSync(failed) && errors.includes('Timed out after 5000ms'), child, () => errors);
+      await waitFor(() => existsSync(failed) && errors.includes('fixture registry publication fault'), child, () => errors);
       let output = '';
       const stream = { write: (chunk: string) => { output += String(chunk); return true; } };
       expect(await cmdDaemon(['daemon', 'status', '--socket', socket], {
@@ -86,7 +91,7 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
       await waitFor(() => existsSync(succeeded), child, () => errors);
       expect(readFileSync(succeeded, 'utf8')).toBe('succeeded');
       expect(errors).toContain('daemon tick failed:');
-      expect(errors).toContain('owner metadata is unreadable');
+      expect(errors).toContain('fixture registry publication fault');
       expect(errors).toContain('TaskRegistry.ensureSessionTaskIndexes');
       expect(errors).not.toContain('TaskRegistry.health');
       await sendRpc(socket, { cmd: 'stop' });

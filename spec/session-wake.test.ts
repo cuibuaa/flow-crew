@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskRegistry } from '../src/task-registry.js';
-import { lockOwnerIdentity } from '../src/lock-publication.js';
+import { lockOwnerIdentity, readLockWaits } from '../src/lock-publication.js';
 import { SessionPush, PUSH_FALLBACK_MS, PUSH_RETRY_MS, wrapUpPrompt } from '../src/session-push.js';
 import { renderSessionProgress, sessionGate } from '../src/cli-session-push.js';
-import { hasClaudeWakeWaiter, supportsClaudeWakeVersion, waitForClaudeWake } from '../src/session-wake.js';
+import { hasClaudeWakeWaiter, sessionWaiterPath, wakeUnavailablePath, supportsClaudeWakeVersion, waitForClaudeWake } from '../src/session-wake.js';
 import { createTaskEntry, refreshOpenTaskLedger, readOpenTaskLedger } from '../src/fc-tasks.js';
 
 const roots: string[] = [];
@@ -137,34 +137,49 @@ describe('Claude async Stop wake', () => {
     ['event', true], ['renewal', true], ['event', false], ['renewal', false],
   ] as const)('preserves the %s wake under retirement contention (diagnostic storage writable=%s)', async (kind, writable) => {
     const f = fixture();
-    const registry = new TaskRegistry({ baseDir: f.registry.baseDir, lockTimeoutMs: 0 });
+    const registry = new TaskRegistry({ baseDir: f.registry.baseDir });
     const push = new SessionPush(registry, { now: f.now, claude: f.claude, notify: f.notify });
     const owner = JSON.stringify({ ...lockOwnerIdentity(), token: 'contending-writer' });
     const diagnostic = join(registry.baseDir, 'infrastructure-recoveries.jsonl');
     if (!writable) mkdirSync(diagnostic);
     let event: ReturnType<typeof f.event> | undefined;
+    let waited = false;
+    const pause = vi.spyOn(Atomics, 'wait').mockImplementation(() => {
+      expect(readFileSync(registry.lockPath, 'utf8')).toBe(owner);
+      expect(readLockWaits(registry.lockPath)[0]).toMatchObject({ kind: 'lock_wait', holder: { pid: process.pid } });
+      waited = true;
+      rmSync(registry.lockPath);
+      return 'ok';
+    });
     const result = await waitForClaudeWake(push, f.launcher.sessionId, {
       now: f.now, lifetimeMs: 10, sleep: async () => {
         if (kind === 'event') { event = f.event(); await f.push.deliver(event); }
-        // A verified live writer owns the real lock through result selection
-        // and retirement; zero wait keeps the property independent of speed.
+        // Keep the writer until the retirement waiter observes its identity.
         writeFileSync(registry.lockPath, owner);
         f.advance(10);
       },
     });
     expect(result).toEqual({ code: 2, prompt: kind === 'event'
       ? wrapUpPrompt(event!, registry.baseDir) : expect.stringContaining('renews wake coverage') });
-    expect(readFileSync(registry.lockPath, 'utf8')).toBe(owner);
-    expect(readdirSync(registry.baseDir).filter(name => name.startsWith('tasks.lock.'))).toEqual([]);
+    pause.mockRestore();
+    expect(waited).toBe(true);
+    expect(readdirSync(registry.baseDir).filter(name => name.startsWith('tasks.lock'))).toEqual([]);
     if (event) { expect(push.pending(f.launcher.sessionId, 'claude')).toHaveLength(1); expect(push.claimWake(event)).toBe(false); }
-    if (writable) expect(JSON.parse(readFileSync(diagnostic, 'utf8'))).toMatchObject({
-      component: 'wake-lease', session: f.launcher.sessionId, operation: 'retire', deferred: true,
-    });
-    // Retirement never unlinks outside the writer boundary. Once that writer
-    // releases, normal expired-owner recovery admits the replacement.
-    rmSync(registry.lockPath);
+    // Once the writer releases, retirement finishes before the wake returns.
     expect((await waitForClaudeWake(push, f.launcher.sessionId, { now: f.now, lifetimeMs: 0 })).code).toBe(2);
     expect(readdirSync(join(push.root, 'waiters'))).toEqual([]);
+  });
+
+  it.each(['', '{"pid":'])('retains an owner-less wake slot regardless of age (%j), reporting typed unavailability', async raw => {
+    const f = fixture();
+    const path = sessionWaiterPath(f.push.root, f.launcher.sessionId);
+    mkdirSync(join(f.push.root, 'waiters'), { recursive: true });
+    writeFileSync(path, raw);
+    utimesSync(path, new Date(0), new Date(0));
+    await expect(waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now })).rejects.toThrow('Wake lease owner cannot be verified');
+    expect(readFileSync(path, 'utf8')).toBe(raw);
+    expect(JSON.parse(readFileSync(wakeUnavailablePath(f.push.root, f.launcher.sessionId), 'utf8')).reason).toBe('owner_unverifiable');
+    expect(f.claude).not.toHaveBeenCalled();
   });
 
   it('never sends inbox frames during 30 minutes without a waiter after a claimed wake, then wakes again', async () => {

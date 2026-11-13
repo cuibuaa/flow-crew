@@ -1,9 +1,9 @@
 import { runRecordPath } from './run-layout.js';
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, linkSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { constants, existsSync, fstatSync, fsyncSync, lstatSync, opendirSync, readFileSync, readlinkSync, readSync } from 'node:fs';
+import { closeSync, linkSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { constants, existsSync, fstatSync, fsyncSync, lstatSync, opendirSync, readFileSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
 import { TaskRegistry } from './task-registry.js';
@@ -11,7 +11,7 @@ import { fcGlobalDir } from './store.js';
 import { resolveControlPath } from './daemon-identity.js';
 import { readRunRecordFields } from './run-record-fields.js';
 import { agentTaskProgressReader } from './agent-task-progress.js';
-import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
+import { withProcessLock } from './lock-publication.js';
 import { estimateProgress, progressLine } from './task-progress.js';
 import {
   isActiveTaskStatus,
@@ -181,8 +181,6 @@ export interface LedgerWriteOptions {
   flowcrewTaskId?: number;
   taskRunResolver?: FcTaskRunResolver;
   clearFlowcrewTaskLink?: boolean;
-  /** Call-local timing dependency for deterministic contention tests. */
-  lockTiming?: { waitMs: number; pollMs: number };
 }
 
 export interface LedgerUpdateOptions extends LedgerWriteOptions {
@@ -303,8 +301,6 @@ const ENGINE_RUN_FIELD_LIMITS = {
 } as const;
 const MAX_ENGINE_STATUS_BYTES = 4 * 1024;
 const MAX_ENGINE_PROJECT_PATH_BYTES = 64 * 1024;
-const LEDGER_LOCK_WAIT_MS = 5_000;
-const LEDGER_LOCK_POLL_MS = 10;
 const INVALID_SEGMENT_CHARACTERS = /[<>:"/\\|?*]/u;
 const CANONICAL_FLOWCREW_TASK_LINK = /^FlowCrew task ([1-9][0-9]*) is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch\.$/u;
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -330,7 +326,6 @@ function withEffectiveTaskLink(entry: FcTaskEntry): FcTaskEntry {
     ? { ...entry, flowcrewTaskId: taskId }
     : entry;
 }
-const lockWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
 export function defaultFcTasksRoot(): string {
   return join(homedir(), '.claude', 'tasks');
@@ -1871,17 +1866,7 @@ function serializeLedgerEntry(value: unknown): { text: string; byteLength: numbe
   return { text, byteLength };
 }
 
-interface LedgerLock {
-  path: string;
-  directory: string;
-  ownerPath: string;
-  token: string;
-  identity: { dev: number | bigint; ino: number | bigint };
-  publicationIdentity: { dev: number | bigint; ino: number | bigint };
-  mtimeMs: number;
-}
-
-function ledgerLockPath(storeRoot: string, session: string): string {
+export function ledgerLockPath(storeRoot: string, session: string): string {
   // A case-insensitive store can expose one session directory through multiple
   // spellings. Serialize those aliases even on a case-sensitive host so the
   // transaction identity never depends on the host's case-folding policy.
@@ -1890,144 +1875,11 @@ function ledgerLockPath(storeRoot: string, session: string): string {
   return join(storeRoot, `.fc-tasks-lock-${digest}`);
 }
 
-function acquireLedgerLock(
-  storeRoot: string,
-  session: string,
-  timing: { waitMs: number; pollMs: number } = {
-    waitMs: LEDGER_LOCK_WAIT_MS,
-    pollMs: LEDGER_LOCK_POLL_MS,
-  },
-): LedgerLock {
-  if (!Number.isFinite(timing.waitMs) || timing.waitMs < 0
-      || !Number.isFinite(timing.pollMs) || timing.pollMs <= 0) {
-    throw new FcTasksRefusal('ledger lock timing must use finite non-negative wait and positive poll milliseconds');
-  }
-  const path = ledgerLockPath(storeRoot, session);
-  const token = randomBytes(16).toString('hex');
-  const started = process.hrtime.bigint();
-  for (;;) {
-    try {
-      const directory = publishLockOwner(path, { version: 1, ...lockOwnerIdentity(), token }, 'owner');
-      const stat = lstatSync(directory);
-      const publication = lstatSync(path);
-      return {
-        path, directory, ownerPath: join(directory, 'owner'), token,
-        identity: { dev: stat.dev, ino: stat.ino },
-        publicationIdentity: { dev: publication.dev, ino: publication.ino },
-        mtimeMs: stat.mtimeMs,
-      };
-    } catch (error) {
-      if (error instanceof FcTasksRefusal) throw error;
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw new FcTasksRefusal(`ledger lock cannot be acquired: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (recoverDefinitelyStaleLedgerLock(path)) continue;
-      const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
-      if (elapsedMs >= timing.waitMs) {
-        throw new FcTasksRefusal('ledger lock is busy; retry after the concurrent writer finishes');
-      }
-      Atomics.wait(lockWaitCell, 0, 0, timing.pollMs);
-    }
-  }
-}
-
-function inspectLedgerLock(path: string): (Omit<LedgerLock, 'token'> & LockObservation) | undefined {
-  try {
-    const publication = lstatSync(path);
-    let directory = path;
-    if (publication.isSymbolicLink()) {
-      const target = readlinkSync(path);
-      const prefix = `${basename(path)}.`;
-      if (!target.startsWith(prefix) || !/^[a-f0-9-]{36}\.tmp$/u.test(target.slice(prefix.length))) return undefined;
-      directory = join(dirname(path), target);
-    }
-    const stat = lstatSync(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
-    const ownerPath = join(directory, 'owner');
-    const raw = readBoundedRegularFile(ownerPath, 4_096);
-    const owner = raw.ok ? parseLockOwner(raw.text) : undefined;
-    let mtimeMs = stat.mtimeMs;
-    try { mtimeMs = Math.max(mtimeMs, lstatSync(ownerPath).mtimeMs); } catch { /* empty legacy directory */ }
-    return {
-      path, directory, ownerPath,
-      identity: { dev: stat.dev, ino: stat.ino },
-      publicationIdentity: { dev: publication.dev, ino: publication.ino },
-      owner: owner?.version === 1 && owner.token && /^[a-f0-9]{32}$/u.test(owner.token) ? owner : undefined,
-      mtimeMs,
-      signature: `${publication.dev}:${publication.ino}:${stat.dev}:${stat.ino}:${mtimeMs}:${raw.ok ? raw.text : ''}`,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function sameLedgerLock(lock: Omit<LedgerLock, 'token'>): boolean {
-  try {
-    const publication = lstatSync(lock.path);
-    return publication.dev === lock.publicationIdentity.dev && publication.ino === lock.publicationIdentity.ino
-      && sameDirectory(lock.directory, lock.identity);
-  } catch {
-    return false;
-  }
-}
-
-function removeLedgerLock(lock: Omit<LedgerLock, 'token'>): void {
-  // Remove the publication before its owner; observers always see complete
-  // metadata until the lock disappears. Legacy directories retain their format.
-  if (lock.directory !== lock.path) unlinkSync(lock.path);
-  try { unlinkSync(lock.ownerPath); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  rmdirSync(lock.directory);
-}
-
-function recoverDefinitelyStaleLedgerLock(path: string): boolean {
-  const lock = inspectLedgerLock(path);
-  if (!lock) return false;
-  try {
-    return recoverStaleLock(lock, () => inspectLedgerLock(path), removeLedgerLock) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
-function releaseLedgerLock(lock: LedgerLock): void {
-  if (!sameLedgerLock(lock)) {
-    throw new FcTasksRefusal('ledger lock ownership was lost; reread the ledger before retrying');
-  }
-  const owner = readBoundedRegularFile(lock.ownerPath, 4_096);
-  if (!owner.ok) throw new FcTasksRefusal('ledger lock ownership was lost; reread the ledger before retrying');
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(owner.text) as unknown;
-  } catch {
-    throw new FcTasksRefusal('ledger lock ownership was damaged; reread the ledger before retrying');
-  }
-  if (!isObject(parsed) || parsed.pid !== process.pid || parsed.token !== lock.token) {
-    throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
-  }
-  if (!sameLedgerLock(lock)) {
-    throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
-  }
-  try {
-    removeLedgerLock(lock);
-  } catch (error) {
-    throw new FcTasksRefusal(
-      `ledger lock could not be released; publication outcome may be visible, reread the ledger before retrying: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-function withLedgerLock<T>(
-  storeRoot: string,
-  session: string,
-  action: () => T,
-  timing?: LedgerWriteOptions['lockTiming'],
-): T {
-  const lock = acquireLedgerLock(storeRoot, session, timing);
-  try {
-    return action();
-  } finally {
-    releaseLedgerLock(lock);
+function withLedgerLock<T>(storeRoot: string, session: string, action: () => T): T {
+  try { return withProcessLock(ledgerLockPath(storeRoot, session), 'session-ledger', action, { ownerFile: 'owner' }); }
+  catch (error) {
+    if (error instanceof FcTasksRefusal) throw error;
+    throw new FcTasksRefusal(`ledger transaction could not be completed; publication may be visible, reread the ledger before retrying: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -2084,7 +1936,7 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
     } finally {
       try { unlinkSync(temporaryPath); } catch { /* published link or already absent */ }
     }
-  }, options.lockTiming);
+  });
 }
 
 export function updateTaskEntry(options: LedgerUpdateOptions): string {
@@ -2205,7 +2057,7 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
         try { unlinkSync(temporaryPath); } catch { /* best effort cleanup */ }
       }
     }
-  }, options.lockTiming);
+  });
 }
 
 export function publicTaskEntries(result: LedgerReadResult): FcTaskEntry[] {

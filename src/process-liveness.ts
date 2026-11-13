@@ -46,14 +46,16 @@ function posixProcessStartToken(pid: number): ProcessStartToken | undefined {
  * A PID-reuse-resistant identity token on every supported POSIX platform.
  * Linux keeps the precise /proc field-22 token. A procfs-less Linux host and
  * Darwin/BSD use a locale- and timezone-stable `ps lstart` value instead.
+ * Request the recorded kind when comparing a persisted fallback identity.
  */
-export function processStartToken(pid: number): ProcessStartToken | undefined {
+export function processStartToken(pid: number, kind?: ProcessStartToken['kind']): ProcessStartToken | undefined {
   if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  if (kind === 'posix-lstart') return process.platform === 'win32' ? undefined : posixProcessStartToken(pid);
   if (process.platform === 'linux') {
     const ticks = linuxProcessStartTimeTicks(pid);
     if (ticks !== undefined) return { kind: 'linux', value: ticks };
   }
-  if (process.platform !== 'win32') return posixProcessStartToken(pid);
+  if (kind !== 'linux' && process.platform !== 'win32') return posixProcessStartToken(pid);
   return undefined;
 }
 
@@ -197,10 +199,13 @@ export function processLiveness(pid: number, recorded?: ProcessStartToken): Proc
     try {
       const state = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[0];
       if (state === 'Z' || state === 'X') return 'dead';
-    } catch { return 'unknown'; }
+    } catch {
+      // A recorded POSIX token remains comparable when procfs is unavailable.
+      if (recorded?.kind !== 'posix-lstart') return 'unknown';
+    }
   }
   if (!recorded) return 'alive';
-  const current = processStartToken(pid);
+  const current = processStartToken(pid, recorded.kind);
   if (!current || current.kind !== recorded.kind) return 'unknown';
   return processStartTokensMatch(recorded, current) ? 'alive' : 'dead';
 }

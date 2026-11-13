@@ -37,13 +37,10 @@ function checkpoint() {
 
 const cancelChild = `
 import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url'; import {syncBuiltinESMExports} from 'node:module';
-const [runtime,fc,id,canonical,ack,queued]=process.argv.slice(1);const lock=path.join(fc,'runs',canonical,'engine','.run-state.lock');const open=fs.openSync;
-// The engine gives up on a held run-state lock after five wall-clock seconds. How long the
-// holder needs is the machine's business, not this fixture's, so the waiter's clock stands
-// still from the first refusal until the lock is granted; a dead holder is still broken by
-// process liveness, which does not read the clock.
-const now=Date.now;let frozen=false;
-fs.openSync=function(file,...args){try{const fd=open(file,...args);if(frozen&&String(file)===lock){frozen=false;Date.now=now}return fd}catch(e){if(String(file)===lock&&e.code==='EEXIST'){if(!frozen){frozen=true;const at=now();Date.now=()=>at}fs.writeFileSync(queued,'queued')}throw e}};syncBuiltinESMExports();
+const [runtime,fc,id,canonical,ack,queued]=process.argv.slice(1);
+// The real shared wait is the queue handshake; clock speed cannot release it.
+const nativeWait=Atomics.wait;
+Atomics.wait=function(...args){fs.writeFileSync(queued,'queued');return nativeWait(...args)};
 const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);
 const {RunCancellationCoordinator}=await load('run-control');const c=new RunCancellationCoordinator({registry:{list:()=>[]},units:{isActive:async()=>({kind:'absent'}),stopUnit:async()=>{}},runsDir:path.join(fc,'runs')});
 const result=await c.cancelRun(id);const dir=path.join(fc,'runs',canonical);
@@ -53,7 +50,7 @@ fs.writeFileSync(ack,JSON.stringify({result,raw:fs.readFileSync(path.join(dir,'r
 // Hold each real publication rename while a separate native coordinator tries
 // the accepted alias. A fresh directory prevents stale acknowledgement receipts
 // from satisfying the synchronization predicate.
-// Both sides wait for the event they need (the waiter's refusal, the waiter's exit)
+// Both sides wait for the event they need (the waiter's queue observation, the waiter's exit)
 // rather than for a number of seconds: a loaded machine delays the waiter's start and
 // the holder's critical section by any factor. The spawnSync timeout below is the
 // only bound, and it is a hang guard, not an expectation about speed.
@@ -87,11 +84,11 @@ try {
 const claimRaceChild = `
 import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {pathToFileURL} from 'node:url';import {syncBuiltinESMExports} from 'node:module';
 const [runtime,fc,id]=process.argv.slice(1),run=path.join(fc,'runs',id);const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);const lock=await load('run-lock');const {RunCancellationCoordinator}=await load('run-control');
-const open=fs.openSync;let hit=false,owned;
-fs.openSync=function(file,...args){if(!hit&&String(file)===path.join(run,'engine','.run-state.lock')){hit=true;owned=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(path.join(run,'engine','scheduler.pid'),String(owned.pid));lock.writeSchedulerProcessIdentity(run,id,owned.pid)}return open(file,...args)};syncBuiltinESMExports();
+const link=fs.linkSync;let hit=false,owned;
+fs.linkSync=function(from,file,...args){if(!hit&&String(file)===path.join(run,'engine','.run-state.lock')){hit=true;owned=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(path.join(run,'engine','scheduler.pid'),String(owned.pid));lock.writeSchedulerProcessIdentity(run,id,owned.pid)}return link(from,file,...args)};syncBuiltinESMExports();
 try {
  const c=new RunCancellationCoordinator({registry:{list:()=>[]},units:{isActive:async()=>({kind:'absent'}),stopUnit:async()=>{}},signalGraceMs:0,timeoutMs:0});const result=await c.cancelRun(id);let publicationBlocked=false;try{store.writeRunState('',id,{...store.readRunState('',id),status:'running'})}catch(error){publicationBlocked=error.message.startsWith('RUN_CANCELLED')}console.log(JSON.stringify({hit,status:result.status,ok:result.ok,stateStatus:store.readRunState('',id).status,publicationBlocked}));
-} finally {fs.openSync=open;syncBuiltinESMExports();if(owned&&owned.exitCode===null){owned.kill('SIGTERM');await new Promise(done=>{const timer=setTimeout(()=>{owned.kill('SIGKILL');done()},2000);owned.once('close',()=>{clearTimeout(timer);done()})})}}
+} finally {fs.linkSync=link;syncBuiltinESMExports();if(owned&&owned.exitCode===null){owned.kill('SIGTERM');await new Promise(done=>{const timer=setTimeout(()=>{owned.kill('SIGKILL');done()},2000);owned.once('close',()=>{clearTimeout(timer);done()})})}}
 `;
 
 describe('canonical cancellation and committed publication fences', () => {
