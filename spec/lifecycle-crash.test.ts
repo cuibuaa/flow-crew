@@ -64,7 +64,7 @@ function cli(fixture: Fixture, args: string[]): Promise<CliResult> {
   if (!cliChild) {
     const root = temporaryRoot();
     cliChild = spawn(process.execPath, [join(repository, 'spec/test-support/lifecycle-cli.mjs')],
-      { cwd: repository, env: environment(root), stdio: ['pipe', 'pipe', 'pipe'] });
+      { cwd: repository, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, stdio: ['pipe', 'pipe', 'pipe'] });
     let buffer = '', errors = '';
     cliChild.stderr!.on('data', chunk => { errors += chunk; });
     cliChild.stdout!.on('data', chunk => {
@@ -117,7 +117,7 @@ function oracle(bytes: string) {
 async function execute(mode: string, killKind?: string): Promise<Execution> {
   const root = temporaryRoot();
   const child = spawn(process.execPath, [join(repository, 'spec/test-support/lifecycle-engine.mjs'), root, mode],
-    { cwd: repository, env: environment(root), stdio: ['pipe', 'pipe', 'pipe'] });
+    { cwd: repository, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, stdio: ['pipe', 'pipe', 'pipe'] });
   children.add(child);
   let buffer = '', errors = '', identity: Identity | undefined, final: { status: string } | undefined;
   const checkpoints: Checkpoint[] = [];
