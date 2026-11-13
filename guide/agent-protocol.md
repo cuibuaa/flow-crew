@@ -171,6 +171,8 @@ Successful settlement checks active required outputs for presence, kind, nonempt
 and exactly-one groups. Suspended/failed attempts have no completion obligation. The location protocol requires no intermediate
 proof package, changed content, age or fresh attribution. Location inspection and identity records do not certify content
 quality. Required products and independent gates still govern task settlement.
+Built-in JSON/schema/manifest and file-data checks accept project artifacts or run `work/` data. They refuse engine-owned run records, including physical aliases. Explicit framework reads remain available to model stages and project-declared commands; use a command when the project needs to inspect an engine record.
+
 Declared research instruments own scientific verdicts; engineering reality checks use their ordinary contract.
 
 Sources: [declarations](../src/artifact-declarations.ts),

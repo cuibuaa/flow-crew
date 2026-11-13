@@ -1,7 +1,19 @@
+import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { isReservedRunPath, prospectivePhysicalPath } from '../engine-owned-carriers.js';
 import { resolveArtifactLocation } from '../artifact-location.js';
 import type { ArtifactRead } from '../artifact-declarations.js';
 import type { CheckDecl, CheckContext } from './types.js';
+
+/** Built-in data checks read authored artifacts, not the engine's own records.
+ * Explicit framework reads remain available to model stages and project commands. */
+function handlerLocation(read: ArtifactRead, projectDir: string, runDir: string): string {
+  const path = resolveArtifactLocation(read, projectDir, runDir);
+  if (read.root === 'run' && isReservedRunPath(relative(realpathSync(runDir), prospectivePhysicalPath(path)))) {
+    throw new Error(`ARTIFACT_HANDLER_READ_ENGINE_OWNED: ${read.id} must read project or run work data; use a project command to inspect engine records`);
+  }
+  return path;
+}
 
 function covers(read: ArtifactRead, path: string): boolean {
   return read.path === path || read.kind === 'directory' && path.startsWith(`${read.path}/`);
@@ -27,7 +39,7 @@ export function inspectRealityHandlerReads(check: Exclude<CheckDecl, { kind: 'in
     const reads = (check.reads ?? []).filter((read) => covers(read, path));
     if (!reads.length) errors.push(`ARTIFACT_HANDLER_READ_UNDECLARED: reality check ${JSON.stringify(check.name)}.reads must declare the exact rooted handler input ${path}, or its exact directory for a glob/manifest member`);
     else if (new Set(reads.map((read) => read.root)).size > 1) errors.push(`ARTIFACT_HANDLER_READ_AMBIGUOUS: reality check ${JSON.stringify(check.name)}.reads declares ${path} in both roots; choose the handler's exact root`);
-    for (const read of reads) try { resolveArtifactLocation(read, projectDir, runDir); } catch (error) { errors.push(String(error)); }
+    for (const read of reads) try { handlerLocation(read, projectDir, runDir); } catch (error) { errors.push(String(error)); }
   }
   return errors;
 }
@@ -38,7 +50,7 @@ export function resolveDeclaredRealityPath(value: string, context: CheckContext)
     const anchor = read.root === 'run' ? context.taskDir : context.projectDir;
     const path = isAbsolute(value) ? relative(anchor, value).split('\\').join('/') : value;
     if (!covers(read, path)) return [];
-    const candidate = resolveArtifactLocation({ root: read.root, path }, context.projectDir, context.taskDir);
+    const candidate = handlerLocation({ ...read, path }, context.projectDir, context.taskDir);
     return [candidate];
   });
   const paths = [...new Set(matches)];

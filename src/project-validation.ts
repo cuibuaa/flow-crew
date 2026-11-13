@@ -4,7 +4,7 @@ import { parseBriefDeclarations, argument, commandDeclaration, commandsDeclarati
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { errorMessage } from './source_services/cli-inputs.js';
-import { appendEngineFile, EngineStateError, withEngineIntegrity } from './engine-integrity.js';
+import { appendEngineFile, EngineStateError, withAdmittedExecution } from './engine-integrity.js';
 import { CommandActivityTracker } from './command-activity.js';
 import { spawnOwnedCommand } from './adapters/base.js';
 import { mkdirSync, mkdtempSync, rmSync } from './engine-fs.js';
@@ -512,7 +512,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
  * belongs in that declaration's executable/argv, never a second discovery path. */
 export const runValidationCommand: ValidationCommandRunner = (request) => withValidationLoad(request, runProjectCommand);
 
-export const runProjectCommand: ValidationCommandRunner = (request) => withEngineIntegrity({
+export const runProjectCommand: ValidationCommandRunner = (request) => withAdmittedExecution({
   projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
 }, async () => {
   const started = Date.now();

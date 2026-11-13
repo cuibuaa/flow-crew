@@ -10,7 +10,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { atomicWrite, chmodSync, copyFileSync, mkdirSync, renameSync, rmSync } from './engine-fs.js';
 import { updateFileHashSync } from './rollback-content-store.js';
 import { createInvocationScratch } from './invocation-scratch.js';
-import { withEngineIntegrity } from './engine-integrity.js';
+import { withAdmittedExecution } from './engine-integrity.js';
 import { spawnOwnedCommand, runProcessAbortSignal } from './adapters/base.js';
 import { scheduleDeadline } from './attempt-deadline.js';
 import { runRecordPath, assertSeparatedRunLayout } from './run-layout.js';
@@ -188,7 +188,7 @@ async function execute(state: ResearchInstrumentState, run: string, request: Res
       inputChanges(dirname(requestRef.path), [basename(requestRef.path)]),
     ]);
     const before = changes();
-    receipt = await withEngineIntegrity({ projectDir: state.projectDir, runDir: run, stageId: '_research_instrument' }, () => new Promise<ExecutionReceipt>(resolveReceipt => {
+    receipt = await withAdmittedExecution({ projectDir: state.projectDir, runDir: run, stageId: '_research_instrument' }, () => new Promise<ExecutionReceipt>(resolveReceipt => {
       const env = { ...state.config.environment, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: scratch.path,
         TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path };
       const { child, stop } = spawnOwnedCommand('/usr/bin/python3', ['-I', '-B', '-c', confinedMeasurement,

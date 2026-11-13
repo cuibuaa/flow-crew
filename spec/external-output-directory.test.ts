@@ -9,8 +9,8 @@ import { readRunStateView } from '../src/run-state-view.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { extractBriefOutputDeclarations, inspectBriefOutputs, nodeShipInputFileSystem } from '../src/ship-inputs.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
-import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { fcGlobalDir, reserveRun, initializeReservedRun, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { withAdmittedExecution, withEngineIntegrity } from '../src/engine-integrity.js';
 import { runStage } from './test-support/stage-deadline.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { registerEngineOwnedSqlitePath } from '../src/engine-owned-carriers.js';
@@ -199,14 +199,34 @@ describe('external output execution', () => {
     'validates and prepares output directories at the shared boundary for %s', async stageId => {
       const valid = boundaryFixture();
       expect(existsSync(output)).toBe(false);
-      await withEngineIntegrity({ ...valid.input, stageId }, async () => {
+      await withAdmittedExecution({ ...valid.input, stageId }, async () => {
         expect(existsSync(output)).toBe(true);
       });
       const invalid = boundaryFixture(brief(join(project, 'overlap')));
       const action = vi.fn(async () => {});
-      await expect(withEngineIntegrity({ ...invalid.input, stageId }, action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
+      await expect(withAdmittedExecution({ ...invalid.input, stageId }, action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
       expect(action).not.toHaveBeenCalled();
       expect(existsSync(join(project, 'overlap'))).toBe(false);
+    });
+
+  it.each(['_research_instrument', '_reality', '_validation', '_terminal_hook', 'gate'])(
+    'checks integrity before the hashless contract refusal for %s', async stageId => {
+      const reserved = reserveRun(project);
+      const { runDirPath } = initializeReservedRun(project, reserved.runId, 'legacy', 'name: legacy', []);
+      const carrier = runRecordPath(runDirPath, 'previous.json');
+      writeFileSync(carrier, 'authentic');
+      const input = { projectDir: project, runDir: runDirPath, stageId };
+      await expect(withEngineIntegrity(input, async () => {
+        writeFileSync(carrier, 'counterfeit');
+      })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+      expect(readFileSync(carrier, 'utf8')).toBe('authentic');
+      const action = vi.fn(async () => {});
+      await expect(withAdmittedExecution(input, action)).rejects.toMatchObject({ code: 'contract_hash_missing' });
+      expect(action).not.toHaveBeenCalled();
+      // A malformed carrier must be refused by integrity before contract lookup.
+      symlinkSync(project, runRecordPath(runDirPath, 'authored-link'));
+      await expect(withAdmittedExecution(input, action)).rejects.toThrow('ENGINE_STATE_REFUSED');
+      expect(action).not.toHaveBeenCalled();
     });
 
   it('retains ordinary filesystem access beyond declared output roots', async () => {
@@ -215,7 +235,7 @@ describe('external output execution', () => {
     expect(existsSync(output)).toBe(false);
     // The caller prepares ordinary paths; this probe isolates the storage guard from stage write grants.
     mkdirSync(output, { recursive: true });
-    const result = await withEngineIntegrity(f.input, async () => {
+    const result = await withAdmittedExecution(f.input, async () => {
       expect(existsSync(output)).toBe(true);
       return f.command(`const fs=require('node:fs'); for(const path of ${JSON.stringify(paths)}) fs.writeFileSync(path,'result');`);
     });

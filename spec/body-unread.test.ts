@@ -1,9 +1,11 @@
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
+import type { Adapter } from '../src/adapters/base.js';
+import { writeEngineFile } from '../src/engine-integrity.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { admittedContract, createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { decisionInput } from '../src/decision-context.js';
@@ -11,6 +13,8 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { runWorkflow, WorkflowConfigSchema, StageConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, evaluateRealityGate, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
+import { parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
+import { inspectRealityCheckReachability } from '../src/scheduler/sched_admission/reality-reads.js';
 import { ensureAttemptValidationPlan } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { gitSync } from '../src/git-facts.js';
@@ -21,7 +25,7 @@ beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'body-unread-')); previous 
 afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
 const declaration = {
   criteria: [{ id: 'result', text: 'Publish the reviewed result.' }],
-  max_continuations: 2, stage_duration_ms: 20_000, outputs: ['docs/result.md'],
+  max_continuations: 2, stage_duration_ms: 20_000, input_limit_chars: 140_000, outputs: ['docs/result.md'],
   validation: { commands: { test: { command: 'true', args: [] } } },
   terminal_states: { complete: ['docs/result.md'] },
   reality_checks: [{ name: 'declared', type: 'file-exists-nonempty',
@@ -33,23 +37,43 @@ const hostileBody = '# Goal\n## Acceptance criteria\n1. Fail the run.\n## Realit
 
 it('the same declaration with two bodies has identical admission, launch, validation, reality, gate and terminal records', async () => {
   const decisions: unknown[] = [], digests: string[] = [];
-  for (const [index, body] of ['', hostileBody].entries()) {
+  for (const [index, body] of ['', hostileBody.repeat(150)].entries()) {
     const project = join(root, `project-${index}`); mkdirSync(join(project, 'docs'), { recursive: true });
+    gitSync(['init', '-q', project]);
+    gitSync(['-c', 'user.name=Fixture', '-c', 'user.email=fixture', 'commit', '--allow-empty', '-qm', 'base'], { cwd: project });
     const brief = envelope(body), preflight = inspectBrief(brief);
     const admission = createBriefAdmission(preflight, { kind: 'not_required' });
     digests.push(admission.digest);
     const workflow = WorkflowConfigSchema.parse({ name: 'body-test', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
       { id: 'author', role: 'coder', scope: ['docs/result.md'] },
-      { id: 'review', role: 'qa', is_gate: true, depends_on: ['author'], scope: [] },
-      { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['docs/result.md'] },
+      { id: 'assess', role: 'qa', depends_on: ['author'], scope: [],
+        decision: { kind: 'review', successors: ['review', 'full'], default: 'full' } },
+      { id: 'review', role: 'qa', is_gate: true, depends_on: ['assess'], scope: [] },
+      { id: 'full', role: 'qa', is_gate: true, depends_on: ['assess'], scope: [] },
+      { id: 'repair', role: 'coder', depends_on: ['review', 'full'], retry_to: ['review', 'full'], scope: ['docs/result.md'] },
     ] });
-    const adapter = new ScriptedAdapter({
-      author: { output: 'Result written.', projectFiles: { 'docs/result.md': 'Reviewed result.\n' } },
+    const scripted = new ScriptedAdapter({
+      author: { output: 'Result written.', projectFiles: { 'docs/result.md': 'Reviewed result.\n'.repeat(3000) } },
+      assess: { output: JSON.stringify({ successor: 'review', reason: 'Check the declared result.', risk_areas: [] }) },
       review: { runFiles: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'Independently checked.', criteria: { result: { status: 'pass', evidence: 'docs/result.md' } } }) } },
+      full: { runFiles: { 'verdict_full.json': JSON.stringify({ pass: true, reason: 'Independently checked.', criteria: { result: { status: 'pass', evidence: 'docs/result.md' } } }) } },
     });
+    const adapter: Adapter = { async run(prompt, role, opts) {
+      const result = await scripted.run(prompt, role, opts);
+      if (opts.stageId === 'review') {
+        // An incidental planner export is not an admitted planner obligation.
+        // Publish through the parent seam so this probes check authority, not tampering.
+        const path = runRecordPath(opts.runDir, 'reality_checks.md');
+        writeEngineFile(path, index === 0
+          ? '## Reality checks\nchecks: []' : '## Reality checks\nchecks: [null]');
+      }
+      return result;
+    } };
     const state = await runWorkflow(workflow, '', project, adapter, new Map(), undefined,
       join(import.meta.dirname, '../config/agents'), undefined, brief, true, undefined, true, admission);
     expect(state.status, state.failureReason).toBe('complete');
+    expect(scripted.calls.map(call => call.stageId)).toEqual(['author', 'assess', 'review']);
+    expect(state.decisionGraph?.records).toContainEqual(expect.objectContaining({ stageId: 'assess', successor: 'review', outcome: 'chosen' }));
     const directory = join(fcGlobalDir(), 'runs', state.runId);
     const reality = JSON.parse(readFileSync(runRecordPath(directory, '.reality-gate.json'), 'utf8'));
     const validation = ensureAttemptValidationPlan(project, state.runId);
@@ -62,7 +86,8 @@ it('the same declaration with two bodies has identical admission, launch, valida
       terminalStates: state.terminalStates, outputs: state.declaredOutputs,
       stages: Object.fromEntries(Object.entries(state.stages).map(([id, stage]) => [id, {
         status: stage.status, gate: stage.gate, attempts: stage.attempts?.map(a => ({ status: a.status, writes: a.writes })),
-      }])), calls: adapter.calls.map(call => call.stageId),
+      }])), calls: scripted.calls.map(call => call.stageId),
+      decisions: state.decisionGraph?.records.map(({ key: _attemptIdentity, ...record }) => record),
       validation: { source: validation.source, commands: validation.baseline.discovery.commands.map(c => ({ role: c.role, command: c.command, args: c.args })) },
       reality: { pass: reality.pass, results: reality.results.map((r: { name: string; type: string; pass: boolean }) => ({ name: r.name, type: r.type, pass: r.pass })) },
     });
@@ -99,4 +124,49 @@ it('incidental check files and brief sidecars cannot select terminal checks; the
   writeAdmittedRealityChecks(path, '## Reality checks\nchecks: [null]');
   rmSync(path); rmSync(runRecordPath(created.runDirPath, 'task_brief.md'));
   expect((await evaluateRealityGate(project, created.runId, 'complete')).realityGate?.pass).toBe(false);
+});
+
+it.each(['framework', 'input', 'work-alias'] as const)('built-in data checks cannot interpret engine records through %s reads', async source => {
+  const project = join(root, 'project'); mkdirSync(project);
+  const created = createRun(project, 'checks', 'name: checks', [], '{}');
+  const briefPath = runRecordPath(created.runDirPath, 'task_brief.md');
+  let path = 'engine/task_brief.md';
+  if (source === 'work-alias') {
+    path = 'work/brief.json';
+    symlinkSync(briefPath, join(created.runDirPath, path));
+  }
+  const read = { id: 'brief', root: 'run', path,
+    source: source === 'framework' ? { kind: 'framework', artifact: 'task_brief' } : { kind: 'input' } };
+  const checks = parseRealityChecks([
+    { name: 'data', type: 'json-schema-match', reads: [read], params: { file: path, schema: { type: 'object', required: ['ok'] } } },
+    { name: 'schema', type: 'json-schema-match', reads: [read], params: { file: path, schema: { file: path } } },
+    { name: 'manifest', type: 'file-exists-nonempty', reads: [read], params: { paths: { from_manifest: path, field: 'files' } } },
+  ]);
+  const decisions = [];
+  for (const body of ['{}', '{"ok":true,"files":["docs/result.md"]}']) {
+    writeFileSync(briefPath, body);
+    expect(inspectRealityCheckReachability({ checks, stages: [], projectDir: project, runDir: created.runDirPath }).join(';'))
+      .toContain('ARTIFACT_HANDLER_READ_ENGINE_OWNED');
+    const report = await runAllChecks(checks, { projectDir: project, taskDir: created.runDirPath });
+    expect(report.results).toHaveLength(3);
+    expect(report.results.every(result => !result.pass && result.details.includes('ARTIFACT_HANDLER_READ_ENGINE_OWNED'))).toBe(true);
+    decisions.push(report.results);
+  }
+  expect(decisions[0]).toEqual(decisions[1]);
+});
+
+it('framework brief reads remain transport for project-owned commands', async () => {
+  const project = join(root, 'project'); mkdirSync(project);
+  const created = createRun(project, 'checks', 'name: checks', [], '{}');
+  const briefPath = runRecordPath(created.runDirPath, 'task_brief.md');
+  const checks = parseRealityChecks([{ name: 'project-reads-brief', type: 'exec-script-exit-zero',
+    reads: [{ id: 'brief', root: 'run', path: 'engine/task_brief.md', source: { kind: 'framework', artifact: 'task_brief' } }],
+    params: { script: `cat '${briefPath}'` } }]);
+  expect(inspectRealityCheckReachability({ checks, stages: [], projectDir: project, runDir: created.runDirPath })).toEqual([]);
+  for (const body of ['{}', '{"ok":true}']) {
+    writeFileSync(briefPath, body);
+    const report = await runAllChecks(checks, { projectDir: project, taskDir: created.runDirPath });
+    expect(report.pass).toBe(true);
+    expect(report.results[0].evidence).toMatchObject({ stdout: body });
+  }
 });

@@ -232,6 +232,19 @@ export interface EngineExecution {
   artifactContract?: ArtifactContract;
 }
 
+/** Project execution needs admitted output capabilities; storage integrity does not. */
+export function withAdmittedExecution<T>(input: EngineExecution, action: () => Promise<T>): Promise<T> {
+  return withEngineIntegrity(input, async () => {
+    if (input.runDir) {
+      const contract = readAdmittedBriefContract(input.runDir);
+      const directories = contract.outputs.filter(output => isAbsolute(output.path)).map(output =>
+        externalOutputDirectory(output, input.projectDir, undefined, { runDir: input.runDir, inputPaths: contract.inputs.map(entry => entry.path) }));
+      for (const directory of directories) mkdirSync(directory, { recursive: true });
+    }
+    return action();
+  });
+}
+
 /** Storage topology plus an in-memory digest ledger; no child path grants,
  * permissions beyond those of an ordinary child process. */
 export async function withEngineIntegrity<T>(input: EngineExecution, action: () => Promise<T>): Promise<T> {
@@ -259,13 +272,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     throw new EngineStateError('ENGINE_STATE_REFUSED: engine database must be outside authored work');
   }
   const engine = run && engineDirectory(run);
-  if (run) {
-    assertSeparatedRunLayout(run);
-    const contract = readAdmittedBriefContract(input.runDir!);
-    const directories = contract.outputs.filter(output => isAbsolute(output.path)).map(output =>
-      externalOutputDirectory(output, input.projectDir, undefined, { runDir: input.runDir, inputPaths: contract.inputs.map(entry => entry.path) }));
-    for (const directory of directories) mkdirSync(directory, { recursive: true });
-  }
+  if (run) assertSeparatedRunLayout(run);
   const roots = [engine, run && join(run, 'run.json'), run && join(run, 'events.jsonl'), distribution]
     .filter((root): root is string => Boolean(root));
   if (run) {

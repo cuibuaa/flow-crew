@@ -11,7 +11,7 @@ import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } fro
 
 
 // Module: worker
-import { EngineStateError, withEngineIntegrity } from './engine-integrity.js';
+import { EngineStateError, withAdmittedExecution } from './engine-integrity.js';
 import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { recordInvocationInput } from './run-state-view.js';
 import { finalizeStageSessions } from './adapter-session.js';
@@ -880,7 +880,7 @@ export async function runStage(
     let recordedCommandIndex = 0;
     // The adapter promise owns child/group retirement; cancellation alone is
     // not closure evidence and cannot settle or void this invocation.
-    const invocation = withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
+    const invocation = withAdmittedExecution({ projectDir: opts.projectDir, runDir: opts.runDir,
         stageId: opts.stageId, artifactContract: opts.artifactContract!,
         },
       async () => {

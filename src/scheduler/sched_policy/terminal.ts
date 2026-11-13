@@ -18,7 +18,7 @@ import { type StageConfig } from '../sched_admission/configuration.js';
 import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { withEngineIntegrity } from '../../engine-integrity.js';
+import { withAdmittedExecution } from '../../engine-integrity.js';
 import { spawnOwnedCommand } from '../../adapters/base.js';
 import { rethrowGitNotAnswered } from '../../git-facts.js';
 import type { PostTerminateHook } from '../../store.js';
@@ -370,7 +370,7 @@ export async function runPostTerminateHook(
   const logPath = runRecordPath(ctx.runDir, 'post_terminate_hook.log');
   const startedAt = new Date().toISOString();
 
-  await withEngineIntegrity({ projectDir: ctx.projectDir, runDir: ctx.runDir,
+  await withAdmittedExecution({ projectDir: ctx.projectDir, runDir: ctx.runDir,
     stageId: '_terminal_hook',
   }, () => new Promise<void>((resolve, reject) => {
     let spawnError: Error | undefined;

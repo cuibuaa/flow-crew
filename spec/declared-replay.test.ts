@@ -90,8 +90,9 @@ describe('artifact locations and historical observations', () => {
     expect(inspectRealityCheckReachability({ markdown: old, projectDir: f.project, runDir: f.directory, stages: [] }).join('\n')).toContain('REALITY_READ_DECLARATION_REQUIRED');
     const declared = old.replace('   params:', '   reads: []\n   params:');
     expect(inspectRealityCheckReachability({ markdown: declared, projectDir: f.project, runDir: f.directory, stages: [] })).toEqual([]);
-    writeFileSync(join(f.project, 'same.json'), '{"value":"decoy"}'); writeFileSync(join(f.directory, 'same.json'), '{"value":"intended"}');
-    const check = parseChecksFromMarkdown('## Reality checks\n```yaml\nchecks:\n - name: bound input\n   type: json-schema-match\n   reads: [{id: data, root: run, path: same.json, source: {kind: input}}]\n   params: {file: same.json, schema: {properties: {value: {enum: [intended]}}}}\n```\n');
+    mkdirSync(join(f.project, 'work')); mkdirSync(join(f.directory, 'work'));
+    writeFileSync(join(f.project, 'work/same.json'), '{"value":"decoy"}'); writeFileSync(join(f.directory, 'work/same.json'), '{"value":"intended"}');
+    const check = parseChecksFromMarkdown('## Reality checks\n```yaml\nchecks:\n - name: bound input\n   type: json-schema-match\n   reads: [{id: data, root: run, path: work/same.json, source: {kind: input}}]\n   params: {file: work/same.json, schema: {properties: {value: {enum: [intended]}}}}\n```\n');
     expect((await runAllChecks(check, { projectDir: f.project, taskDir: f.directory })).pass).toBe(true);
   });
 });

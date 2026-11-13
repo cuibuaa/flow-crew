@@ -1,4 +1,4 @@
-import { withEngineIntegrity } from '../../engine-integrity.js';
+import { withAdmittedExecution } from '../../engine-integrity.js';
 import { spawnOwnedCommand } from '../../adapters/base.js';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -29,7 +29,7 @@ function commandNotFound(stderr: string): string | undefined {
 export default class ExecScriptExitZeroCheck implements RealityCheck {
   static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Exit 127 with a command-not-found diagnostic is advisory with its failed execution preserved.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number' };
   async run(raw: object, context: CheckContext) {
-    return withEngineIntegrity(context.commandBoundary ?? {
+    return withAdmittedExecution(context.commandBoundary ?? {
       projectDir: context.projectDir,
       runDir: resolve(context.taskDir) === resolve(context.projectDir) || !existsSync(join(context.taskDir, 'run.json')) ? undefined : context.taskDir,
       stageId: '_reality',
