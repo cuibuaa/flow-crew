@@ -137,15 +137,7 @@ verify_codex_enumeration() {
   local codex_bin="$1"
   local ship_path="$2"
   local status_path="$3"
-  local timeout_ms="${FLOWCREW_CODEX_VERIFY_TIMEOUT_MS:-20000}"
-  case "$timeout_ms" in
-    ''|*[!0-9]*|0)
-      printf '%s\n' 'FLOWCREW_CODEX_VERIFY_TIMEOUT_MS must be a positive integer.' >&2
-      return 1
-      ;;
-  esac
-
-  "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" install "$codex_bin" "$PWD" "$ship_path" "$status_path" "$CODEX_ROOT" "$timeout_ms"
+  "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" install "$codex_bin" "$PWD" "$ship_path" "$status_path" "$CODEX_ROOT"
 }
 
 CLAUDE_BIN=''
@@ -213,7 +205,7 @@ if [ -n "$CODEX_BIN" ]; then
   CODEX_SHIP="$CODEX_TARGET/ship/SKILL.md"
   CODEX_STATUS="$CODEX_TARGET/fc-status/SKILL.md"
   if $UNINSTALL && [ -f "$CODEX_ROOT/hooks/flowcrew-session.json" ] && command -v codex >/dev/null 2>&1; then
-    "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" remove "$(command -v codex)" "$PWD" "$CODEX_SHIP" "$CODEX_STATUS" "$CODEX_ROOT" "${FLOWCREW_CODEX_VERIFY_TIMEOUT_MS:-20000}"
+    "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" remove "$(command -v codex)" "$PWD" "$CODEX_SHIP" "$CODEX_STATUS" "$CODEX_ROOT"
   fi
   install_bundles "$CODEX_TARGET"
   ACTION=install
@@ -222,8 +214,16 @@ if [ -n "$CODEX_BIN" ]; then
   if $UNINSTALL; then
     printf '%s\n' 'Codex FlowCrew integration removed; changed skill files are preserved.'
   else
-  if ! verify_codex_enumeration "$CODEX_BIN" "$CODEX_SHIP" "$CODEX_STATUS"; then
-    printf '%s\n' 'Codex skill verification failed; installation was not reported as successful.' >&2
+  printf 'Completed: Codex skill bundles installed and byte-verified at %s/; session hooks and manifest written at %s/.\n' "$CODEX_TARGET" "$CODEX_ROOT"
+  if verify_codex_enumeration "$CODEX_BIN" "$CODEX_SHIP" "$CODEX_STATUS"; then
+    :
+  else
+    verification_exit=$?
+    if [ "$verification_exit" -eq 5 ]; then
+      printf '%s\n' 'Installation verification unfinished; skill enumeration or hook trust verification is pending. Completed steps are preserved; rerun the same installer to finish.' >&2
+      exit 5 # Existing FlowCrew inProgress result (src/exit-code.ts).
+    fi
+    printf '%s\n' 'Codex skill verification failed; installation was not reported as successful. Completed steps are preserved.' >&2
     exit 1
   fi
   printf '✓ Codex skills installed and enumerated at %s/\n' "$CODEX_TARGET"

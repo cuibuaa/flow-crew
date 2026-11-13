@@ -296,6 +296,7 @@ async function cmdInit() {
 }
 
 interface DoctorCheck {
+  result?: import('./session-integration.js').SessionIntegrationResult;
   name: string;
   status: 'ok' | 'warn' | 'fail';
   message: string;
@@ -762,6 +763,9 @@ async function cmdDoctor() {
   if (hasFailure) {
     console.log('Some checks failed. Fix the issues above and run `flowcrew doctor` again.');
     process.exit(EXIT_CODE.failed);
+  } else if (checks.some(check => check.result === 'unfinished')) {
+    console.log('Session verification unfinished at the declared allowance. Rerun `flowcrew doctor` to finish.');
+    process.exitCode = EXIT_CODE.inProgress;
   } else if (hasWarning) {
     console.log('Some checks need attention before a live run. Review the warnings above.');
   } else {

@@ -1,9 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { EXIT_CODE } from './exit-code.js';
+
+export type SessionIntegrationResult = 'verified' | 'unavailable' | 'unfinished';
 
 export function doctorSessionIntegration(frontend: 'claude' | 'codex', project: string, packageRoot: string, env: NodeJS.ProcessEnv): {
-  name: string; status: 'ok' | 'warn'; message: string;
+  name: string; status: 'ok' | 'warn'; result: SessionIntegrationResult; message: string;
 } {
   const checker = join(packageRoot, 'skills', 'session-integration.mjs');
   const quote = (text: string) => `'${text.replaceAll("'", `'"'"'`)}'`;
@@ -18,15 +21,21 @@ export function doctorSessionIntegration(frontend: 'claude' | 'codex', project: 
     ...(hasProject ? [{ root: projectRoot, scope: 'project' }] : []),
   ];
   const issues: string[] = [];
+  const pending: string[] = [];
   for (const location of locations) {
     try {
-      execFileSync(process.execPath, [checker, 'check', frontend, location.root, packageRoot], { cwd: project, env, encoding: 'utf8', timeout: 8_000, stdio: ['ignore', 'pipe', 'pipe'] });
-      if (locations.length === 1) return { name, status: 'ok', message: 'shared Stop/SessionStart hooks and progress integration are current' };
+      execFileSync(process.execPath, [checker, 'check', frontend, location.root, packageRoot], { cwd: project, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (locations.length === 1) return { name, status: 'ok', result: 'verified', message: 'shared Stop/SessionStart hooks and progress integration are current' };
     } catch (error) {
+      if ((error as { status?: number }).status === EXIT_CODE.inProgress) {
+        pending.push((error as { stdout?: string }).stdout?.toString().trim() || 'session verification unfinished');
+        continue;
+      }
       const detail = (error as { stdout?: string }).stdout?.toString().trim() || 'missing or outdated session integration';
       issues.push(`${detail}. Repair: bash ${quote(join(packageRoot, 'skills', 'install.sh'))} --${frontend} --${location.scope}`);
     }
   }
-  return issues.length ? { name, status: 'warn', message: issues.join('\n') }
-    : { name, status: 'ok', message: 'session integrations are current' };
+  return issues.length ? { name, status: 'warn', result: 'unavailable', message: [...issues, ...pending].join('\n') }
+    : pending.length ? { name, status: 'warn', result: 'unfinished', message: pending.join('\n') }
+    : { name, status: 'ok', result: 'verified', message: 'session integrations are current' };
 }

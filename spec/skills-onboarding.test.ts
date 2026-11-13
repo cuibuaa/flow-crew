@@ -170,6 +170,7 @@ function installStubbornFakeCodex(fixture: OnboardingFixture): string {
     `#!${process.execPath}`,
     "import { writeFileSync } from 'node:fs';",
     "import process from 'node:process';",
+    "if (process.argv[2] !== 'app-server') process.exit(0);",
     `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid) + "\\n", 'utf8');`,
     "process.on('SIGTERM', () => {});",
     'setInterval(() => {}, 1_000);',
@@ -213,7 +214,7 @@ function prepareDoctorProject(fixture: OnboardingFixture): void {
   writeFileSync(join(agents, '_base.md'), 'fixture base prompt\n', 'utf-8');
 }
 
-function runDoctor(fixture: OnboardingFixture, packageRoot = repositoryRoot) {
+function runDoctor(fixture: OnboardingFixture, packageRoot = repositoryRoot, extraEnv: Record<string, string> = {}) {
   prepareDoctorProject(fixture);
   return spawnSync(
     process.execPath,
@@ -231,6 +232,7 @@ function runDoctor(fixture: OnboardingFixture, packageRoot = repositoryRoot) {
         PORT: '65534',
         NO_COLOR: '1',
         FLOWCREW_DOCTOR_SKILL_ROOT: packageRoot,
+        ...extraEnv,
       },
       encoding: 'utf-8',
       timeout: 30_000,
@@ -327,7 +329,7 @@ describe('FlowCrew skill installer', () => {
     expect(output).not.toContain('✓ Codex skills installed');
   });
 
-  it('force-terminates a Codex verifier that ignores SIGTERM', () => {
+  it('reports unfinished partial installation, retires its verifier, and completes on rerun', () => {
     const fixture = onboardingFixture();
     const pidFile = installStubbornFakeCodex(fixture);
     // The PID write is the fake verifier's first action, but 100ms was still
@@ -344,13 +346,34 @@ describe('FlowCrew skill installer', () => {
     const elapsedMs = Date.now() - startedAt;
     const output = `${result.stdout}${result.stderr}`;
 
-    expect(result.status, output).toBe(1);
+    expect(result.status, output).toBe(5);
     expect(elapsedMs).toBeLessThan(verificationTimeoutMs + 4_000);
-    expect(output).toContain('Codex skills/list timed out');
+    expect(output).toContain('Codex verification unfinished');
+    expect(output).toContain('Completed: Codex skill bundles installed and byte-verified');
+    expect(output).toContain('session hooks and manifest written');
+    expect(output).toContain('Completed steps are preserved');
+    expect(output).not.toContain('verification failed');
     expect(output).not.toContain('✓ Codex skills installed');
     const childPid = Number.parseInt(readFileSync(pidFile, 'utf8'), 10);
     expect(Number.isSafeInteger(childPid)).toBe(true);
     expect(() => process.kill(childPid, 0)).toThrow();
+    const skillPath = join(fixture.home, '.agents/skills/ship/SKILL.md');
+    const hooksPath = join(fixture.codexHome, 'hooks.json');
+    const completed = [readFileSync(skillPath, 'utf8'), readFileSync(hooksPath, 'utf8')];
+    expect(existsSync(join(fixture.codexHome, 'hooks/flowcrew-session.json'))).toBe(true);
+    const doctor = runDoctor(fixture, repositoryRoot, { FLOWCREW_CODEX_VERIFY_TIMEOUT_MS: '1000' });
+    expect(doctor.status, `${doctor.stdout}${doctor.stderr}`).toBe(5);
+    expect(doctor.stdout).toContain('Session verification unfinished at the declared allowance');
+    const doctorPid = Number.parseInt(readFileSync(pidFile, 'utf8'), 10);
+    expect(() => process.kill(doctorPid, 0)).toThrow();
+    installFakeCodex(fixture);
+    const retry = runInstaller(fixture, ['--codex']);
+    expect(retry.status, `${retry.stdout}${retry.stderr}`).toBe(0);
+    expect(retry.stdout).toContain('Codex trusts only the two installed FlowCrew hook definitions');
+    expect([readFileSync(skillPath, 'utf8'), readFileSync(hooksPath, 'utf8')]).toEqual(completed);
+    const repeated = runInstaller(fixture, ['--codex']);
+    expect(repeated.status, repeated.stderr).toBe(0);
+    expect([readFileSync(skillPath, 'utf8'), readFileSync(hooksPath, 'utf8')]).toEqual(completed);
   });
 
   it('uses supported project layouts without writing the disposable HOME', () => {

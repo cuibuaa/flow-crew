@@ -51,6 +51,7 @@ const settings = {
 const expectedShim = template.replace('FLOWCREW_SETTINGS', JSON.stringify(settings));
 if (action === 'check') {
   const issues = [];
+  const pending = [];
   if (!existsSync(settings.cli)) issues.push('engine CLI is missing; run npm run build');
   if (previous.sourceDigest !== sourceDigest || previous.cli !== settings.cli) issues.push('missing or outdated installation manifest');
   if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== expectedShim) issues.push('missing or outdated shared hook');
@@ -60,7 +61,7 @@ if (action === 'check') {
     if (config.disableAllHooks === true) issues.push('Claude hooks are disabled; enable hooks in Claude Code if desired');
     if (existsSync(settings.cli)) {
       const capability = spawnSync(process.execPath, [settings.cli, 'session-push', 'wake-check'], {
-        encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       });
       if (capability.status !== 0) issues.push(capability.stdout?.trim() || 'Claude wake capability unavailable; upgrade Claude Code');
     }
@@ -70,13 +71,16 @@ if (action === 'check') {
     // Native keys depend on the effective configuration (including neighboring
     // hook positions). Saved trust records alone cannot establish current trust.
     const result = spawnSync(process.execPath, [join(packageRoot, 'skills', 'codex-verify.mjs'),
-      'check', 'codex', process.cwd(), '', '', root, '3000'], {
-      encoding: 'utf8', timeout: 6500, stdio: ['ignore', 'pipe', 'pipe'],
+      'check', 'codex', process.cwd(), '', '', root], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (result.status !== 0) issues.push(result.stderr?.trim() || 'Codex hook trust could not be verified');
+    if (result.status === 5) pending.push(result.stderr?.trim() || 'Codex hook trust verification unfinished');
+    else if (result.status !== 0) issues.push(result.stderr?.trim() || 'Codex hook trust unavailable');
   }
-  process.stdout.write(issues.join('; ') || 'shared Stop/SessionStart hooks and progress integration are current');
-  process.exitCode = issues.length ? 1 : 0;
+  // A completed negative observation is conclusive even if another probe is pending.
+  const result = issues.length ? 'unavailable' : pending.length ? 'unfinished' : 'verified';
+  process.stdout.write(`${result}: ${[...issues, ...pending].join('; ') || 'shared Stop/SessionStart hooks and progress integration are current'}`);
+  process.exitCode = issues.length ? 1 : pending.length ? 5 : 0;
 } else {
   const hooks = config.hooks ?? {};
   for (const event of ['Stop', 'SessionStart']) {
