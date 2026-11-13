@@ -397,8 +397,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  it('H4 times worktree add from config, reports progress, and rolls back owned failure residue', async () => {
-    setEngineDefaults({ default_timeout_ms: 60000, git_worktree_add_timeout_ms: 1800000 });
+  it('reports worktree progress without a checkout deadline and rolls back a real Git error', async () => {
+    setEngineDefaults({ default_timeout_ms: 60000 });
     writeBrief(['# Goal', 'Create an isolated worktree.']);
     const stderr = new Capture();
     const calls: string[][] = [];
@@ -417,11 +417,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
           timeoutMs?: number;
           onProgress?: (progress: { elapsedMs: number; message: string }) => void;
         };
-        expect(configured.timeoutMs).toBe(1_800_000);
+        expect(configured.timeoutMs).toBeUndefined();
         configured.onProgress?.({ elapsedMs: 61_000, message: 'git worktree add still running' });
         mkdirSync(fixture.target, { recursive: true });
         writeFileSync(join(fixture.target, '.git'), 'gitdir: fixture-owned-worktree\n');
-        return { exitCode: null, error: 'Git ended by signal SIGTERM' };
+        return { exitCode: 128, error: 'Git command failed' };
       }
       if (request.args.slice(0, 3).join(' ') === 'worktree list --porcelain') {
         return {

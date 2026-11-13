@@ -29,6 +29,7 @@ import type { SupervisorBackend, UnitStatus } from './supervision.js';
 import { checkpointConsumers } from './restart-recovery.js';
 import { RESEARCH_PROTOCOL } from './research-instrument.js';
 import { finalizeResearchInstrument } from './research-measurement.js';
+import { GitNotAnswered, rethrowGitNotAnswered } from './git-facts.js';
 
 /** Blocked recovery ends the workflow without asserting consumer death. An
  * explicit interrupt still closes control state and attempts owned cleanup. */
@@ -266,7 +267,21 @@ export class RunCancellationCoordinator {
       };
     }
     const requestedAt = this.now().toISOString();
-    if (task && !preserveTerminalTask) {
+    let stopError: string | undefined;
+    let factFailure: GitNotAnswered | undefined;
+    const recordRunDecision = (current: RunTarget | undefined): string | undefined => {
+      if (!current || factFailure) return undefined;
+      try { return this.updateRun(current, requestedAt); }
+      catch (error) {
+        if (error instanceof GitNotAnswered) { factFailure = error; return undefined; }
+        if (!task) throw error; // An unregistered run has no alternate durable decision record.
+        const detail = error instanceof Error ? error.message : String(error);
+        stopError = stopError ? `${stopError}; run settlement: ${detail}` : `run settlement: ${detail}`;
+        return undefined;
+      }
+    };
+    const preservedRunStatus = recordRunDecision(run);
+    if (task && !preserveTerminalTask && !factFailure) {
       this.registry.update(task.id, {
         status: TASK_STATUS.CANCELLING,
         completed_at: undefined,
@@ -282,18 +297,6 @@ export class RunCancellationCoordinator {
       });
     }
 
-    let stopError: string | undefined;
-    const recordRunDecision = (current: RunTarget | undefined): string | undefined => {
-      if (!current) return undefined;
-      try { return this.updateRun(current, requestedAt); }
-      catch (error) {
-        if (!task) throw error; // An unregistered run has no alternate durable decision record.
-        const detail = error instanceof Error ? error.message : String(error);
-        stopError = stopError ? `${stopError}; run settlement: ${detail}` : `run settlement: ${detail}`;
-        return undefined;
-      }
-    };
-    const preservedRunStatus = recordRunDecision(run);
     const targetUnit = (task ? this.registry.get(task.id)?.systemd_unit : undefined)
       ?? task?.systemd_unit ?? target.unit;
     let unitStopFailed = false;
@@ -394,7 +397,7 @@ export class RunCancellationCoordinator {
     const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
     // The same decision fences a run that initialized during owned cleanup.
     recordRunDecision(latestRun);
-    const settlementError = await this.settleResearchCancellation(latestRun, observation);
+    const settlementError = factFailure ? undefined : await this.settleResearchCancellation(latestRun, observation);
     if (settlementError) stopError = stopError ? `${stopError}; ${settlementError}` : settlementError;
     const releaseProjectDir = latestRun?.projectDir ?? run?.projectDir ?? task?.projectDir;
     const releaseRunId = latestRun?.runId ?? targetRunId;
@@ -406,6 +409,9 @@ export class RunCancellationCoordinator {
       }
     }
     invalidateRunLockCache();
+    // Missing settlement facts cannot settle the task. Owned stop/retirement
+    // above still completes, and the original failure crosses the operation.
+    if (factFailure) throw factFailure;
     const message = this.observationMessage(
       `Cancellation recorded${preservedRunStatus ? '; archived run lifecycle was preserved' : ''}${stopError ? `; ${stopError}` : ''}`,
       observation,
@@ -513,7 +519,7 @@ export class RunCancellationCoordinator {
     if (!run || run.state.status !== RUN_STATUS.CANCELLED || run.state.research?.protocol !== RESEARCH_PROTOCOL || !this.isStopped(observation)) return;
     try {
       await finalizeResearchInstrument(run.runPath, 'cancelled', { status: RUN_STATUS.CANCELLED, reasonCode: 'cancelled', detail: run.state.failureReason });
-    } catch (error) { return `research cancellation settlement: ${String(error)}`; }
+    } catch (error) { rethrowGitNotAnswered(error); return `research cancellation settlement: ${String(error)}`; }
   }
 
   private observationMessage(prefix: string, observation: CancellationObservation): string {

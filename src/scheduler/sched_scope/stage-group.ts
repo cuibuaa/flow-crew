@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence, validateSettledTree } from '../sched_settlement/gate-validation.js';
 // Run serialized shared-tree authors and settle each closed attempt.
@@ -40,6 +41,7 @@ export function recordThrownStageAttempt(
   error: unknown,
   attribution?: AttemptAttribution,
 ): StageStatus | undefined {
+  rethrowGitNotAnswered(error);
   const detail = error instanceof Error ? error.message : String(error);
   try {
     let existing: StageStatus | undefined;
@@ -69,6 +71,7 @@ export function recordThrownStageAttempt(
     });
     return final;
   } catch (recordingError) {
+    rethrowGitNotAnswered(recordingError);
     log.error({ stage: stageId, err: recordingError }, 'Could not record thrown stage attempt');
     return undefined;
   }
@@ -134,6 +137,7 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
           await execute(stage, createStageSettlementBoundary({ stage, projectDir, runId, context }, services));
         }
         catch (error) {
+          rethrowGitNotAnswered(error);
           const retries = (() => {
             try { return readStageStatus(projectDir, runId, stage.id).retries; }
             catch { return 0; }
@@ -190,6 +194,7 @@ export async function settleStageGroup(projectDir: string, runId: string, stages
       }
       await settleGateValidationEvidence(projectDir, runId, stage.id);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       // A missing bound receipt fails closed in gate evaluation. Keep launch
       // failures inside settlement so the scheduler can publish that refusal.
       log.error({ stage: stage.id, error: error instanceof Error ? error.message : String(error) }, 'Could not settle gate validation');

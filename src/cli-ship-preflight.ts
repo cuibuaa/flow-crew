@@ -15,7 +15,7 @@ import {
   statSync,
   type Stats,
 } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   canonicalCampaignStorageKey,
@@ -265,10 +265,8 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     }),
     realpath: overrides.realpath ?? ((path) => realpathSync.native(path)),
     lstat: overrides.lstat ?? ((path) => lstatSync(path)),
-    readGitCommonDir: overrides.readGitCommonDir ?? ((projectDir) => execFileSync(
-      'git',
-      ['rev-parse', '--git-common-dir'],
-      { cwd: projectDir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 },
+    readGitCommonDir: overrides.readGitCommonDir ?? ((projectDir) => gitSync(['rev-parse', '--git-common-dir'],
+      { cwd: projectDir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
     )),
     readCampaignEntries: overrides.readCampaignEntries ?? readCampaignEntries,
     probeDaemon: overrides.probeDaemon ?? probeRunningDaemon,
@@ -457,6 +455,7 @@ function repositoryCampaign(
     if (!name) return { reason: `Git common directory did not identify a repository name: ${commonDir}` };
     return { name, source: 'repository' };
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return { reason: `Cannot resolve a repository campaign: ${errorMessage(error)}` };
   }
 }
@@ -863,6 +862,7 @@ export async function cmdShipPreflightWithDeps(
     else renderHuman(report, deps.stdout);
     return (report.briefErrors?.length ?? 0) > 0 || report.workflow?.error ? EXIT_CODE.failed : EXIT_CODE.completed;
   } catch (error) {
+    rethrowGitNotAnswered(error);
     deps.stderr.write(`ship-preflight: ${errorMessage(error)}\n`);
     return EXIT_CODE.failed;
   }

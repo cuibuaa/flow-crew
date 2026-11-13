@@ -1,7 +1,7 @@
 import { ResearchInstrumentSchema } from '../../research-instrument.js';
 import { parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 // Bind task-frozen identities once; inventory ordinary output through Git and retain planner matching for reporting.
-import { spawnSync } from "node:child_process";
+import { gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { basename, dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { normalizedProjectPath, normalizedProjectContentPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
@@ -14,8 +14,8 @@ export function listProjectFiles(
   options: { skipDirectory?: (relativePath: string) => boolean; complete?: boolean } = {},
 ): string[] {
   if (!options.complete) {
-    const inventory = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'], {
-      cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024,
+    const inventory = gitResultSync(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'], {
+      cwd: projectDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
     });
     if (inventory.status === 0) return [...new Set(inventory.stdout.split('\0'))]
@@ -56,12 +56,13 @@ export function listProjectFilesAt(projectDir: string, rawRoot: string, followRo
     if (stat.isSymbolicLink()) {
       try {
         if (followRootAlias && statSync(absoluteRoot).isDirectory()) return [root, ...listProjectFiles(absoluteRoot, options).map(path => `${root}/${path}`)];
-      } catch (error) { if (options.complete) throw error; /* retain a dangling alias as a leaf */ }
+      } catch (error) { rethrowGitNotAnswered(error); if (options.complete) throw error; /* retain a dangling alias as a leaf */ }
       return [root];
     }
     if (stat.isFile()) return [root];
     if (!stat.isDirectory()) return [];
   } catch (error) {
+    rethrowGitNotAnswered(error);
     const code = (error as NodeJS.ErrnoException).code;
     if (options.complete && code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
     return [];

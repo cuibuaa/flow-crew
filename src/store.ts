@@ -8,7 +8,7 @@ import { atomicWrite, writeFileSync, appendFileSync, closeSync, ftruncateSync, m
 import { retireRunScratch } from './invocation-scratch.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { basename, dirname, join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
@@ -996,14 +996,13 @@ export function initializeReservedRun(
 /** Return the current git HEAD SHA for `projectDir`, or undefined when it is not a git repo / git is unavailable. */
 function captureGitHead(projectDir: string): string | undefined {
   try {
-    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+    const sha = gitSync(['rev-parse', 'HEAD'], {
       cwd: projectDir,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
     }).trim();
     return /^[0-9a-f]{7,40}$/.test(sha) ? sha : undefined;
-  } catch { /* not a git repo, or git not installed — fall back to LLM extraction */
+  } catch (error) { rethrowGitNotAnswered(error); /* not a git repo, or git not installed — fall back to LLM extraction */
     return undefined;
   }
 }

@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
 import { writeFileSync } from './engine-fs.js';
 import { createInvocationScratch } from './invocation-scratch.js';
+import { GitNotAnswered } from './git-facts.js';
 
 export const RecordedCommandSchema = z.object({
   command: z.string().min(1),
@@ -15,9 +16,11 @@ export type RecordedCommand = z.infer<typeof RecordedCommandSchema>;
 // the command; neither native event fields nor child-written receipts own it.
 const client = `const net = require('node:net');
 const socket = net.connect(process.argv[2]);
+let response = '';
 socket.setTimeout(65000, () => socket.destroy(new Error('Recorder response timed out')));
 socket.on('connect', () => socket.end(process.argv[3]));
-socket.on('data', chunk => process.stdout.write(chunk));
+socket.on('data', chunk => { response += chunk; process.stdout.write(chunk); });
+socket.on('end', () => { try { if (JSON.parse(response).code === 'GIT_NOT_ANSWERED') process.exitCode = 1; } catch {} });
 socket.on('error', error => { console.error(error.message); process.exitCode = 1; });
 `;
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -30,6 +33,7 @@ export async function startCommandRecorder(runDir: string,
   const clientPath = join(scratch.path, 'record-command.cjs');
   writeFileSync(clientPath, client, { mode: 0o600 });
   const controller = new AbortController(), sockets = new Set<Socket>(), jobs = new Set<Promise<void>>();
+  let failure: GitNotAnswered | undefined;
   const server = createServer({ allowHalfOpen: true }, socket => {
     sockets.add(socket);
     socket.on('error', () => { /* a disconnected caller cannot publish facts */ });
@@ -47,7 +51,14 @@ export async function startCommandRecorder(runDir: string,
           if (controller.signal.aborted || socket.destroyed) return;
           const request = RecordedCommandSchema.parse(JSON.parse(input));
           socket.end(JSON.stringify(await execute(request, controller.signal)) + '\n');
-        } catch (error) { socket.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }) + '\n'); }
+        } catch (error) {
+          if (error instanceof GitNotAnswered) {
+            failure ??= error;
+            controller.abort();
+          }
+          socket.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error),
+            ...(error instanceof GitNotAnswered ? { code: error.code } : {}) }) + '\n');
+        }
       })();
       jobs.add(job);
       void job.finally(() => jobs.delete(job));
@@ -65,8 +76,10 @@ export async function startCommandRecorder(runDir: string,
       controller.abort();
       for (const socket of sockets) socket.destroy();
       await Promise.allSettled([...jobs]);
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      scratch.cleanup();
+      try {
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      } finally { scratch.cleanup(); }
+      if (failure) throw failure;
     },
   };
 }

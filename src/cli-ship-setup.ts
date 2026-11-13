@@ -2,7 +2,7 @@ import { errorMessage, within } from './source_services/cli-inputs.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { createHash } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
-import { spawn } from 'node:child_process';
+import { runGit, rethrowGitNotAnswered } from './git-facts.js';
 import { atomicWrite, copyFileSync, mkdirSync, rmSync, symlinkSync } from './engine-fs.js';
 import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -23,7 +23,6 @@ import {
   type BriefInputVerification,
   type ShipInputFileSystem,
 } from './ship-inputs.js';
-import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -106,7 +105,6 @@ export interface GitWorktreeRequest {
   branch: string;
   /** The managed setup transaction atomically created this branch already. */
   branchAlreadyCreated?: boolean;
-  timeoutMs?: number;
   onProgress?: (progress: GitCommandProgress) => void;
 }
 
@@ -125,7 +123,6 @@ export interface GitCommandRequest {
   command: 'git';
   args: string[];
   cwd: string;
-  timeoutMs?: number;
   onProgress?: (progress: GitCommandProgress) => void;
 }
 
@@ -139,23 +136,9 @@ function bounded(value: string, maximum = 24 * 1024): string {
   return `[... ${bytes.length - maximum} earlier bytes omitted ...]\n${bytes.subarray(bytes.length - maximum).toString('utf-8')}`;
 }
 
-const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
+const runGitCommand: GitCommandRunner = async (request) => {
   const startedAt = Date.now();
-  const child = spawn(
-    request.command,
-    request.args,
-    {
-      cwd: request.cwd,
-      env: process.env,
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: request.timeoutMs ?? 5 * 60 * 1_000,
-    },
-  );
-  let stdout = '';
-  let stderr = '';
-  let launchError: string | undefined;
-  let settled = false;
+  let stdout = '', stderr = '';
   const reportProgress = (): void => request.onProgress?.({
     elapsedMs: Math.max(0, Date.now() - startedAt),
     message: `${request.args.slice(0, 2).join(' ')} still running`,
@@ -163,28 +146,15 @@ const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
   reportProgress();
   const progressTimer = setInterval(reportProgress, 15_000);
   progressTimer.unref();
-  child.stdout?.on('data', (chunk: Buffer | string) => {
-    stdout = bounded(stdout + chunk.toString());
-  });
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr = bounded(stderr + chunk.toString());
-  });
-  child.once('error', (error) => {
-    launchError = error.message;
-  });
-  child.once('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    clearInterval(progressTimer);
-    settle({
-      exitCode: code,
-      stdout,
-      stderr,
-      ...(launchError ? { error: launchError } : {}),
-      ...(!launchError && signal ? { error: `Git ended by signal ${signal}` } : {}),
+  try {
+    const result = await runGit(request.args, {
+      cwd: request.cwd, env: process.env,
+      onStdout: chunk => { stdout = bounded(stdout + chunk.toString()); },
+      onStderr: chunk => { stderr = bounded(stderr + chunk.toString()); },
     });
-  });
-});
+    return { exitCode: result.status, stdout, stderr, ...(result.error ? { error: result.error.message } : {}) };
+  } finally { clearInterval(progressTimer); }
+};
 
 /** Map the declared setup identity to one argv-safe Git operation. */
 export function createGitWorktree(
@@ -197,7 +167,6 @@ export function createGitWorktree(
       ? ['worktree', 'add', '--', request.targetDir, request.branch.replace(/^refs\/heads\//, '')]
       : ['worktree', 'add', '-b', request.branch, '--', request.targetDir, request.base],
     cwd: request.projectDir,
-    ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
     ...(request.onProgress ? { onProgress: request.onProgress } : {}),
   });
 }
@@ -382,6 +351,7 @@ async function verifyDeclaredInputsAgainstSourceAndBase(
         cwd: projectDir,
       });
     } catch (error) {
+      rethrowGitNotAnswered(error);
       response = { exitCode: null, error: errorMessage(error) };
     }
     const baseRefExists = response.exitCode === 0 && !response.error;
@@ -624,6 +594,7 @@ async function prepareManagedWorktree(
       cwd: request.projectDir,
     });
   } catch (error) {
+    rethrowGitNotAnswered(error);
     base = { exitCode: null, error: errorMessage(error) };
   }
   if (base.exitCode !== 0 || base.error) {
@@ -652,6 +623,7 @@ async function prepareManagedWorktree(
       cwd: request.projectDir,
     });
   } catch (error) {
+    rethrowGitNotAnswered(error);
     branch = { exitCode: null, error: errorMessage(error) };
   }
   if (branch.exitCode !== 0 || branch.error) {
@@ -698,6 +670,7 @@ async function rollbackOwnedFailedWorktree(
       ));
     }
   } catch (error) {
+    rethrowGitNotAnswered(error);
     diagnostics.push(`could not inspect worktree residue: ${errorMessage(error)}`);
   }
 
@@ -714,6 +687,7 @@ async function rollbackOwnedFailedWorktree(
         ? 'removed registered partial worktree'
         : `Git could not remove registered partial worktree: ${worktreeFailureReason(removed)}`);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       diagnostics.push(`Git could not remove registered partial worktree: ${errorMessage(error)}`);
     }
   }
@@ -739,6 +713,7 @@ async function rollbackOwnedFailedWorktree(
       ? 'removed the exact invocation-created branch ref'
       : `branch changed or could not be compare-deleted; left in place: ${gitOperationFailure('Git branch rollback', deleted)}`);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     diagnostics.push(`could not compare-delete invocation-created branch: ${errorMessage(error)}`);
   }
   return diagnostics;
@@ -757,6 +732,7 @@ async function verifyReusableWorktree(
       cwd: request.projectDir,
     });
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return { reusable: false, reason: `cannot inspect Git worktree inventory: ${errorMessage(error)}` };
   }
   if (inventory.exitCode !== 0 || inventory.error) {
@@ -792,6 +768,7 @@ async function verifyReusableWorktree(
       cwd: request.projectDir,
     });
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return { reusable: false, reason: `cannot resolve the requested base: ${errorMessage(error)}` };
   }
   if (base.exitCode !== 0 || base.error) {
@@ -1098,6 +1075,7 @@ export async function runShipSetup(
   try {
     facts.estimatedCopyBytes = await estimateInputCopyBytes(sourceVerification, projectDir, targetDir, deps);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return refuse([{ phase: 'target', reason: errorMessage(error),
       repair: 'Resolve the input estimate refusal, then rerun ship-setup. No worktree or input copy was started.' }]);
   }
@@ -1111,7 +1089,6 @@ export async function runShipSetup(
     }
     facts = { ...facts, worktreeReused: true };
   } else {
-    const configured = deps.managedWorktreeCreation ? loadEngineDefaults() : undefined;
     let ownership: ManagedWorktreeOwnership | undefined;
     let preparedRequest = worktreeRequest;
     if (deps.managedWorktreeCreation) {
@@ -1129,7 +1106,6 @@ export async function runShipSetup(
     const creationRequest: GitWorktreeRequest = deps.managedWorktreeCreation
       ? {
           ...preparedRequest,
-          timeoutMs: configured?.git_worktree_add_timeout_ms,
           onProgress: (progress) => {
             deps.stderr.write(`${progress.message} (${Math.floor(progress.elapsedMs / 1_000)}s elapsed)\n`);
           },
@@ -1139,6 +1115,7 @@ export async function runShipSetup(
     try {
       git = await deps.createWorktree(creationRequest);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       git = { exitCode: null, error: errorMessage(error) };
     }
     if (git.exitCode !== 0 || git.error) {
@@ -1316,6 +1293,7 @@ export async function cmdShipSetupWithDeps(
     else renderHuman(report, writer);
     return report.state === 'ready' ? 0 : 1;
   } catch (error) {
+    rethrowGitNotAnswered(error);
     deps.stderr.write(`ship-setup: ${errorMessage(error)}\n`);
     if (!(error instanceof CliUsageError)) deps.stderr.write(`${shipSetupUsage()}\n`);
     return 1;

@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { admitStageDuration, stageDurationLimit } from '../../stage-duration.js';
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { adapterInputLimit, admitInputLimit } from '../../adapter-input.js';
@@ -281,6 +282,7 @@ export function prepareWorkflowLaunch(
     }
     if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 

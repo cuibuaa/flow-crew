@@ -1,5 +1,5 @@
 /** Review routing receives facts from engine/git authorities, never author narrative. */
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { readFileSync } from 'node:fs';
 import { runRecordPath } from './run-layout.js';
 import type { StoreState } from './store.js';
@@ -10,7 +10,7 @@ import { adapterInputLimit, INPUT_RESERVE_CHARS } from './adapter-input.js';
 import type { Adapter } from './adapters/base.js';
 
 const MAX_BUFFER = 8_000_000;
-const git = (projectDir: string, args: string[]) => execFileSync('git', args, { cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: MAX_BUFFER });
+const git = (projectDir: string, args: string[]) => gitSync(args, { cwd: projectDir, encoding: 'utf8', maxBuffer: MAX_BUFFER });
 const escapedLength = (text: string) => JSON.stringify(text).length - 2;
 
 /** Every changed path, whatever the size of the change. */
@@ -18,7 +18,7 @@ export function changedPaths(projectDir: string, state: StoreState): string[] {
   try {
     return [...new Set([...git(projectDir, ['diff', '--name-only', '-z', state.baseCommit ?? 'HEAD', '--']).split('\0'),
       ...git(projectDir, ['ls-files', '--others', '--exclude-standard', '-z']).split('\0')].filter(Boolean))];
-  } catch { return []; }
+  } catch (error) { rethrowGitNotAnswered(error); return []; }
 }
 
 /** Complete legacy facts, or bounded counts. Any unreadable piece makes the whole diff unavailable. */
@@ -48,7 +48,7 @@ export function reviewFacts(projectDir: string, directory: string, state: StoreS
         diff += failure.stdout;
       }
     }
-  } catch { return { ...counts(), unavailable: true as const }; }
+  } catch (error) { rethrowGitNotAnswered(error); return { ...counts(), unavailable: true as const }; }
   const measured = counts();
   return measured.encodedDiffChars + measured.nonDiffChars > room ? measured : { files, diff, validation };
 }

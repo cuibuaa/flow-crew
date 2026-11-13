@@ -1,6 +1,6 @@
 import { runRecordPath } from './run-layout.js';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { gitResultSync, rethrowGitNotAnswered } from './git-facts.js';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { safeEvidencePath } from './engine-owned-carriers.js';
@@ -192,7 +192,7 @@ export function captureProjectTree(projectDir: string, brief = '', runDir?: stri
     }).filter(file => file.content.state !== 'absent');
     if (files.some(file => file.content.state === 'unavailable' || file.targetContent?.state === 'unavailable')) return { hash: null, files, reason: 'Source inventory contains unavailable content' };
     return { hash: createHash('sha256').update(JSON.stringify(files)).digest('hex'), files };
-  } catch (error) { return { hash: null, files: [], reason: String(error) }; }
+  } catch (error) { rethrowGitNotAnswered(error); return { hash: null, files: [], reason: String(error) }; }
 }
 
 export function changedTreeFiles(before: ProjectTree, after: ProjectTree): TreeFile[] {
@@ -205,8 +205,8 @@ export function changedTreeFiles(before: ProjectTree, after: ProjectTree): TreeF
 }
 
 export function projectCommit(projectDir: string): string | undefined {
-  const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], {
-    cwd: projectDir, encoding: 'utf8', timeout: 15_000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  const result = gitResultSync(['rev-parse', '--verify', 'HEAD^{commit}'], {
+    cwd: projectDir, encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
   });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
@@ -222,18 +222,18 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   let commit: string | undefined;
   let selection: unknown;
   try { const plan = JSON.parse(readFileSync(baselinePath, 'utf8')); commit = plan.baseCommit; selection = plan.baseline?.discovery; } catch { /* no Git baseline */ }
-  const diff = commit ? spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--binary', commit, '--', '.', ':(exclude)**/.env*', ':(exclude)**/auth.json', ':(exclude)**/credentials.json', ':(exclude)**/installation_id'], {
-    cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+  const diff = commit ? gitResultSync(['diff', '--no-ext-diff', '--no-textconv', '--binary', commit, '--', '.', ':(exclude)**/.env*', ':(exclude)**/auth.json', ':(exclude)**/credentials.json', ':(exclude)**/installation_id'], {
+    cwd: projectDir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
   }) : undefined;
   let patch = diff?.status === 0 ? diff.stdout : 'Git patch unavailable; inspect current files and structured changed-file identities in the ledger.\n';
   if (commit) {
-    const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: projectDir,
-      encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+    const untracked = gitResultSync(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: projectDir,
+      encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
     if (untracked.status !== 0) patch += '\nUntracked inventory unavailable; inspect current files.\n';
     else for (const path of untracked.stdout.split('\0').filter(path => path && safeEvidencePath(path))) {
-      const added = spawnSync('git', ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--binary', '--', '/dev/null', path], {
-        cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+      const added = gitResultSync(['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--binary', '--', '/dev/null', path], {
+        cwd: projectDir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
       });
       patch += added.status === 0 || added.status === 1 ? added.stdout : `\nPatch unavailable for ${JSON.stringify(path)}; inspect the current file.\n`;
     }

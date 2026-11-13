@@ -38,7 +38,6 @@ Parser field names are listed exactly.
 | `scheduler_heartbeat_interval_ms` | 2000 | Scheduler progress publication cadence |
 | `scheduler_stall_threshold_ms` | 120000 | Nonadvancing scheduler warning threshold |
 | `scheduler_stall_observer_poll_ms` | 5000 | Independent observer polling cadence |
-| `git_worktree_add_timeout_ms` | 1800000 | Worktree checkout command bound |
 | `adapter` | `auto` | Runtime backend choice |
 | `model` | `default` | Inherit adapter configuration unless pinned |
 | `reasoning_effort` | `default` | Inherit adapter effort unless pinned |

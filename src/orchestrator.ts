@@ -1,3 +1,4 @@
+import { gitAsync, rethrowGitNotAnswered } from './git-facts.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { runRecordPath } from './run-layout.js';
 import { mkdirSync } from './engine-fs.js';
@@ -549,11 +550,12 @@ export class Orchestrator {
       // systemctl/git call must not wedge every other task's tick.
       const executing = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE })
         .filter((task) => task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.CANCELLING);
-      await Promise.allSettled(executing.map((task) => (
+      const observations = await Promise.allSettled(executing.map((task) => (
         task.status === TASK_STATUS.CANCELLING
           ? this.cancellations.cancelTask(task.id)
           : this.tickTask(task)
       )));
+      for (const observation of observations) if (observation.status === 'rejected') rethrowGitNotAnswered(observation.reason);
       // Terminal tasks remain outbox owners until business ACK. This sweep is
       // independent of front-end hooks and survives daemon restarts.
       await this.sessionPush.sweep();
@@ -957,6 +959,7 @@ export class Orchestrator {
       let reconciled;
       try { reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId); }
       catch (error) {
+        rethrowGitNotAnswered(error);
         const reason = `${leading}CONTINUATION_INCOMPATIBLE: ${error instanceof Error ? error.message : String(error)}`;
         recordContinuationRefusal(task.projectDir, bound.runId, reason);
         this.failClosed(task, reason);
@@ -1166,26 +1169,27 @@ export class Orchestrator {
 export class NodeGit implements GitAdapter {
   async findCommitByPrefix(projectDir: string, prefix: string): Promise<string | undefined> {
     try {
-      const { stdout } = await execFileAsync('git', ['log', '--format=%H %s', '-n', '50', '--grep', prefix], { cwd: projectDir });
+      const stdout = await gitAsync(['log', '--format=%H %s', '-n', '50', '--grep', prefix], { cwd: projectDir });
       return stdout.trim().split(/\r?\n/).find(Boolean)?.split(/\s+/)[0];
-    } catch {
+    } catch (error) {
+      rethrowGitNotAnswered(error);
       return undefined;
     }
   }
 
   async hasUncommittedChanges(projectDir: string): Promise<boolean> {
     try {
-      const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: projectDir });
+      const stdout = await gitAsync(['status', '--porcelain'], { cwd: projectDir });
       return stdout.trim().length > 0;
-    } catch {
+    } catch (error) {
+      rethrowGitNotAnswered(error);
       return false;
     }
   }
 
   async findCommitSince(projectDir: string, isoSince: string): Promise<{ sha: string; subject: string } | undefined> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
+      const stdout = await gitAsync(
         ['log', `--since=${isoSince}`, '--format=%H%x09%s', '-n', '1'],
         { cwd: projectDir }
       );
@@ -1193,7 +1197,8 @@ export class NodeGit implements GitAdapter {
       if (!line) return undefined;
       const [sha, ...rest] = line.split('\t');
       return { sha, subject: rest.join('\t') };
-    } catch {
+    } catch (error) {
+      rethrowGitNotAnswered(error);
       return undefined;
     }
   }

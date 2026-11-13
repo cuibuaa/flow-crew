@@ -20,6 +20,7 @@ import { reconcileUnresolvedStageObligations } from '../sched_settlement/complet
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { withEngineIntegrity } from '../../engine-integrity.js';
 import { spawnOwnedCommand } from '../../adapters/base.js';
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 import type { PostTerminateHook } from '../../store.js';
 
 import { parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
@@ -295,6 +296,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             terminalStatus,
             verdictPath: sourcePath,
           }).catch((err) => {
+            rethrowGitNotAnswered(err);
             log.warn({ runId: ctx.runId, err: String(err) }, 'post_terminate_hook threw unexpectedly');
           });
         }
@@ -370,9 +372,9 @@ export async function runPostTerminateHook(
 
   await withEngineIntegrity({ projectDir: ctx.projectDir, runDir: ctx.runDir,
     stageId: '_terminal_hook',
-  }, () => new Promise<void>((resolve) => {
-    let settled = false;
-    const { child, stop } = spawnOwnedCommand(hook.command, args, {
+  }, () => new Promise<void>((resolve, reject) => {
+    let spawnError: Error | undefined;
+    const { child, stop, publication } = spawnOwnedCommand(hook.command, args, {
       cwd: ctx.projectDir,
       env: hookEnv,
     });
@@ -387,32 +389,33 @@ export async function runPostTerminateHook(
     child.stdout?.on('data', (d) => chunks.push(d.toString()));
     child.stderr?.on('data', (d) => chunks.push(d.toString()));
     const timer = setTimeout(() => {
-      if (settled) return;
       log.warn({ runId: ctx.runId, command: hook.command, timeoutMs }, 'post_terminate_hook exceeded timeout, killing');
       stop();
     }, timeoutMs);
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
+    child.once('error', (err) => { spawnError = err; });
+    child.once('close', (code, signal) => {
       clearTimeout(timer);
-      log.warn({ runId: ctx.runId, command: hook.command, err: String(err) }, 'post_terminate_hook spawn failed');
-      try { writeFileSync(logPath, chunks.join('') + `\nspawn error: ${err}\n`, 'utf-8'); } catch { /* noop */ }
-      resolve();
-    });
-    child.on('close', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      chunks.push(`\n--- exit ---\ncode: ${code}\nsignal: ${signal}\ncompleted_at: ${new Date().toISOString()}\n`);
-      try { writeFileSync(logPath, chunks.join(''), 'utf-8'); } catch { /* noop */ }
-      if (code !== 0) {
-        log.warn({ runId: ctx.runId, command: hook.command, exitCode: code, signal }, 'post_terminate_hook exited non-zero (best-effort, ignored)');
-      } else {
-        log.info({ runId: ctx.runId, command: hook.command }, 'post_terminate_hook completed');
-      }
-      resolve();
+      // Publication belongs to this command; a missing fact must reach its
+      // awaited completion before any hook-result evidence is written.
+      void publication.then(() => {
+        if (spawnError) {
+          log.warn({ runId: ctx.runId, command: hook.command, err: String(spawnError) }, 'post_terminate_hook spawn failed');
+          try { writeFileSync(logPath, chunks.join('') + `\nspawn error: ${spawnError}\n`, 'utf-8'); } catch { /* noop */ }
+          resolve();
+          return;
+        }
+        chunks.push(`\n--- exit ---\ncode: ${code}\nsignal: ${signal}\ncompleted_at: ${new Date().toISOString()}\n`);
+        try { writeFileSync(logPath, chunks.join(''), 'utf-8'); } catch { /* noop */ }
+        if (code !== 0) {
+          log.warn({ runId: ctx.runId, command: hook.command, exitCode: code, signal }, 'post_terminate_hook exited non-zero (best-effort, ignored)');
+        } else {
+          log.info({ runId: ctx.runId, command: hook.command }, 'post_terminate_hook completed');
+        }
+        resolve();
+      }, reject);
     });
   })).catch((error: unknown) => {
+    rethrowGitNotAnswered(error);
     const message = `ENGINE_STATE_REFUSED: terminal hook was not executed: ${String(error)}`;
     log.warn({ runId: ctx.runId, message }, 'post_terminate_hook refused (best-effort, ignored)');
     writeFileSync(logPath, message + '\n', 'utf8');

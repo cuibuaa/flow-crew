@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from './git-facts.js';
 import { refuseStageDuration, stageDurationLimit } from './stage-duration.js';
 import { classifyEnding } from './attempt-ending.js';
 import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
@@ -1194,6 +1195,7 @@ export async function runStage(
       // agent message and may quote an error string without any adapter failure.
     }
   } catch (error) {
+    rethrowGitNotAnswered(error);
     observeAdapterSettlement();
     if (!aggregateAbortSignal.aborted) throw error;
     result = cancelledResult();
@@ -1395,6 +1397,7 @@ export async function runStage(
     await opts.settlementBoundary?.('attempt_closed');
     final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     boundaryError = error;
     final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex,
       { exitCode: 1, error: error instanceof Error ? error.message : String(error) });

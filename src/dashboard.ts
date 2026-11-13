@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from './git-facts.js';
 import { readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { normalizeNativeEvent } from './adapters/native-events.js';
@@ -1243,7 +1244,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         });
         updated++;
       }
-    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { rethrowGitNotAnswered(error); return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
     invalidateTaskListCache();
     return { ok: true, updated, name: newName };
   });
@@ -1266,7 +1267,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         });
         orphaned++;
       }
-    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { rethrowGitNotAnswered(error); return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
     const historyPath = join(campaignFsRoot(), `${campaignId}.jsonl`);
     let removedHistory = false;
     try {

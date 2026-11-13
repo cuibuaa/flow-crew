@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { stageWorkPath } from '../../run-layout.js';
 import { atomicWrite } from '../../engine-fs.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
@@ -92,6 +93,7 @@ export async function executeReadyBatch(
         const boundary = createStageSettlementBoundary({ stage, projectDir, runId, context: ordinaryScopeContext }, { reconcileCompletedStageAttempts });
         return await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary);
      } catch (err) {
+       rethrowGitNotAnswered(err);
        // A stage that THROWS (e.g. missing/invalid agent yaml at runtime) must not
        // reject Promise.all and unwind out of the loop, which would leave run.json
        // stuck 'running' forever (orphan). Degrade to a normal stage failure so the

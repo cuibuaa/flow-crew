@@ -1,7 +1,7 @@
 import { renderLegacyResearchSummary, readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { relative } from 'node:path';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
@@ -39,14 +39,13 @@ const MAX_FILES = 40;
 
 function runGit(projectDir: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, {
+    return gitSync(args, {
       cwd: projectDir,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 8000,
       maxBuffer: 8 * 1024 * 1024,
     });
-  } catch { /* not a git repo, bad ref, or git unavailable */
+  } catch (error) { rethrowGitNotAnswered(error); /* not a git repo, bad ref, or git unavailable */
     return null;
   }
 }

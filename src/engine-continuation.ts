@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from './git-facts.js';
 import { runRecordPath } from './run-layout.js';
 /** Validate persisted execution contracts before any continuation is queued or
  * claimed. Build identity is provenance; supported state, not hash equality,
@@ -14,7 +15,7 @@ export function recordContinuationRefusal(projectDir: string, runId: string, rea
     updateOperationalRunStateAtPath(runDir(projectDir, runId), state => {
       if (state.status !== RUN_STATUS.CANCELLED) state.continuationFailure = { at: new Date().toISOString(), reason, generation: engineGeneration() };
     });
-  } catch { /* A corrupt carrier may be unwritable; the control RPC still reports the refusal. */ }
+  } catch (error) { rethrowGitNotAnswered(error); /* A corrupt carrier may be unwritable; the control RPC still reports the refusal. */ }
 }
 
 export function assertContinuationCompatible(projectDir: string, runId: string): StoreState {

@@ -3,7 +3,7 @@ import { runRecordPath } from './run-layout.js';
 /** Pre-admission authorship. No task/run is registered until this returns a brief. */
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { z } from 'zod';
@@ -80,7 +80,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   const adapter = options.adapterInstance ?? await loadAdapterByName(adapterName);
   const durationLimit = admitStageDuration(original);
   const inputLimit = admitInputLimit(original, adapterInputLimit(adapter));
-  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
+  const head = gitSync(['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
   const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA, inputLimit, durationLimit]));
   const root = join(fcGlobalDir(), 'brief-writing');
   const evidenceDir = join(root, identity);
@@ -229,10 +229,10 @@ function inputPathFailure(project: string, input: string): string | undefined {
   try {
     const canonical = relative(project, realpathSync(path));
     if (canonical === '..' || canonical.startsWith(`..${sep}`)) return `Input resolves outside repository: ${input}`;
-    const tracked = execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD'], {
+    const tracked = gitSync(['ls-tree', '-r', '--name-only', '-z', 'HEAD'], {
       cwd: project, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     }).split('\0').filter(Boolean);
     if (tracked.some(name => name === rel || name.startsWith(rel ? `${rel}/` : ''))) return;
-  } catch { /* Missing paths and non-Git inputs cannot exist in the target. */ }
+  } catch (error) { rethrowGitNotAnswered(error); /* Missing paths and non-Git inputs cannot exist in the target. */ }
   return `Input does not exist in the target Git tree: ${input}`;
 }

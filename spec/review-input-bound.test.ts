@@ -12,6 +12,7 @@ import { providerFailureFromEvent } from '../src/provider-result.js';
 import { loadEngineDefaults } from '../src/config.js';
 import { adapterInputLimit, INPUT_RESERVE_CHARS } from '../src/adapter-input.js';
 import { decisionInput } from '../src/decision-context.js';
+import { GitNotAnswered } from '../src/git-facts.js';
 import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
 import { decisionSchema, POST_AUTHOR_PROMPT } from '../src/decision-graph.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
@@ -25,15 +26,15 @@ import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
-type ExecFileSync = typeof import('node:child_process').execFileSync;
-// Lets one case replace git's execFileSync without importing node:child_process in this spec (spec purity).
-const gitOverride = vi.hoisted(() => ({ impl: undefined as undefined | ((original: ExecFileSync, command: string, args: string[], options: object) => unknown) }));
+type SpawnSync = typeof import('node:child_process').spawnSync;
+// Inject native completion facts at the shared owner's current transport.
+const gitOverride = vi.hoisted(() => ({ impl: undefined as undefined | ((original: SpawnSync, command: string, args: string[], options: object) => unknown) }));
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
-  const execFileSync = ((command: string, args: string[], options: object) => gitOverride.impl
-    ? gitOverride.impl(actual.execFileSync, command, args, options)
-    : actual.execFileSync(command, args, options as never)) as ExecFileSync;
-  return { ...actual, execFileSync };
+  const spawnSync = ((command: string, args: string[], options: object) => gitOverride.impl
+    ? gitOverride.impl(actual.spawnSync, command, args, options)
+    : actual.spawnSync(command, args, options as never)) as SpawnSync;
+  return { ...actual, spawnSync };
 });
 
 const CODEX_LIMIT = 1_048_576;
@@ -158,14 +159,23 @@ describe('the review decision gets the whole diff or none of it', () => {
     ['untracked', { status: 2, stdout: 'partial' }],
     ['untracked', { status: 1, stdout: '', stderr: "Could not access 'missing'" }],
     ['untracked', { status: 1, stdout: 'partial', stderr: 'error: read failed' }],
-    ['paths', { code: 'ETIMEDOUT', stdout: 'partial' }],
+    ['paths', { code: 'ETIMEDOUT', status: null, signal: 'SIGTERM', stdout: 'partial' }],
   ])('an incomplete %s read cannot pass as complete even with a huge declared limit (%j)', async (piece, failure) => {
     writeFileSync(join(project, 'new.txt'), 'untracked');
     const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
     gitOverride.impl = (original, command, args, options) => {
-      if (command === 'git' && (piece === 'paths' ? args[0] === 'ls-files' : piece === 'untracked' ? args.includes('--no-index') : args.includes('--no-textconv') && !args.includes('--no-index'))) throw failure;
+      if (command === 'git' && (piece === 'paths' ? args[0] === 'ls-files' : piece === 'untracked' ? args.includes('--no-index') : args.includes('--no-textconv') && !args.includes('--no-index'))) return {
+        ...failure, signal: 'signal' in failure ? failure.signal : null, stderr: 'stderr' in failure ? failure.stderr : '',
+        ...('code' in failure ? { error: Object.assign(new Error('Incomplete child read'), { code: failure.code }) } : {}),
+      };
       return original(command, args, options as never);
     };
+    if ('signal' in failure) {
+      const state = readRunState(project, created.runId);
+      expect(() => decisionInput(stage, project, created.runDirPath, state, 100_000_000)).toThrow(GitNotAnswered);
+      expect(readRunState(project, created.runId)).toEqual(state);
+      return;
+    }
     const input = decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId), 100_000_000);
     expect(input.adapter).toBeDefined();
     expect(input.user).not.toContain('partial');

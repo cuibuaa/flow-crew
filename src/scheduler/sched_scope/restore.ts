@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { artifactRootContains } from '../../artifact-location.js';
 import { prospectivePhysicalPath } from '../../engine-owned-carriers.js';
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
-import { spawnSync } from "node:child_process";
+import { gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { type RepairFileImage, compareRepairFileContents, describeRepairError, gitObjectIdForPath, readRepairFileImage, repairFileMaterializedBytes } from './file-images.js';
 
 interface ProjectPathRestoreResult {
@@ -104,11 +104,10 @@ export function restoreProjectPath(
       if (before.mode !== undefined) chmodSync(temporary, before.mode);
     } else if (gitBlob) {
       const descriptor = openSync(temporary, 'wx', before.mode ?? 0o600);
-      let result: ReturnType<typeof spawnSync>;
+      let result: ReturnType<typeof gitResultSync>;
       try {
-        result = spawnSync('git', ['cat-file', 'blob', gitBlob], {
-          cwd: projectDir, stdio: ['ignore', descriptor, 'pipe'], timeout: 15_000,
-          maxBuffer: 1_048_576,
+        result = gitResultSync(['cat-file', 'blob', gitBlob], {
+          cwd: projectDir, stdio: ['ignore', descriptor, 'pipe'], maxBuffer: 1_048_576,
         });
       } finally { closeSync(descriptor); }
       if (result.status !== 0 || result.error) throw new Error(`Git preimage ${gitBlob} could not be read`);
@@ -133,6 +132,7 @@ export function restoreProjectPath(
       ? { restored: true, ...(retainedPath ? { retainedPath } : {}) }
       : { restored: false, failure: `restored content verification failed for ${normalized}` };
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return { restored: false, failure: `could not restore ${normalized}: ${describeRepairError(error)}`,
       ...(retainedPath ? { retainedPath } : {}) };
   } finally {

@@ -2,7 +2,7 @@ import { runRecordPath } from './run-layout.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { errorMessage, within } from './source_services/cli-inputs.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
-import { spawn } from 'node:child_process';
+import { runGit, rethrowGitNotAnswered } from './git-facts.js';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
@@ -260,46 +260,25 @@ export function createLandOutputCapture(maximum = GIT_STDOUT_MAX_BYTES): LandOut
   };
 }
 
-const runLandGit: LandGitRunner = (request) => new Promise((settle) => {
-  const child = spawn(request.command, request.args, {
-    cwd: request.cwd,
-    env: process.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 5 * 60 * 1_000,
-  });
+const runLandGit: LandGitRunner = async (request) => {
   const stdoutCapture = createLandOutputCapture();
   const stderrCapture = createLandOutputCapture(GIT_STDERR_MAX_BYTES);
-  let launchError: string | undefined;
-  let settled = false;
-  child.stdout?.on('data', (chunk: Buffer | string) => {
-    stdoutCapture.append(chunk);
+  const result = await runGit(request.args, {
+    cwd: request.cwd, env: process.env,
+    onStdout: chunk => stdoutCapture.append(chunk),
+    onStderr: chunk => stderrCapture.append(chunk),
   });
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderrCapture.append(chunk);
-  });
-  child.once('error', (error) => {
-    launchError = error.message;
-  });
-  child.once('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    const stdout = stdoutCapture.finish();
-    const stderr = stderrCapture.finish();
-    const captureError = !stdout.complete
-      ? `Git stdout exceeded ${stdout.maximum} bytes; inspection output is incomplete`
-      : !stderr.complete
-        ? `Git stderr exceeded ${stderr.maximum} bytes; inspection output is incomplete`
-        : undefined;
-    settle({
-      exitCode: code,
-      stdout: stdout.value,
-      stderr: stderr.value,
-      ...(launchError || captureError ? { error: launchError ?? captureError } : {}),
-      ...(!launchError && !captureError && signal ? { error: `Git ended by signal ${signal}` } : {}),
-    });
-  });
-});
+  const stdout = stdoutCapture.finish(), stderr = stderrCapture.finish();
+  const captureError = !stdout.complete
+    ? `Git stdout exceeded ${stdout.maximum} bytes; inspection output is incomplete`
+    : !stderr.complete
+      ? `Git stderr exceeded ${stderr.maximum} bytes; inspection output is incomplete`
+      : undefined;
+  return {
+    exitCode: result.status, stdout: stdout.value, stderr: stderr.value,
+    ...(result.error || captureError ? { error: result.error?.message ?? captureError } : {}),
+  };
+};
 
 function resolveDependencies(overrides: LandDependencies): ResolvedLandDependencies {
   return {
@@ -448,6 +427,7 @@ async function checkedGit(
   try {
     response = await git(request);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return { ok: false, issue: { operation: request.operation, reason: errorMessage(error) } };
   }
   if (response.exitCode !== 0 || response.error) {
@@ -814,6 +794,7 @@ async function inspectInventory(
       issues.push({ operation: 'branch', reason: gitFailure(branchRequest, response) });
     }
   } catch (error) {
+    rethrowGitNotAnswered(error);
     issues.push({ operation: 'branch', reason: errorMessage(error) });
   }
 
@@ -1029,6 +1010,7 @@ async function destructiveStep(
   try {
     response = await git(request);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     response = { exitCode: null, error: errorMessage(error) };
   }
   const error = response.exitCode === 0 && !response.error
@@ -1175,6 +1157,7 @@ export async function runLand(
       inspected = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs, archive.worktreeProofDir);
       inspectionIssues.push(...inspected.issues);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       inspectionIssues.push({ operation: 'archive', reason: errorMessage(error) });
     }
   }
@@ -1297,6 +1280,7 @@ export async function runLand(
       }
       verifyLandArchive(projectDir, runDir, archive);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       return { ...contextual, state: 'refused', readyForRemoval: false,
         inspectionIssues: [...inspectionIssues, { operation: 'archive', reason: errorMessage(error) }],
         refusalReasons: ['archive proof no longer matches the source and destination'],
@@ -1494,6 +1478,7 @@ export async function cmdLandWithDeps(
         || report.state === 'removed_ledger_unconfirmed') return 1;
     return report.inspectionIssues.length === 0 ? 0 : 1;
   } catch (error) {
+    rethrowGitNotAnswered(error);
     deps.stderr.write(`land: ${errorMessage(error)}\n`);
     if (!(error instanceof CliUsageError)) deps.stderr.write(`${landUsage()}\n`);
     return 1;

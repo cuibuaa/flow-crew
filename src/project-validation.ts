@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { rethrowGitNotAnswered } from './git-facts.js';
 import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { stageLiveLogPath } from './stage-live-log.js';
@@ -196,6 +197,7 @@ export async function withValidationLoad(request: ValidationRunRequest, execute:
   let response: ValidationRunResponse;
   try { response = await execute(request); }
   catch (error) {
+    rethrowGitNotAnswered(error);
     if (error instanceof EngineStateError) throw error;
     response = { exitCode: null, error: errorMessage(error) };
   }
@@ -436,9 +438,9 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   for (const path of ['home/.fc', 'codex', 'runtime', 'home/.config']) {
     mkdirSync(join(environmentRoot, path), { recursive: true });
   }
-  const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
+  const launch = () => new Promise<ValidationRunResponse>((resolveResult, rejectResult) => {
   const started = Date.now();
-  const { child, stop } = spawnOwnedCommand(request.command, request.args, {
+  const { child, stop, publication } = spawnOwnedCommand(request.command, request.args, {
     cwd: request.cwd,
     env: environment.env,
     priority: request.priority,
@@ -483,7 +485,9 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     activity?.close();
     clearTimeout(timeout);
     request.abortSignal?.removeEventListener('abort', onAbort);
-    resolveResult({
+    // Identity publication belongs to this command. Join it before any caller
+    // can turn a retired child into validation evidence or start another command.
+    void Promise.resolve(publication).then(() => resolveResult({
       exitCode,
       ...((timedOut || request.abortSignal?.aborted || signal) ? { unfinished: true } : {}),
       stdout,
@@ -494,7 +498,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
       ...(error ? { error } : request.abortSignal?.aborted ? { error: 'Validation budget ended or control aborted' } : {}),
       ...(!error && timedOut ? { error: `Validation command timed out after ${timeoutMs}ms` } : {}),
       ...(!error && !timedOut && signal ? { error: `Validation process ended by signal ${signal}` } : {}),
-    });
+    }), rejectResult);
   };
   child.stdout?.on('data', (chunk: Buffer | string) => {
     outputBytes.stdout += Buffer.byteLength(chunk);
@@ -633,6 +637,7 @@ export async function runProjectValidationBaseline(
         timeoutMs: remaining, priority: dependencies.priority,
         ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
+      rethrowGitNotAnswered(error);
       response = { exitCode: null, ...(dependencies.abortSignal?.aborted ? { unfinished: true } : {}), error: errorMessage(error) };
     }
     const durationMs = response.durationMs ?? Math.max(0, now() - started);

@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { adapterInputLimit } from '../../adapter-input.js';
 import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
@@ -48,6 +49,7 @@ export async function runWorkflow(
   let launch;
   try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission, adapterInputLimit(adapter)); }
   catch (error) {
+    rethrowGitNotAnswered(error);
     const reason = error instanceof Error ? error.message : String(error);
     const policyRefusal = reason.startsWith('Deployment hold is active') || reason.startsWith('Cannot resume: iteration budget exhausted');
     if (existingRunId && !policyRefusal) recordContinuationRefusal(projectDir, existingRunId, reason);
@@ -107,6 +109,7 @@ export async function runWorkflow(
     resolvedAgentsDir, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   return settled = await runWorkflowIterations(baseStages, workflowYaml, maxIterations, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   } catch (error) {
+    rethrowGitNotAnswered(error);
     const reason = `Scheduler failed: ${error instanceof Error ? error.message : String(error)}`;
     log.error({ err: error }, reason);
     let publish: ((persist: () => void) => void) | undefined;

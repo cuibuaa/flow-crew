@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readRunLockWaits } from './run-lock.js';
+import { GitNotAnswered, gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { readResearchHistory, readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
@@ -957,7 +958,7 @@ async function cmdQuick(preview = false) {
       refusal = `Brief writing refused: ${error instanceof Error ? error.message : String(error)}`;
     }
     if (!refusal) try {
-      const git = (args: string[]) => execFileSync('git', args, {
+      const git = (args: string[]) => gitSync(args, {
         cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       });
       projectDir = git(['rev-parse', '--show-toplevel']).trim();
@@ -965,7 +966,8 @@ async function cmdQuick(preview = false) {
       if (git(['status', '--porcelain', '--untracked-files=normal']).length) {
         refusal = 'Launch refused: source working tree is dirty. Commit or remove source changes before automatic setup.';
       }
-    } catch {
+    } catch (error) {
+      rethrowGitNotAnswered(error);
       refusal = 'Launch refused: automatic setup requires a Git working tree with a committed HEAD.';
     }
     if (!refusal) {
@@ -999,6 +1001,7 @@ async function cmdQuick(preview = false) {
         projectDir, adapter: adapter || loadEngineDefaults().adapter, replay: !preview,
       });
     } catch (error) {
+      rethrowGitNotAnswered(error);
       const refusal = `Brief writing refused: ${error instanceof Error ? error.message : String(error)}`;
       if (!preview) recordLaunchRefusal(refusal);
       console.error(refusal);
@@ -1345,19 +1348,25 @@ async function cmdQuick(preview = false) {
   }, 2000);
 
   let finalState;
+  let factUnanswered = false;
   try {
     if (push) await refreshPush();
     finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, resolvedCampaign, inheritCampaignContext, briefAdmission);
+  } catch (error) {
+    factUnanswered = error instanceof GitNotAnswered;
+    throw error;
   } finally {
     clearInterval(progressTimer);
     clearInterval(pushTimer);
     if (push && foregroundTask) {
       await activePush;
-      registry.update(foregroundTask.id, {
-        status: !finalState ? 'failed' : isPausedRunStatus(finalState.status) ? 'deferred' : 'done',
-        completed_at: finalState?.completedAt,
-      });
-      await refreshPush();
+      if (!factUnanswered) {
+        registry.update(foregroundTask.id, {
+          status: !finalState ? 'failed' : isPausedRunStatus(finalState.status) ? 'deferred' : 'done',
+          completed_at: finalState?.completedAt,
+        });
+        await refreshPush();
+      }
     }
   }
   console.log(`FlowCrew run: ${finalState.runId}`);

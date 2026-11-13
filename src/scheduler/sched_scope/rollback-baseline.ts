@@ -5,7 +5,7 @@ import { ignoredProjectPaths } from '../../project-identity.js';
 import { type GitIndexEntry, parseGitIndexEntries } from "./file-images.js";
 import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual } from "../../rollback-content-store.js";
 import { normalizedProjectPath, normalizedProjectContentPath } from "../sched_admission/scope-services.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { gitSync, gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { resolve, join, relative, dirname } from "node:path";
 import { existsSync, readFileSync, readlinkSync, lstatSync, realpathSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
@@ -68,11 +68,10 @@ function rollbackListedPaths(output: string): string[] {
 }
 
 function gitOutput(projectDir: string, args: string[]): string {
-  return execFileSync('git', args, {
+  return gitSync(args, {
     cwd: projectDir,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'ignore'],
-    timeout: 15_000,
     maxBuffer: 64 * 1024 * 1024,
   });
 }
@@ -145,16 +144,16 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     // A Git object is an exact worktree preimage only when checkout attributes
     // cannot transform its bytes. Query attributes in one process rather than
     // launching a subprocess per tracked file.
-    const autocrlf = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.autocrlf']).trim(); } catch { return ''; } })();
-    const eol = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.eol']).trim(); } catch { return ''; } })();
+    const autocrlf = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.autocrlf']).trim(); } catch (error) { rethrowGitNotAnswered(error); return ''; } })();
+    const eol = (() => { try { return gitOutput(projectDir, ['config', '--get', 'core.eol']).trim(); } catch (error) { rethrowGitNotAnswered(error); return ''; } })();
     if (autocrlf !== 'true' && eol !== 'crlf' && cleanTracked.size > 0) {
       const paths = [...cleanTracked].filter((path) => {
         const kind = stageZeroIndexEntry(indexEntries.get(path))?.kind;
         return kind === 'regular' || kind === 'executable';
       });
-      const checked = spawnSync('git', ['check-attr', '-z', '--stdin', 'filter', 'ident', 'text', 'eol', 'working-tree-encoding'], {
-        cwd: projectDir, input: Buffer.from(`${paths.join('\0')}\0`), encoding: 'buffer',
-        stdio: ['pipe', 'pipe', 'ignore'], timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+      const checked = gitResultSync(['check-attr', '-z', '--stdin', 'filter', 'ident', 'text', 'eol', 'working-tree-encoding'], {
+        cwd: projectDir, input: Buffer.from(`${paths.join('\0')}\0`),
+        stdio: ['pipe', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024,
       });
       if (checked.status === 0 && checked.stdout) {
         const values = checked.stdout.toString('utf8').split('\0');
@@ -181,6 +180,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
     strategy = 'git-index-plus-dirty-images';
   } catch (error) {
+    rethrowGitNotAnswered(error);
     // A non-Git project needs a filesystem identity inventory. Once Git was
     // found, an inventory/capture failure must not silently expand the scan.
     if (gitRoot) throw error;
@@ -247,7 +247,9 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
       if (gitlink) return;
       try {
         if (lstatSync(join(projectDir, path)).isDirectory()) {
-          for (const nested of listProjectFilesAt(projectDir, path)) noteRollbackPath(baseline, nested);
+          // The observer only nominates paths. Git inventory belongs to the
+          // scheduler's owned snapshot/settlement operation, never a callback.
+          for (const nested of listProjectFilesAt(projectDir, path, false, { complete: true })) noteRollbackPath(baseline, nested);
         }
       } catch {
         // A recursive directory deletion may coalesce to a parent event. Expand
@@ -325,9 +327,9 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     }
   }
   try {
-    const bytes = execFileSync('git', ['cat-file', 'blob', entry.objectId], {
-      cwd: baseline.projectDir, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 15_000, maxBuffer: 64 * 1024 * 1024,
+    const bytes = gitSync(['cat-file', 'blob', entry.objectId], {
+      cwd: baseline.projectDir, stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
     });
     let text: string | undefined;
     if (!bytes.includes(0)) {
@@ -347,6 +349,7 @@ function imageFromGitBaseline(baseline: RunRollbackBaseline, path: string): Repa
     baseline.images.set(path, image);
     return image;
   } catch (error) {
+    rethrowGitNotAnswered(error);
     const image: RepairFileImage = {
       exists: true,
       type: symlink ? 'symlink' : 'file',

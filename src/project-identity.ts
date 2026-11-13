@@ -1,5 +1,5 @@
 import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
-import { spawnSync } from 'node:child_process';
+import { gitResultSync } from './git-facts.js';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -51,10 +51,10 @@ export function ignoredProjectPaths(projectDir: string, paths: readonly string[]
   const candidates = [...new Set(paths.map(normalizedProjectContentPath)
     .filter((path): path is string => typeof path === 'string'))];
   if (!candidates.length) return new Set();
-  const result = spawnSync('git', ['check-ignore', '--stdin', '-z'], {
+  const result = gitResultSync(['check-ignore', '--stdin', '-z'], {
     cwd: projectDir, input: `${candidates.join('\0')}\0`, encoding: 'utf8',
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
-    maxBuffer: 32 * 1024 * 1024, timeout: 15_000,
+    maxBuffer: 32 * 1024 * 1024,
   });
   return result.status === 0
     ? new Set(result.stdout.split('\0').filter(Boolean))

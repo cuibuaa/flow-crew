@@ -22,7 +22,6 @@ scheduler_stall_threshold_ms: 120000
 scheduler_stall_observer_poll_ms: 5000
 # Large worktrees on slow filesystems need a checkout-specific bound. Ordinary
 # Git probes retain their smaller command-local bounds.
-git_worktree_add_timeout_ms: 1800000
 max_iterations: 5
 gate_retry_loops: 3
 stage_technical_retries: 1

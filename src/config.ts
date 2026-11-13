@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +20,6 @@ const EngineDefaultsSchema = z.object({
   scheduler_heartbeat_interval_ms: positive,
   scheduler_stall_threshold_ms: positive,
   scheduler_stall_observer_poll_ms: positive,
-  git_worktree_add_timeout_ms: positive,
   max_iterations: numeric,
   gate_retry_loops: numeric,
   stage_technical_retries: numeric,
@@ -57,7 +56,8 @@ let _cacheMtime = 0;
  * which previously took the subdirectory's name — `repo/src/deep` gave
  * `deep`, and now gives `repo`.
  *
- * A non-repository, or any git failure, falls back to projectDir. An explicit
+ * A non-repository or a completed Git failure falls back to projectDir.
+ * External termination propagates without choosing an identity. An explicit
  * --campaign still wins over all of this.
  *
  * `readCommonDir` exists so tracked tests can drive the path arithmetic without
@@ -75,10 +75,8 @@ export function campaignBaseDirectory(
   projectDir: string,
   options: CampaignBaseDirectoryOptions = {},
 ): string {
-  const readCommonDir = options.readCommonDir ?? ((cwd: string) => execFileSync(
-    'git',
-    ['rev-parse', '--git-common-dir'],
-    { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+  const readCommonDir = options.readCommonDir ?? ((cwd: string) => gitSync(['rev-parse', '--git-common-dir'],
+    { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
   ));
   try {
     const commonDir = readCommonDir(projectDir).trim();
@@ -87,7 +85,8 @@ export function campaignBaseDirectory(
     const absoluteCommonDir = resolve(projectDir, commonDir);
     const mainWorktree = dirname(absoluteCommonDir);
     return mainWorktree && mainWorktree !== '.' ? mainWorktree : projectDir;
-  } catch {
+  } catch (error) {
+    rethrowGitNotAnswered(error);
     return projectDir;
   }
 }

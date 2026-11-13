@@ -2,7 +2,7 @@
 import { type RollbackStatIdentity, RollbackContentStore, hashRollbackFileSync } from "../../rollback-content-store.js";
 import { type Stats, readdirSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { gitSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { join } from "node:path";
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
 
@@ -94,12 +94,11 @@ function readGitlinkFileImage(
     };
   }
   try {
-    const head = execFileSync('git', ['-C', absolute, 'rev-parse', '--verify', 'HEAD'], {
-      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+    const head = gitSync(['-C', absolute, 'rev-parse', '--verify', 'HEAD'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    const status = execFileSync('git', ['-C', absolute, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-      encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
-      maxBuffer: 64 * 1024 * 1024,
+    const status = gitSync(['-C', absolute, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024,
     });
     const identity = Buffer.concat([
       Buffer.from(`gitlink\0${entry.objectId}\0${head}\0`, 'utf-8'),
@@ -116,6 +115,7 @@ function readGitlinkFileImage(
       mode: stat.mode & 0o7777,
     };
   } catch (error) {
+    rethrowGitNotAnswered(error);
     return {
       exists: true,
       type: 'gitlink',
@@ -257,10 +257,10 @@ function gitBlobObjectId(bytes: Buffer, expectedObjectId: string): string | unde
 
 export function gitObjectIdForPath(projectDir: string, path: string): string | undefined {
   try {
-    return execFileSync('git', ['hash-object', '--no-filters', path], {
-      cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+    return gitSync(['hash-object', '--no-filters', path], {
+      cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-  } catch { return undefined; }
+  } catch (error) { rethrowGitNotAnswered(error); return undefined; }
 }
 
 export function compareRepairFileContents(

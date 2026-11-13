@@ -1,3 +1,4 @@
+import { GitNotAnswered } from '../git-facts.js';
 import type { EndingCause } from '../attempt-ending.js';
 import { appendFileSync, mkdirSync } from '../engine-fs.js';
 
@@ -17,13 +18,26 @@ export type { ChildProcess } from 'node:child_process';
 interface RunProcessOwner {
   projectDir: string; runId: string; abortSignal?: AbortSignal; onProgress?: () => void;
   owners: Array<{ projectDir: string; runId: string }>;
+  publications: Promise<void>[];
 }
 const runOwner = new AsyncLocalStorage<RunProcessOwner>();
+const commandPublications = new WeakMap<ChildProcess, Promise<void>>();
 export function withRunProcessOwnership<T>(projectDir: string, runId: string, action: () => Promise<T>, abortSignal = runOwner.getStore()?.abortSignal,
   onProgress = runOwner.getStore()?.onProgress): Promise<T> {
   const owners = [...(runOwner.getStore()?.owners ?? [])];
   if (!owners.some(owner => owner.projectDir === projectDir && owner.runId === runId)) owners.push({ projectDir, runId });
-  return runOwner.run({ projectDir, runId, abortSignal, onProgress, owners }, action);
+  const publications: Promise<void>[] = [];
+  return runOwner.run({ projectDir, runId, abortSignal, onProgress, owners, publications }, async () => {
+    let outcome: PromiseSettledResult<T>;
+    try { outcome = { status: 'fulfilled', value: await action() }; }
+    catch (reason) { outcome = { status: 'rejected', reason }; }
+    // A command may return its handle before its identity arrives. Join that
+    // publication here, after failed commands have closed their gate/child.
+    const results = await Promise.allSettled(publications);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  });
 }
 
 // Nested workflows inherit cancellation at the worker boundary, including role-selected adapters.
@@ -63,6 +77,16 @@ function spawnRunCommand(command: string, args: string[], options: SpawnOptions,
       // The supervisor retains all adopted descendants. Publish the command
       // identity too, before its execution gate opens, for existing observers.
       let identity = '';
+      let publicationFailure: GitNotAnswered | undefined;
+      let published!: () => void;
+      const publication = new Promise<void>((resolve, reject) => {
+        published = resolve;
+        child.once('close', () => publicationFailure ? reject(publicationFailure) : resolve());
+      });
+      // The run boundary joins it even if the action is still awaiting close.
+      void publication.catch(() => {});
+      commandPublications.set(child, publication);
+      owner?.publications.push(publication);
       gate.on('data', bytes => {
         identity += bytes.toString();
         if (!identity.endsWith('\n')) return;
@@ -74,7 +98,12 @@ function spawnRunCommand(command: string, args: string[], options: SpawnOptions,
             state.engineCheckpoint.processes!.unshift({ pid, processStart: processStartToken(pid) });
           });
           gate.end('exec\n');
-        } catch { gate.end(); child.kill('SIGTERM'); }
+          published();
+        } catch (error) {
+          if (error instanceof GitNotAnswered) publicationFailure = error;
+          gate.end();
+          child.kill('SIGTERM');
+        }
       });
       gate.write(priority === undefined ? 'start\n' : `start ${priority}\n`);
     } else gate.end('start\n');
@@ -575,5 +604,5 @@ export function spawnOwnedCommand(command: string, args: string[], options: { cw
   };
   child.once('close', stop);
   child.once('close', environment.cleanup);
-  return { child, stop };
+  return { child, stop, publication: commandPublications.get(child) ?? retired };
 }

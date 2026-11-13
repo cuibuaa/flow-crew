@@ -1,3 +1,4 @@
+import { rethrowGitNotAnswered } from '../../git-facts.js';
 /** Declaration-owned author → optional review → frozen instrument loop.
  * Project verdicts replace calibration, thresholds, targets and stagnation policy. */
 import { atomicWrite } from '../../engine-fs.js';
@@ -162,6 +163,7 @@ export async function runResearchLoop(project: string, run: string, directory: s
       restoreResearchBest(project, directory);
     }
   } catch (error) {
+    rethrowGitNotAnswered(error);
     state = readRunState(project, run);
     if (isTerminalRunStatus(state.status)) {
       return finish(state.reasonCode ?? state.status, state.status);
