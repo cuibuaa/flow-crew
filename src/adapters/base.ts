@@ -12,6 +12,7 @@ import { processGroupIsAlive, processStartToken } from '../process-liveness.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
+import { currentStageWriteGrant, prepareWriteGrant, writeGrantExecPython, WriteGrantError, type PreparedWriteGrant, type WriteGrantFailure } from '../write-grant.js';
 
 export type { ChildProcess } from 'node:child_process';
 
@@ -55,15 +56,41 @@ export function reportRunProcessProgress(projectDir: string, runId: string): voi
  * Deleting the boot restriction alone cannot exclude orphan writers. The pipe
  * gate closes the spawn/publication crash window, including raw-command
  * supervision: ownership lives in the existing engine checkpoint. */
-function spawnRunCommand(command: string, args: string[], options: SpawnOptions, supervise = false, priority?: number): ChildProcess {
+const grantFailures = new WeakMap<ChildProcess, WriteGrantFailure>();
+const appliedGrants = new WeakMap<ChildProcess, { abi: number; linkedFileCount: 0 }>();
+function spawnRunCommand(command: string, args: string[], options: SpawnOptions, supervise = false, priority?: number, grant?: PreparedWriteGrant): ChildProcess {
   const owner = runOwner.getStore();
-  if ((!owner && !supervise) || process.platform === 'win32') return spawn(command, args, options);
+  if ((!owner && !supervise && !grant) || process.platform === 'win32') return spawn(command, args, options);
   if (!Array.isArray(options.stdio)) throw new Error('RUN_PROCESS_STDIO: owned commands require explicit descriptors');
+  if (grant) {
+    args = ['-I', '-S', '-B', '-c', writeGrantExecPython, JSON.stringify({ abi: grant.abi, writable: grant.writable, noRefer: grant.noRefer }), command, ...args];
+    command = '/usr/bin/python3';
+  }
   const child = spawn(supervise ? '/usr/bin/python3' : '/bin/sh', supervise
     ? ['-I', '-S', '-B', '-c', commandSupervisor, command, ...args]
     : ['-c', 'read -r ready <&3 || exit 125; exec 3<&-; exec "$@"', 'flowcrew-command', command, ...args], {
-    ...options, stdio: [...options.stdio, 'pipe'],
+    ...options, stdio: [...options.stdio, 'pipe', ...(grant ? ['pipe' as const] : [])],
   });
+  if (grant) {
+    let receipt = '';
+    child.stdio[4]!.on('data', bytes => { receipt += bytes.toString(); });
+    child.stdio[4]!.on('end', () => {
+      try {
+        for (const line of receipt.trim().split('\n')) {
+          const applied = JSON.parse(line) as { kind: string; abi?: number; linkedFileCount?: number };
+          if (applied.kind === 'applied' && applied.abi === grant.abi && applied.linkedFileCount === 0) {
+            appliedGrants.set(child, { abi: grant.abi, linkedFileCount: 0 });
+            continue;
+          }
+          const outcome = applied as WriteGrantFailure;
+          grantFailures.set(child, outcome.kind === 'linked_files' && Number.isSafeInteger(outcome.count) && outcome.count > 0
+            || outcome.kind === 'exec_failed' && Number.isSafeInteger(outcome.errno) && typeof outcome.path === 'string'
+            || outcome.kind === 'unsafe_path' && typeof outcome.path === 'string'
+            ? outcome : { kind: 'application_failed', errno: outcome.kind === 'application_failed' ? outcome.errno : null });
+        }
+      } catch { grantFailures.set(child, { kind: 'application_failed', errno: null }); }
+    });
+  }
   const gate = child.stdio[3] as import('node:stream').Duplex;
   gate.on('error', () => {});
   try {
@@ -128,6 +155,8 @@ export type AdapterFailureKind =
   | 'capacity';
 
 export interface RunResult extends InvocationUsage {
+  writeGrantFailure?: WriteGrantFailure;
+  writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   continuation?: StageContinuation;
   output: string;
   exitCode: number;
@@ -386,7 +415,12 @@ function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv
   const scratch = createInvocationScratch(runDirectory ?? (owner && runDir(owner.projectDir, owner.runId)));
   const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path };
   for (const name of unsetEnv) delete env[name];
-  return { env, cleanup: scratch.cleanup };
+  try {
+    const declaration = currentStageWriteGrant();
+    const grant = declaration && prepareWriteGrant(declaration, scratch.path, env);
+    if (grant) Object.assign(env, grant.env);
+    return { env, grant, cleanup: scratch.cleanup };
+  } catch (error) { scratch.cleanup(); throw error; }
 }
 
 export function execWithStdin(
@@ -432,9 +466,15 @@ export function execWithStdin(
       child = spawnRunCommand(cmd, args, {
         cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
         detached: process.platform !== 'win32', env: environment.env,
-      });
+      }, false, undefined, environment.grant);
     } catch (error) {
       try { activity?.close(); } finally { environment?.cleanup(); }
+      if (error instanceof WriteGrantError) {
+        resolve({ output: error.message, friendlyError: error.message, exitCode: 125,
+          duration_ms: Date.now() - start, writeGrantFailure: error.outcome,
+          ...(opts.captureStreams ? { stdout: '', stderr: '' } : {}) });
+        return;
+      }
       throw error;
     }
     const terminator = createChildTerminator(child, opts.terminationTiming);
@@ -479,6 +519,7 @@ export function execWithStdin(
         if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
         try { activity?.close(); } finally { environment?.cleanup(); }
         if (executionError !== undefined) throw executionError;
+        const writeGrantFailure = grantFailures.get(child);
         resolve({
           output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
           exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
@@ -490,6 +531,8 @@ export function execWithStdin(
             stderr: Buffer.concat(stderr).toString('utf-8'),
           } : {}),
           ...(spawnError ? { spawnError } : {}),
+          ...(writeGrantFailure ? { writeGrantFailure, exitCode: 125, friendlyError: new WriteGrantError(writeGrantFailure).message } : {}),
+          ...(appliedGrants.has(child) ? { writeGrantApplied: appliedGrants.get(child) } : {}),
         });
       }).catch(reject);
     };
@@ -592,7 +635,7 @@ export function spawnOwnedCommand(command: string, args: string[], options: { cw
   let child: ChildProcess;
   try {
     const { priority, ...spawnOptions } = options;
-    child = spawnRunCommand(command, args, { ...spawnOptions, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }, process.platform === 'linux', priority);
+    child = spawnRunCommand(command, args, { ...spawnOptions, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }, process.platform === 'linux', priority, environment.grant);
   } catch (error) { environment.cleanup(); throw error; }
   const retired = new Promise<void>(resolve => child.once('close', () => resolve()));
   const stop = (): Promise<void> => {
@@ -604,5 +647,6 @@ export function spawnOwnedCommand(command: string, args: string[], options: { cw
   };
   child.once('close', stop);
   child.once('close', environment.cleanup);
-  return { child, stop, publication: commandPublications.get(child) ?? retired };
+  return { child, stop, publication: commandPublications.get(child) ?? retired,
+    writeGrantFailure: () => grantFailures.get(child), writeGrantApplied: () => appliedGrants.get(child) };
 }

@@ -2,6 +2,7 @@ import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { stringify } from 'yaml';
 import type { AgentConfig } from '../src/adapters/base.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
@@ -16,6 +17,7 @@ import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../s
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { retireRunScratch } from '../src/invocation-scratch.js';
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 const role: AgentConfig = {
@@ -24,14 +26,18 @@ const role: AgentConfig = {
 const providers = ['claude', 'codex'] as const;
 let root: string, project: string, runDir: string, callsPath: string;
 let previousStore: string;
+const createdRuns: string[] = [];
 
 beforeEach(() => {
-  root = mkdtempSync(join(process.cwd(), '.authentication-spec-'));
+  root = mkdtempSync(join(tmpdir(), 'authentication-spec-'));
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
   writeFileSync(join(root, 'package.json'), '{"type":"commonjs"}\n');
-  project = join(root, 'project'); runDir = join(root, 'run'); callsPath = join(root, 'calls.jsonl');
+  project = join(root, 'project'); runDir = join(root, 'run'); callsPath = join(project, 'calls.jsonl');
   const bin = join(root, 'bin');
   for (const directory of [project, runDir, bin, join(root, 'codex-source'), join(root, 'plugins'), join(root, 'skills')]) mkdirSync(directory);
+  // Instrumentation is an existing exact file in the declared scope, so real
+  // native launches exercise the grant without an out-of-grant log write.
+  writeFileSync(callsPath, '');
   writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2 }));
   // An empty synthetic source prevents this fixture from touching operator credentials.
   vi.stubEnv('CODEX_HOME', join(root, 'codex-source'));
@@ -67,7 +73,7 @@ process.stdin.on('end', () => {
 `, { mode: 0o700 });
 });
 
-afterEach(() => { setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { for (const path of [runDir, ...createdRuns.splice(0)]) retireRunScratch(path); setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function adapter(provider: typeof providers[number]) {
   return provider === 'claude' ? new ClaudeAdapter() : new CodexAdapter();
@@ -81,10 +87,12 @@ function scenario(repair = false) {
   const stageId = repair ? 'repair' : 'work';
   const workflow = WorkflowConfigSchema.parse({
     name: 'authentication-fixture', defaults: { max_iterations: 1, max_retries: 2 },
-    stages: [{ id: stageId, role: 'fixture', scope: [], prompt_template: 'fixture',
+    stages: [{ id: stageId, role: 'fixture', scope: ['calls.jsonl'], prompt_template: 'fixture',
       ...(repair ? { retry_to: ['review'] } : {}), artifact_contract: fixtureArtifactContract(stageId) }],
   });
-  return { stageId, workflow, created: createRun(project, workflow.name, stringify(workflow), [stageId]) };
+  const created = createRun(project, workflow.name, stringify(workflow), [stageId]);
+  createdRuns.push(created.runDirPath);
+  return { stageId, workflow, created };
 }
 
 describe('native authentication failures', () => {
@@ -128,6 +136,7 @@ describe('native authentication failures', () => {
     vi.stubEnv('FC_AUTH_FIXTURE_MODE', 'capacity-auth');
     const s = scenario();
     const result = await runStage(adapter(provider), {
+      scope: ['calls.jsonl'],
       stageId: s.stageId, role, dependsOn: [], promptTemplate: 'fixture', artifactContract: fixtureArtifactContract(s.stageId),
       projectDir: project, runId: s.created.runId, runDir: s.created.runDirPath, retries: 0, timeout_ms: 5_000,
        technicalRetry: { delaysMs: [0, 0, 0] },

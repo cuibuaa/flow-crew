@@ -38,7 +38,8 @@ beforeEach(() => {
   setFcGlobalDir(join(root, 'state'));
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'offline-provider', 'name: offline-provider\nstages: []\n', ['work']));
   writeFileSync(runRecordPath(runDir, 'task_brief.md'), 'Offline provider result trial');
-  fixture = join(root, 'fixture.json');
+  const fixtureDir = join(projectDir, 'provider-fixture'); mkdirSync(fixtureDir);
+  fixture = join(fixtureDir, 'response.json');
   const fakeCli = `#!${process.execPath}
 const fs=require('node:fs'),p=process.env.FC_PROVIDER_SPEC_FIXTURE,f=JSON.parse(fs.readFileSync(p,'utf8'));
 const calls=fs.existsSync(p+'.calls')?fs.readFileSync(p+'.calls','utf8').trim().split('\\n').length:0;
@@ -71,7 +72,7 @@ async function invoke(adapter: Adapter, stdout: string, exitCode = 1): Promise<R
 
 async function stage(adapter: Adapter, retries = 0): Promise<RunResult> {
   const result = await runStage(adapter, {
-    stageId: 'work', role, dependsOn: [], promptTemplate: 'offline trial', projectDir, runId, runDir, retries,
+    stageId: 'work', scope: ['provider-fixture/'], role, dependsOn: [], promptTemplate: 'offline trial', projectDir, runId, runDir, retries,
     timeout_ms: 60_000,  technicalRetry: { delaysMs: [0] },
     artifactContract: { version: 1, produces: [], reads: [], groups: [] },
   });
@@ -352,7 +353,7 @@ describe('provider-owned terminal failure contract', () => {
       writeFileSync(fixture, JSON.stringify({ responses: [...Array(failures).fill(capacity),
         { stdout: jsonl({ type: 'turn.completed' }), exitCode: 0 }] }));
       const result = await runStage(new CodexAdapter(), {
-        stageId: 'work', role, dependsOn: [], promptTemplate: 'capacity replay', projectDir, runId, runDir, retries: 0,
+        stageId: 'work', scope: ['provider-fixture/'], role, dependsOn: [], promptTemplate: 'capacity replay', projectDir, runId, runDir, retries: 0,
         timeout_ms: 60_000, technicalRetry: { delaysMs: [0, 0] },
         artifactContract: { version: 1, produces: [], reads: [], groups: [] },
       });

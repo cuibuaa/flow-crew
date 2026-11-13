@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDistFresh } from '../src/build-manifest.js';
 import { createInvocationScratch } from '../src/invocation-scratch.js';
@@ -38,6 +38,9 @@ export default function verifyTestRuntimeGeneration(): () => void {
   // aliased .tmp-* tree makes no-follow homes and engine-carrier fixtures invalid.
   // The existing owner supplies short physical storage until all workers close.
   const scratch = createInvocationScratch();
+  // Generated extensionless Node executables must not inherit the checkout's
+  // module type when an operator places temporary storage inside the checkout.
+  writeFileSync(join(scratch.path, 'package.json'), '{"type":"commonjs"}\n');
   const names = ['TMPDIR', 'TMP', 'TEMP'] as const;
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
   for (const name of names) process.env[name] = scratch.path;

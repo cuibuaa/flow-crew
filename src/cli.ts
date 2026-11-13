@@ -1476,6 +1476,7 @@ interface StatusRun {
   history?: RetiredStageUsage[];
   historyError?: string;
   state: {
+    writeGrant?: import('./write-grant.js').WriteGrantContract;
     projectDir?: string;
     taskDescription?: string;
     status?: string;
@@ -1561,6 +1562,7 @@ function cmdStatus() {
   console.log(`Goal: ${extractTaskTitle(state.taskDescription) || '(no description)'}`);
   console.log(`Status: ${statusResolution.kind === 'known' ? statusResolution.status : `unrecognized ${statusResolution.display}`}`);
   console.log(`Project: ${state.projectDir ?? 'unknown'}`);
+  console.log(`Write grant: ${JSON.stringify(state.writeGrant?.capability ?? { kind: 'legacy_ungranted' })}`);
   console.log(`Elapsed: ${formatHumanDuration(operational.runElapsedMs)}`);
   if (operational.activeStages.length === 0) console.log('Now: no stage executing');
   else for (const stage of operational.activeStages) {

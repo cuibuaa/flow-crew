@@ -11,6 +11,12 @@ function stage(id: string, scope?: string[]): StageConfig {
 }
 
 describe('shared scope language', () => {
+  it('represents the explicitly declared worktree root including dot paths', () => {
+    const root = parseDeclaredScope('.');
+    expect(root).toEqual({ kind: 'tree', raw: '.', value: '.' });
+    expect(scopeMatchesProjectPath(root, '.cache/result')).toBe(true);
+    expect(scopeMatchesProjectPath(root, 'src/file.ts')).toBe(true);
+  });
   it('normalizes project paths consistently for scope and native writes', () => {
     for (const path of ['./src//file.ts', 'src\\file.ts', 'src/./file.ts', 'src/dir/../file.ts']) {
       expect(normalizedProjectPath(path)).toBe('src/file.ts');

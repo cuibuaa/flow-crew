@@ -1,3 +1,4 @@
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { declareValidation } from './test-support/structured-validation.js';
@@ -180,9 +181,13 @@ function seedCampaignPhase(
 
 function linkedWorktree(root: string, name: string, common: string): string {
   const projectDir = join(root, name);
+  if (!existsSync(join(common, 'HEAD'))) isolatedProjectCommand('git',
+    ['init', '--quiet', '--separate-git-dir', common, join(root, name + '-primary')], root, root);
   const gitDir = join(common, 'worktrees', name);
   mkdirSync(gitDir, { recursive: true });
   write(join(gitDir, 'commondir'), '../..\n');
+  write(join(gitDir, 'HEAD'), `ref: refs/heads/${name}\n`);
+  write(join(gitDir, 'gitdir'), `${join(projectDir, '.git')}\n`);
   mkdirSync(projectDir, { recursive: true });
   write(join(projectDir, '.git'), `gitdir: ${gitDir}\n`);
   return projectDir;

@@ -44,7 +44,7 @@ function write(path: string, bytes: string | Buffer) {
 }
 function git(...args: string[]) { return isolatedProjectCommand('git', args, project, root); }
 function commit() {
-  git('init', '-q'); git('add', '.');
+  git('init', '-q', '--separate-git-dir', join(root, 'git')); git('add', '.');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Synthetic baseline');
 }
 function create(brief = 'Complete the required project work.', stages = [stage()]) {
@@ -103,7 +103,7 @@ async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], st
     return { output: 'Required work completed.', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' };
   } };
   await runScopeSafeStageGroup(stages, project, runId, 1, (s, settlementBoundary) => runStage(adapter, {
-    stageId: s.id, role, dependsOn: [], promptTemplate: 'Complete the required project work.',
+    stageId: s.id, scope: s.scope, role, dependsOn: [], promptTemplate: 'Complete the required project work.',
     projectDir: project, runId, runDir: directory, retries: 0, timeout_ms: 8_000, deadlineClock,
      artifactContract: fixtureArtifactContract(s.id), settlementBoundary,
   }));
@@ -129,7 +129,7 @@ describe('legitimate work outside planner estimates', () => {
       : ['state/events.log', 'state/locks/registry', 'state/locks/request', 'state/decision/job.log', 'state/decision/summary.json'];
     write('Makefile', `test:\n\t${JSON.stringify(process.execPath)} suite.mjs\n`);
     write('suite.mjs', `import * as fs from 'node:fs'; import * as path from 'node:path';\nconst dir = fs.mkdtempSync(path.join(process.cwd(), 'offline-test-'));\nconst members = ${JSON.stringify(members)};\ntry {\n for (const name of members) { const file = path.join(dir, name); fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, 'synthetic fixture'); }\n await new Promise(resolve => setTimeout(resolve, 180));\n for (const name of members) if (fs.readFileSync(path.join(dir, name), 'utf8') !== 'synthetic fixture') throw new Error('temporary dependency changed');\n console.log('temporary dependencies intact');\n} finally { fs.rmSync(dir, {recursive:true, force:true}); }\n`);
-    commit(); create();
+    commit(); const stages = create(undefined, [stage('author', ['.'])]);
     const result = await execute(async opts => {
       const command = await execWithStdin('make', ['test'], '', { cwd: project, timeout_ms: 3_000,
         abortSignal: opts.abortSignal, execution: opts });
@@ -138,7 +138,7 @@ describe('legitimate work outside planner estimates', () => {
       write('scripts/required.mjs', 'export const completed = true;\n');
       write('reports/test-result.txt', 'make test passed\n');
       return ['scripts/required.mjs', 'reports/test-result.txt'];
-    });
+    }, stages);
     accepted(result);
     expect(readdirSync(project).filter(name => name.startsWith('offline-test-'))).toEqual([]);
     expect(result.audits[0].durableWrites).toEqual(expect.arrayContaining(['scripts/required.mjs', 'reports/test-result.txt']));
@@ -395,7 +395,7 @@ describe('the surviving project guarantees', () => {
 
   it('protects ignored and tracked frozen bytes regardless of their names', async () => {
     write('.gitignore', 'artifacts/\n'); write('artifacts/tracked.txt', 'tracked'); write('artifacts/ignored.txt', 'ignored');
-    git('init', '-q'); git('add', '.'); git('add', '-f', 'artifacts/tracked.txt');
+    git('init', '-q', '--separate-git-dir', join(root, 'git')); git('add', '.'); git('add', '-f', 'artifacts/tracked.txt');
     git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline');
     create('---\ninputs: [{path: artifacts, frozen: true}]\n---\nKeep `artifacts` immutable.');
     const result = await execute(() => { write('artifacts/tracked.txt', 'bad'); write('artifacts/ignored.txt', 'bad'); return ['artifacts/tracked.txt', 'artifacts/ignored.txt']; });

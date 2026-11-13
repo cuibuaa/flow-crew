@@ -32,6 +32,9 @@ function scopeSegments(path: string): ScopeSegment[] {
 
 export function parseDeclaredScope(rawValue: string): ParsedScope {
   const raw = rawValue.trim();
+  // A literal root declaration, including dot paths. Unlike ** this has no
+  // wildcard membership rule and can be represented by one kernel path grant.
+  if (raw === '.' || raw === './') return { kind: 'tree', raw, value: '.' };
   const slashNormalized = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
   if (!slashNormalized) return { kind: 'unknown', raw, reason: 'empty scope entry' };
   if (isAbsolute(slashNormalized) || /^[A-Za-z]:/.test(slashNormalized)) {
@@ -52,7 +55,7 @@ export function parseDeclaredScope(rawValue: string): ParsedScope {
 
 function languageSegments(scope: Exclude<ParsedScope, { kind: 'unknown' }>): ScopeSegment[] {
   if (scope.kind !== 'glob') return [
-    ...scope.value.split('/').map((value): ScopeSegment => ({ kind: 'literal', value })),
+    ...(scope.value === '.' ? [] : scope.value.split('/')).map((value): ScopeSegment => ({ kind: 'literal', value })),
     { kind: 'globstar', value: '**', dots: true },
   ];
   // A literal terminal tree includes its node and every descendant, including

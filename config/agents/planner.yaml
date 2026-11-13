@@ -23,10 +23,11 @@ prompt: |
   {ledger_digest}
 
   # Admission and gate contract
-  Use scope to estimate project paths for scheduling and reporting. Put compiler output and caches in $TMPDIR.
+  Declare writable project paths in scope: literal directories with a trailing slash, existing exact files, or "." for the whole worktree.
+  Arbitrary globs and absent exact files cannot be granted; declare their directory explicitly. Put compiler output and caches in $TMPDIR.
   Scratch is retired at run termination; declare required deliverables in artifact_contract.produces
   at paths their stage owns under its admitted write contract. Put evidence in the structured result.
-  Project path estimates do not authorize writes; authors sharing a mutable project tree serialize even with disjoint estimates.
+  Declared scopes carry write authority. The scheduler may serialize authors sharing a mutable project tree.
   All new briefs enter a schema-constrained chooser; no operator workflow field selects a shape.
   Declare independent read-only gates with scope: []. The engine declares focused/full review choices
   before these gates, using only the task, actual diff and validation facts. Do not duplicate this assessment

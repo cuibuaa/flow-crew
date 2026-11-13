@@ -159,6 +159,14 @@ describe('ship skill semantic contract', () => {
 });
 
 describe('public autonomous launch documentation', () => {
+  it('distinguishes author successor results from isolated read-only routing', () => {
+    const grants = compact(section(operations, '## Stage filesystem write grants', '## Inspect, guide and stop'));
+    expect(grants).toContain('authors and repairs that return successor decisions');
+    expect(grants).toContain("it does not change the author's admitted output authority");
+    expect(grants).toContain('read-only gates and isolated chooser/assessment decisions receive no write grant');
+    expect(compact(ship)).toContain('authors and repairs retain admitted output directories when returning a successor');
+  });
+
   it('keeps setup/watch and wrap-up surfaces with their refusal/read-only boundaries', () => {
     const normalized = compact(operations);
     for (const command of ['ship-setup', 'watch', 'land']) expect(cliGuide).toContain(command);

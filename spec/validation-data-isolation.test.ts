@@ -18,6 +18,9 @@ it('preserves the stage-measured environment when the engine replays a selected 
   const root = mkdtempSync(join(tmpdir(), 'validation-data-')); roots.push(root);
   const project = join(root, 'project'), outside = join(root, 'outside'), isolated = join(root, 'isolated');
   for (const path of [project, outside, isolated]) mkdirSync(path);
+  // This reusable external state needs an explicit shared-directory grant.
+  mkdirSync(join(project, 'config'));
+  writeFileSync(join(project, 'config/write-grant.json'), JSON.stringify({ shared_caches: [isolated] }));
   writeFileSync(join(outside, 'ledger'), 'original');
   symlinkSync(outside, join(project, 'data'), 'dir');
   const program = "require('fs').appendFileSync(require('path').join(process.env.PROJECT_STATE || 'data','ledger'),'measured')";

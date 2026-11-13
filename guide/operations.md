@@ -93,6 +93,160 @@ refuse setup without publishing READY. Native file-copy and owned-worktree failu
 remain in place; earlier completed copies can remain. Inspect the reported target and
 available space before retrying.
 
+## Stage filesystem write grants
+
+New runs record a write-grant contract at admission. On Linux x86-64 or arm64 with
+Landlock ABI 3 or newer, every scheduled native agent launch receives its grant
+before executing. The system Python bridge uses `/usr/bin/python3`, its standard
+library and libc; no root, mount namespace, extra package, network restriction or
+system-call filter is added. Git is required for existing repository worktrees.
+Keep the engine distribution and state store outside the project worktree, as
+required by the existing storage checks.
+
+The grant follows children, detached grandchildren and re-parented descendants.
+The launcher replaces itself with the agent, preserving the agent's supervised
+PID and process group. Reads remain unrestricted. A successful launch receipt is
+`writeGrantApplied: {abi, linkedFileCount: 0}`; preparation/application refusals
+are typed `writeGrantFailure` outcomes, with exit 125, rather than inferred from
+agent diagnostics.
+
+Declare writable project directories in stage `scope`, for example `src/`, or
+use `.` for the whole worktree, including dot directories and dependencies.
+An existing exact file permits content writes without granting its siblings;
+atomic replacement, deletion and creation need the containing directory grant.
+Preparation retains the declared file/directory kind through launch. The bridge
+checks that kind against its pinned descriptor before counting links or applying
+rules; replacing a declared file with a directory refuses with `unsafe_path`
+before the agent executes. A terminal literal tree rooted at an existing regular
+file is narrowed to file authority and receives the same replacement check.
+A literal terminal tree such as `src/**` is also representable. Arbitrary globs
+and absent exact files refuse launch: declare the intended directory explicitly.
+Declared artifacts add their literal paths; a new file likewise needs a declared
+parent directory. Run artifacts must stay in the stage's permitted `work/` area.
+Engine-published verdict carriers are written by the engine from the typed result.
+The planner's declared proposal file is prepared as an exact inode before launch.
+An absolute directory output already admitted in the brief is also writable by
+author stages, including authors and repairs that return successor decisions.
+Returning a successor selects the next stage; it does not change the author's
+admitted output authority.
+These shared output trees receive the same no-REFER boundary as shared caches;
+read-only gates and isolated chooser/assessment decisions receive no write grant
+for them. Their declarations do not grant parents or siblings.
+
+Each stage also receives its own agent home, invocation scratch and `/dev/null`.
+For Git, the engine supplies a private index and worktree metadata, the shared
+object directory, and only the stage's branch and reflog directories under
+`fc/<run-directory-hash>/<stage>/head`. Other branch refs, shared Git configuration
+and hooks are outside the grant. The shared object directory remains writable:
+this is branch-ref isolation, not protection of existing Git objects from a
+writer granted that directory. Shared Git objects and declared shared caches
+receive no Landlock `REFER` permission. A link or rename between different
+directories involving either shared tree fails with `EXDEV`, including moves
+within that tree. This prevents a live stage from exporting a private file as
+an alias that a peer can overwrite. Creating/writing shared files and replacing
+files atomically within one directory still work. Private project, home and
+scratch directories retain ordinary internal moves. Use engine-prepared linked
+worktrees; a project scope containing the common Git directory refuses preparation.
+An unborn repository is admitted with a null base commit. The engine prepares an
+unborn private stage branch using the same linked-worktree metadata layout, so a
+first commit need not create or change the primary checkout's HEAD. Shared Git
+storage must still lie outside the granted project root. The null base is a
+recorded Git state, not an unavailable-kernel fallback.
+
+Because `HOME` is private, supply Git author identity through project settings,
+environment or explicit Git command options when it would otherwise come only
+from the operator's home configuration. The commit test supplies identity with
+`git -c user.name=... -c user.email=... commit`.
+
+Shared caches are writable only when the project declares their absolute paths
+in `config/write-grant.json` before admission:
+
+```json
+{
+  "shared_caches": []
+}
+```
+
+Replace the empty array with the cache directories the project authorizes. This
+declaration grants paths, not a package-manager cache selection. Ambient supported
+cache variables pointing inside declared roots are retained; otherwise `HOME`,
+XDG state and supported npm, pip, uv, Yarn, Corepack, Cargo, Rustup, Go, Gradle and
+ccache locations are redirected into the stage home or invocation scratch.
+Tools using other fixed locations must be configured explicitly or their writes
+will fail. The admitted physical cache paths are frozen: editing the configuration
+or redirecting a symlink does not change an existing run's authority. Start a new
+run to admit changed declarations. Shared caches are shared mutable state.
+Keep shared roots disjoint from other writable grants, including their ancestors
+and descendants. Such overlaps refuse with `unsafe_path`, since an additive
+directory grant would restore `REFER` and defeat the boundary. This also applies
+to exact-file declarations, whose entries could be replaced before launch.
+Tools writing shared caches must use copies or tolerate `EXDEV` with a copy
+fallback for moves between directories. The repaired-grant measurements include
+an actual npm install with both a private cache and a declared shared cache;
+other cache implementations need their own compatibility check. No declaration
+or environment variable restores cross-directory linking for shared roots.
+
+Directory preparation walks pinned parent descriptors without following symbolic
+links. Replacing an ancestor can refuse launch; it cannot redirect directory
+creation or expand the declared grant. Engine-owned project/run/scratch roots
+are canonicalized before their declared child paths are prepared.
+
+Before every granted launch, the bridge counts regular-file paths with link
+count greater than one across **all** granted roots, including ignored dependency
+files, home, caches and Git objects. Any nonzero count refuses execution with
+`{kind: "linked_files", count: N}`. It does not inspect file text or ignore rules.
+Materialize independent copies/reflinks or configure the dependency manager's
+copy mode before launch. Alternatively keep linked dependencies outside every
+writable root and read them without a grant, using narrow project scopes and a
+declared separate directory for generated outputs. A dependency install then
+needs an independently materialized writable dependency directory. Declare an
+external shared cache only if it needs writes and satisfies the same link-count
+rule. Declaring a store, dependency directory or cache never waives that rule;
+adding the store can increase the count. A whole-worktree grant includes its
+dependencies. Neither deleting dependencies from inside an agent nor promising
+not to modify them can repair a refusal that happens before the agent starts.
+
+Inspect `writeGrant.capability` in run state/status or the dashboard detail data:
+`landlock` records the ABI; `unavailable` records one of `platform`,
+`kernel_unavailable`, `kernel_disabled`, or `abi_too_old` (and ABI when known).
+Recognized unsupported hosts retain the previous launch behavior without a grant
+or cache redirection. There is no switch to disable a capable host's grant. An
+unexpected capability-query error refuses admission; missing bridge prerequisites
+must be repaired. An application failure after capable admission refuses the
+launch instead of running partly constrained. Capability is queried once for a
+new run and is not re-probed during retries or resume.
+
+Older records remain readable by status, watch, listing and dashboard readers.
+Missing admission is shown as `legacy_ungranted`; continuation persists that
+marker and runs without a grant, even on a capable host. Deploying this release
+therefore does not retrofit enforcement onto an already admitted run.
+
+Accepted gaps: an agent can connect to an existing path Unix socket, use abstract
+sockets, and change mode or timestamps of outside files on the measured kernel.
+The grant does not isolate networks or filter system calls. Access to a powerful
+service socket remains access to that service; filesystem confinement alone does
+not remove it. Existing after-the-fact integrity and content checks remain active,
+including frozen-input protection within an otherwise writable directory.
+
+Before deployment, prepare independent dependency files, review writable scopes
+and cache declarations, verify bridge prerequisites, and obtain the normal
+engine-owned build/test/lint validation. Use the existing deployment hold and
+generation procedure below; inspect a **new** run's capability and its launch
+receipt afterward. The measurements and current validation limits are in the
+[write-grant report](../docs/write-grant/report.md).
+
+For rollback, settle owned consumers through the normal deployment procedure and
+restore the prior validated engine generation. The older engine can read records
+carrying the additional optional fields, but does not enforce the grant; retaining
+a `landlock` admission in a record cannot make an older launcher enforce it.
+Review and resume historical runs as unconfined work when using that generation.
+Do not remove or edit run records to change capability. No deployment or rollback
+step requires changing kernel settings or installing a namespace helper.
+
+Sources: [grant computation and bridge](../src/write-grant.ts),
+[launch boundary](../src/adapters/base.ts), [stage binding](../src/worker.ts),
+[admission persistence](../src/store.ts).
+
 ## Inspect, guide and stop
 
 `status` selects the latest run for the current project; `--all` selects across projects.

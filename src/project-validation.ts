@@ -204,6 +204,8 @@ export async function withValidationLoad(request: ValidationRunRequest, execute:
 }
 
 export interface ValidationRunResponse {
+  writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
+  writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   load?: ValidationLoad;
   measurement?: ValidationMeasurement;
   report?: string;
@@ -439,7 +441,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   }
   const launch = () => new Promise<ValidationRunResponse>((resolveResult, rejectResult) => {
   const started = Date.now();
-  const { child, stop, publication } = spawnOwnedCommand(request.command, request.args, {
+  const { child, stop, publication, writeGrantFailure, writeGrantApplied } = spawnOwnedCommand(request.command, request.args, {
     cwd: request.cwd,
     env: environment.env,
     priority: request.priority,
@@ -482,6 +484,8 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     // can turn a retired child into validation evidence or start another command.
     void Promise.resolve(publication).then(() => resolveResult({
       exitCode,
+      ...(writeGrantFailure() ? { writeGrantFailure: writeGrantFailure() } : {}),
+      ...(writeGrantApplied() ? { writeGrantApplied: writeGrantApplied() } : {}),
       ...((timedOut || request.abortSignal?.aborted || signal) ? { unfinished: true } : {}),
       stdout,
       stderr,

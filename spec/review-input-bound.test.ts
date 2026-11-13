@@ -255,7 +255,7 @@ describe('an adapter that refuses the input by size', () => {
     { stream: 'stdout', diagnostic: '401 unauthorized', typed: false },
     { stream: 'stdout', diagnostic: 'rate limit', typed: false }])('after a JSON event ($stream, typed=$typed)', async ({ stream, diagnostic, typed }) => {
     const bin = join(root, 'bin'); mkdirSync(bin);
-    const calls = join(root, 'calls.txt');
+    const calls = join(project, 'calls.txt'); writeFileSync(calls, '');
     writeFileSync(join(bin, 'codex'), `#!${process.execPath}\n` + String.raw`
 import fs from 'node:fs';
 process.stdin.resume();
@@ -277,7 +277,7 @@ process.stdin.on('end', () => {
     vi.stubEnv('FC_FIXTURE_MESSAGE', diagnostic);
     setEngineDefaults({ default_timeout_ms: 30_000, stage_technical_retries: 2 });
     const workflow = WorkflowConfigSchema.parse({ name: 'size-fixture', defaults: { max_iterations: 1, max_retries: 2 },
-      stages: [{ id: 'work', role: 'fixture', scope: [], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
+      stages: [{ id: 'work', role: 'fixture', scope: ['calls.txt'], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
     const run = createRun(project, workflow.name, stringify(workflow), ['work']);
     await executeReadyBatch(workflow.stages, readRunState(project, run.runId), project, run.runId, run.runDirPath, workflow,
       new CodexAdapter(), new Map([['fixture', { ...role, name: 'fixture' }]]), project,

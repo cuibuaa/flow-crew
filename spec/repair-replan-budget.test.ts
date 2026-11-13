@@ -118,6 +118,10 @@ describe('admitted repair routes and budgets', () => {
     expect(readFileSync(join(projectDir, 'input.txt'), 'utf8')).toBe('frozen evidence\n');
   });
 
+  // Each scenario settles nine attempts, including four real command-recorder
+  // reproductions and their Git/integrity I/O. Completion events and the exact
+  // repair counts decide the result; this bound only catches a hung scenario
+  // and must tolerate contention in the parallel suite.
   it.each([1, 2])('stops a repairable rejection after the repair budget is spent (max iterations=%s)', async maxIterations => {
     const result = await scenario({ alwaysReject: true, maxIterations });
     expect(result.state.status, result.state.failureReason).toBe('incomplete');
@@ -130,5 +134,5 @@ describe('admitted repair routes and budgets', () => {
     expect(result.events.filter(event => event.type === 'run_completed')).toEqual([
       expect.objectContaining({ iteration: 1, detail: 'incomplete' }),
     ]);
-  });
+  }, 300_000);
 });

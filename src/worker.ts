@@ -15,12 +15,14 @@ import { EngineStateError, withEngineIntegrity } from './engine-integrity.js';
 import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { recordInvocationInput } from './run-state-view.js';
 import { finalizeStageSessions } from './adapter-session.js';
+import { stageSessionHome } from './adapter-session.js';
+import { legacyWriteGrant, withStageWriteGrant, WriteGrantError } from './write-grant.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
 import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
@@ -80,6 +82,7 @@ import {
   writeStageArtifactContractAudit,
   stageArtifactProduction,
 } from './stage-artifact-contract.js';
+import { readAdmittedBriefContract, externalOutputDirectory } from './ship-inputs.js';
 import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.js';
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
@@ -96,6 +99,8 @@ export function plannerCriterionAssignmentContext(_brief: string, runDir: string
 }
 
 export interface StageOpts {
+  /** Admitted declaration; never extracted from the prompt or observed writes. */
+  scope?: readonly string[];
   /** Scheduled stages return JSON; standalone legacy workers remain readable. */
   outputSchema?: Schema;
   /** Engine-built allowlist input; excludes handoffs, guidance and previous sessions. */
@@ -191,6 +196,7 @@ export function freshRunningStageProjection(
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
     'writes', 'writeAttribution', 'constraintAudit', 'timeout', 'acceptedFrom', 'continuation', 'gate',
+    'writeGrantApplied', 'writeGrantFailure',
   ] as const) delete next[field];
   return next;
 }
@@ -309,7 +315,8 @@ export async function runStage(
 
   // Isolated decisions are read-only consumers. A repair can also return a
   // decision, but keeps the ordinary author boundary and its one validation.
-  let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !(opts.decisionResult && opts.isolatedInput)
+  const isolatedDecision = Boolean(opts.decisionResult && opts.isolatedInput);
+  let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !isolatedDecision
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
   // Use the same raw declarations as configured validation, including ignored
   // artifacts. The rendered task description has already lost frontmatter.
@@ -947,22 +954,47 @@ export async function runStage(
         stageId: opts.stageId, artifactContract: opts.artifactContract!,
         },
       async () => {
+        // These existing carriers are published by the engine from the typed
+        // result. Their declarations are completion duties, never agent writes.
+        const engineCarriers = new Set(publicationCarriers().map(carrier => resolve(stageWorkPath(opts.runDir, carrier))));
+        const writableArtifacts = opts.artifactContract && { ...opts.artifactContract,
+          produces: opts.artifactContract.produces.filter(output => output.root !== 'run' || !engineCarriers.has(resolve(opts.runDir, output.path))) };
+        // A planner still transports its proposal in this framework-owned
+        // exact file. Prepare the inode, so its grant needs no parent/siblings.
+        // The existing nonempty/plan admission checks still require a proposal.
+        if (opts.dynamicDispatch && runState?.writeGrant?.capability.kind === 'landlock') {
+          const path = stageWritePath(opts.runDir, 'dispatch.yaml');
+          try { writeFileSync(path, '', { flag: 'wx' }); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+        }
+        // External directory outputs are already admitted typed capabilities.
+        // Gates and isolated decisions are read-only; authors share these trees,
+        // launch uses the same no-REFER boundary as other shared directories.
+        const briefContract = readAdmittedBriefContract(opts.runDir, evidenceBrief);
+        const externalDirectories = opts.isGate || isolatedDecision ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
+          .map(output => externalOutputDirectory(output, opts.projectDir, undefined,
+            { runDir: opts.runDir, inputPaths: briefContract.inputs.map(input => input.path) }));
+        const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
+          runDir: opts.runDir, stageId: opts.stageId, scope: opts.scope, artifacts: writableArtifacts, externalDirectories,
+          home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };
         const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
           const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
-          const response = await runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
+          const response = await withStageWriteGrant(grant, () => runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
             display: request.command, cwd: request.cwd, runDir: opts.runDir,
-            abortSignal: AbortSignal.any([invocationAbortSignal, signal]) });
+            abortSignal: AbortSignal.any([invocationAbortSignal, signal]) }));
           const record = appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex, invocationIndex,
             commandId: `recorded-${invocationIndex}-${++recordedCommandIndex}`, command: request.command,
             context: { cwd: request.cwd, shell: request.shell }, exitCode: response.exitCode, unfinished: response.unfinished,
             outputDigest: createHash('sha256').update(JSON.stringify([response.stdout ?? '', response.stderr ?? ''])).digest('hex'),
             treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash });
-          return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}) };
+          return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}),
+            ...(response.writeGrantFailure ? { writeGrantFailure: response.writeGrantFailure } : {}),
+            ...(response.writeGrantApplied ? { writeGrantApplied: response.writeGrantApplied } : {}) };
         }) : undefined;
         const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment, waiting for completion or invocation cancellation, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
         const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
         try {
-        return await runAdapter(selectedAdapter, recordedPrompt, invocationRole, {
+        return await withStageWriteGrant(grant, () => runAdapter(selectedAdapter, recordedPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
@@ -978,7 +1010,7 @@ export async function runStage(
           outputSchema: opts.outputSchema,
         }, runState?.inputLimitChars, () => {
           if (!selectedAdapter.capturesInvocationInput) captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt }, 'adapter');
-        }, { limit: durationLimit, attemptBudgetMs: opts.timeout_ms });
+        }, { limit: durationLimit, attemptBudgetMs: opts.timeout_ms }));
         } finally { await recorder?.close(); }
       }).then(
         (value) => {
@@ -996,7 +1028,9 @@ export async function runStage(
         (error) => {
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
-          if (error instanceof EngineStateError) {
+          if (error instanceof WriteGrantError) {
+            finish({ writeGrantFailure: error.outcome, output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
+          } else if (error instanceof EngineStateError) {
             finish({ engineVoid: true, terminationCause: 'engine_void', output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
           } else if (aggregateAbortSignal.aborted) finish(cancelledResult());
           else if (invocationAbortController.signal.aborted) finish(cancelledResult());
@@ -1365,6 +1399,8 @@ export async function runStage(
     processExitCode: result.processExitCode,
     processSignal: result.processSignal,
     providerFailure: result.providerFailure,
+    writeGrantFailure: result.writeGrantFailure,
+    writeGrantApplied: result.writeGrantApplied,
     artifacts,
     completedAt: new Date().toISOString(),
     error: result.exitCode !== 0

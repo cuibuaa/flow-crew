@@ -290,6 +290,11 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), `flowcrew-e18-${randomBytes(4).toString('hex')}-`));
   projectDir = join(root, 'project');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
+  // These exact scopes are executable permissions, so materialize their
+  // fixture inodes before the gate's recorded confirmation command launches.
+  for (const path of ['src/scheduler.ts', 'spec/e18-gate-retry-entry.test.ts', 'checks/e18-gate-retry-entry.test.ts']) {
+    mkdirSync(dirname(join(projectDir, path)), { recursive: true }); writeFileSync(join(projectDir, path), 'fixture');
+  }
   setFcGlobalDir(join(root, 'fc-home'));
 });
 

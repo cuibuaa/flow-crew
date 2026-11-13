@@ -11,7 +11,7 @@ import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { recordStageOutcome } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
@@ -49,7 +49,10 @@ process.stdin.on('end', () => {
     const owner = path.join(home, '..', '..', '..', 'owner', 'homes', 'codex');
     if (fs.existsSync(path.join(home, 'state_5.sqlite'))) throw Error('source index with absolute paths was copied');
     if (fs.existsSync(path.join(home, 'sessions', 'closed.jsonl'))) throw Error('predecessor conversation copied');
-    fs.writeFileSync(path.join(owner, 'witness'), 'ordinary filesystem access');
+    let witness;
+    try { fs.writeFileSync(path.join(owner, 'witness'), 'ordinary filesystem access'); witness='allowed'; }
+    catch(error) { witness=error.code; }
+    fs.writeFileSync(path.join(home, 'witness-result'), witness);
     process.stderr.write('error: reasoning effort is not supported with tools for this model\n');
     process.exit(1);
   }
@@ -121,7 +124,11 @@ describe('one recoverable record per native invocation', () => {
       expect(transports[index].argv).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     }
     expect(readFileSync(join(owner, 'config.toml'), 'utf8')).toBe('model = "author-model"\n');
-    expect(readFileSync(join(owner, 'witness'), 'utf8')).toBe('ordinary filesystem access');
+    const capability = readRunState(project, runId).writeGrant!.capability;
+    if (capability.kind === 'landlock') expect(result.writeGrantApplied?.abi).toBe(capability.abi);
+    else expect(capability.kind).toBe('unavailable');
+    expect(readFileSync(stageWorkPath(directory, 'stages', 'writer', 'homes', 'codex', 'witness-result'), 'utf8')).toBe(capability.kind === 'landlock' ? 'EACCES' : 'allowed');
+    expect(existsSync(join(owner, 'witness'))).toBe(capability.kind !== 'landlock');
     expect(readSession(directory, 'writer', 'codex')).toMatchObject({ ownerStageId: 'writer', sessionId: freshUUID });
   });
 

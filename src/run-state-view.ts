@@ -1,6 +1,7 @@
 import type { LockWait } from './lock-publication.js';
 import { readRunLockWaits } from './run-lock.js';
 import { projectValidationResult } from './project-validation.js';
+import { legacyWriteGrant, type WriteGrantContract } from './write-grant.js';
 import { runRecordPath } from './run-layout.js';
 import { parseJsonlWithDiagnostics } from './jsonl.js';
 import { stageAttemptKey } from './stage-live-log.js';
@@ -305,7 +306,7 @@ export interface RunStateView {
   observedAt: string;
   lockWaits: LockWait[];
   snapshot: { runStateRevision: number | null; runStateSha256: string; evidenceSha256: string; sources: EvidenceSource[] };
-  run: { runId: string; projectDir: string; workflowName: string; status: unknown; statusResolution: ReturnType<typeof readArchivedRunState>['status']; startedAt: string; completedAt?: string; currentIteration: number | null; failureReason?: string };
+  run: { runId: string; projectDir: string; workflowName: string; status: unknown; statusResolution: ReturnType<typeof readArchivedRunState>['status']; startedAt: string; completedAt?: string; currentIteration: number | null; failureReason?: string; writeGrant: WriteGrantContract };
   plan: { stages: unknown[]; source: 'dispatchedStages' | 'plan' | 'unavailable'; revision: z.infer<typeof PlanRevisionSchema> | null; history: z.infer<typeof PlanRevisionSchema>[]; decisions: Record<string, import('./plan-revisions.js').PlanRevisionDecision>; admissionClaim: 'recorded' | 'unknown' };
   validation?: import('./store.js').GateVerdict['validation'];
   stages: Record<string, StageStatus>;
@@ -536,7 +537,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       version: 1, observedAt,
       lockWaits: readRunLockWaits(projectDir, runDirectory),
       snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
-      run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason },
+      run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason, writeGrant: state.writeGrant ?? legacyWriteGrant() },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },
       ...(state.validation ? { validation: state.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) } : {}),
       stages: Object.fromEntries(Object.entries(state.stages).map(([id, stage]) => [id, { ...stage,

@@ -454,7 +454,7 @@ function readStageOutputPreviews(runId: string): Record<string, string> {
   return out;
 }
 
-function stateToRunDetail(state: StoreState, projectDir: string) {
+export function stateToRunDetail(state: StoreState, projectDir: string) {
   const roles = loadStageRoles(projectDir, state.runId);
   const dispatched = new Map<string, Record<string, unknown>>();
   for (const stage of Array.isArray(state.dispatchedStages) ? state.dispatchedStages : []) {
@@ -519,6 +519,7 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     taskDescriptionPreview: (state.taskDescription ?? '').slice(0, 300),
     campaignId: state.campaignId ?? state.campaignStorageKey,
     failureReason: state.failureReason,
+    writeGrant: state.writeGrant ?? { version: 1, capability: { kind: 'legacy_ungranted' }, sharedCaches: [] },
     realityGate: state.realityGate,
     stages,
     stageEvidence: state.stageEvidence ?? [],

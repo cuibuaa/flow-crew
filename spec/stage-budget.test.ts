@@ -66,7 +66,7 @@ function options(created: {
   runId: string;
   runDirPath: string;
 }, time = manualClock()) {
-  return { stageId: 'work', role, dependsOn: [], promptTemplate: 'Complete two units and retain unit 1 for continuation.',
+  return { stageId: 'work', scope: ['.'], role, dependsOn: [], promptTemplate: 'Complete two units and retain unit 1 for continuation.',
     artifactContract: fixtureArtifactContract('work'), outputSchema: HANDOFF_SCHEMA,
     timeout_ms: budget, deadlineClock: time.clock, projectDir: project, runId: created.runId, runDir: created.runDirPath,
     retries: 0, };
@@ -88,7 +88,7 @@ function nativeFixture(provider: 'codex' | 'claude', time: ReturnType<typeof man
   vi.stubEnv('CODEX_PLUGINS_CACHE', join(root, 'plugins'));
   vi.stubEnv('CODEX_SKILLS_CACHE', join(root, 'skills'));
   vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
-  vi.stubEnv('FC_BUDGET_CALLS', join(root, 'calls.jsonl'));
+  vi.stubEnv('FC_BUDGET_CALLS', join(project, 'calls.jsonl'));
   vi.stubEnv('FC_BUDGET_MODE', mode);
   vi.stubEnv('FC_BUDGET_SESSION', String(session));
   writeFileSync(join(bin, provider), `#!${process.execPath}\n` + String.raw `
@@ -131,7 +131,7 @@ process.stdin.on('end',()=>{
               ? stageWrapUpTiming(budget).warningAfterMs : stageWrapUpTiming(budget).hardLimitMs);
         } });
     } };
-  return { adapter, deliveredRemaining, calls: () => readFileSync(join(root, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+  return { adapter, deliveredRemaining, calls: () => readFileSync(join(project, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
       argv: string[];
       input: string;
     }) };

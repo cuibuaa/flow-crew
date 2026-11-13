@@ -28,7 +28,7 @@ function owned(stopCode: number | null = null) {
   const ready = deferred();
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
   const stop = vi.fn(async () => { child.emit('close', stopCode, 'SIGTERM'); });
-  vi.spyOn(owner, 'spawnOwnedCommand').mockImplementation(() => { ready.resolve(); return { child: child as unknown as owner.ChildProcess, stop, publication: Promise.resolve() }; });
+  vi.spyOn(owner, 'spawnOwnedCommand').mockImplementation(() => { ready.resolve(); return { child: child as unknown as owner.ChildProcess, stop, publication: Promise.resolve(), writeGrantFailure: () => undefined, writeGrantApplied: () => undefined }; });
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   return { child, stop, ready: ready.promise };
 }

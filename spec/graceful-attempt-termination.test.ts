@@ -452,7 +452,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
         try {
           const result = await runStage(adapter, {
-      artifactContract: fixtureArtifactContract(stageId),
+      artifactContract: fixtureArtifactContract(stageId), scope: ['.'],
             stageId,
             role: FIXTURE_ROLE,
             dependsOn: [],
@@ -556,7 +556,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
     try {
       const result = await runStage(adapter, {
-      artifactContract: fixtureArtifactContract(stageId),
+      artifactContract: fixtureArtifactContract(stageId), scope: ['.'],
         stageId,
         role: FIXTURE_ROLE,
         dependsOn: [],

@@ -1,7 +1,7 @@
 // Retain the test environment's PATH transport after removing the fake disk guard.
 process.env.PATH = process.env.PATH ?? '';
 import { afterAll, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validationEnvironment } from "./src/validation-environment.js";
@@ -54,7 +54,7 @@ function getIsolationRegistry(): VitestIsolationRegistry {
 }
 
 function createVitestFileIsolation(): VitestFileIsolation {
-  const root = mkdtempSync(join(tmpdir(), "flowcrew-vitest-file-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "flowcrew-vitest-file-")));
   const home = join(root, "home");
   const fcHome = join(home, ".fc");
   mkdirSync(fcHome, { recursive: true });

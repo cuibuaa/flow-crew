@@ -120,6 +120,9 @@ target, base, new branch, research declarations, adapter, foreground/background,
 iteration bound and stage deadline read from engine configuration (`max_iterations`
 and `default_timeout_ms`), lowered by the brief's `stage_duration_ms` when declared. Do not hardcode defaults.
 Explain unattended shell authority and the scope-versus-host-isolation boundary.
+On capable hosts, explain the [stage filesystem write grant](../guide/operations.md#stage-filesystem-write-grants):
+authors and repairs retain admitted output directories when returning a successor;
+isolated routing decisions and review gates receive no write grant for those directories.
 
 Ask: “Start this exact brief digest `<digest>` with these settings?”
 Wait for a new explicit answer after the final bytes/settings were shown.

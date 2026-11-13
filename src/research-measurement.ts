@@ -1,3 +1,4 @@
+import { landlockPython } from './write-grant.js';
 import { RUN_STATUS } from './lifecycle-status.js';
 import { readCommittedResearchState, verifyResearchRef as verifyRef, type ResearchCommit } from './research-history.js';
 /** Frozen execution and durable settlement replace scientific measurement policy.
@@ -105,37 +106,11 @@ export function captureMeasuredCandidate(project: string, run: string, label: st
 // Use the system Python only as a syscall bridge; -I/-B exclude authored imports
 // and bytecode writes. No evaluator runs unless confinement is installed.
 const confinedMeasurement = `
-import ctypes, os, platform, shutil, signal, subprocess, sys
+${landlockPython}
+import shutil, signal, subprocess, sys
 if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'aarch64'):
     raise RuntimeError('measurement requires Linux Landlock on x86_64/aarch64')
-libc = ctypes.CDLL(None, use_errno=True)
-def checked(value):
-    if value < 0:
-        raise OSError(ctypes.get_errno(), 'measurement write confinement unavailable')
-    return value
-abi = checked(libc.syscall(444, 0, 0, 1))
-if abi < 3:
-    raise RuntimeError('measurement requires Landlock ABI >= 3 (truncate protection)')
-# WRITE_FILE, REMOVE_*, MAKE_*, REFER and TRUNCATE; reads/exec stay available.
-writes = (1 << 1) | sum(1 << n for n in range(4, 15))
-if abi >= 5:
-    writes |= 1 << 15 # IOCTL_DEV
-class Ruleset(ctypes.Structure):
-    _fields_ = [('access', ctypes.c_uint64)]
-class Beneath(ctypes.Structure):
-    _pack_ = 1
-    _fields_ = [('access', ctypes.c_uint64), ('parent', ctypes.c_int)]
-rules = Ruleset(writes)
-fd = checked(libc.syscall(444, ctypes.byref(rules), ctypes.sizeof(rules), 0))
-for path in set((os.environ['HOME'], os.environ['TMPDIR'], '/dev/null')):
-    parent = os.open(path, os.O_PATH | os.O_CLOEXEC)
-    allowed = writes if os.path.isdir(path) else (1 << 1) | (1 << 14)
-    rule = Beneath(allowed, parent)
-    checked(libc.syscall(445, fd, 1, ctypes.byref(rule), 0))
-    os.close(parent)
-checked(libc.prctl(38, 1, 0, 0, 0)) # PR_SET_NO_NEW_PRIVS
-checked(libc.syscall(446, fd, 0))
-os.close(fd)
+apply_write_grant(tuple(os.path.realpath(path) for path in (os.environ['HOME'], os.environ['TMPDIR'], '/dev/null')), landlock_abi())
 # Popen's close-on-exec error pipe distinguishes exec failure from command exit.
 # Buffer command stdout until success is acknowledged; no output can forge it.
 try:

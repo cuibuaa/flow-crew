@@ -180,6 +180,7 @@ export async function executeSingleStage(
     writeRunState(projectDir, runId, state);
 
     result = await runStage(stageAdapter, {
+      scope: stage.scope,
       stageId: stage.id,
       role: agent,
       attribution: { role: stage.role, iteration: state.currentIteration ?? 1 },

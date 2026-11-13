@@ -91,7 +91,7 @@ describe('direct workflow', () => {
       } else {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }
-      expect(call.user).toContain('Planner project-path estimate');
+      expect(call.user).toContain('Declared writable project paths');
       expect(call.user).toContain('Stage budget:');
       expect(call.user).toContain('# Execution clock');
       expect(call.user).toContain('Engine state query');

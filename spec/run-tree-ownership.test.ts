@@ -523,14 +523,17 @@ it.each(['project', 'run'] as const)('lets successive stages use captured run me
   const directories = ['evidence-case', runId].map(name => join(base, name));
   const options = { projectDir: project, runDir: run, runId, role, timeout_ms: 10000,
     retries: 0, outputSchema: { type: 'object' }, promptTemplate: 'Use the captured evidence.' };
+  const captureContract = { ...contract, produces: directories.map((directory, index) => ({
+    id: `capture_${index}`, root: outputRoot, path: relative(outputRoot === 'run' ? run : project, directory), kind: 'directory' as const,
+  })) };
   const capture = await runStage({ async run() {
     const result = await child(`const fs=require('node:fs'),path=require('node:path');
       for(const dir of ${JSON.stringify(directories)}) {
-        fs.mkdirSync(dir); fs.copyFileSync(${JSON.stringify(join(run, 'run.json'))},path.join(dir,'run.json'));
+        fs.mkdirSync(dir,{recursive:true}); fs.copyFileSync(${JSON.stringify(join(run, 'run.json'))},path.join(dir,'run.json'));
         fs.writeFileSync(path.join(dir,'observation.txt'),'observed');
       }`);
     return { ...result, output: '{}' };
-  } }, { ...options, stageId: 'work', dependsOn: [], artifactContract: contract });
+  } }, { ...options, stageId: 'work', dependsOn: [], artifactContract: captureContract });
   expect(capture.exitCode, capture.friendlyError).toBe(0);
   const captured = directories.map(directory => readFileSync(join(directory, 'run.json')));
   for (const record of captured) expect(JSON.parse(record.toString())).toMatchObject({ runId, storageLayout: 2 });
@@ -542,7 +545,7 @@ it.each(['project', 'run'] as const)('lets successive stages use captured run me
   ]) };
   const findings = artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [
     { id: 'review', depends_on: ['work'], artifact_contract: artifactContract },
-    { id: 'work', depends_on: [], artifact_contract: contract },
+    { id: 'work', depends_on: [], artifact_contract: captureContract },
   ] });
   let invoked = false;
   const review = await runStage({ async run() {

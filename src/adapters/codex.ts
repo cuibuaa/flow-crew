@@ -331,7 +331,7 @@ export class CodexAdapter implements Adapter {
             `\n↪︎ flowcrew: exit ${result.exitCode} matched "${diagnosis.matched}" → retrying once with ${diagnosis.fix}\n`);
         } catch { /* non-critical */ }
       }
-      if (result.exitCode !== 0) result.friendlyError = providerDiagnosticReason(
+      if (result.exitCode !== 0 && !result.writeGrantFailure) result.friendlyError = providerDiagnosticReason(
         [diagnosis.friendly, parsed.terminalError].filter(Boolean).join(' — ')) || undefined;
       const rawOutput = result.output;
       Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: durationMs });
@@ -344,7 +344,7 @@ export class CodexAdapter implements Adapter {
       } else {
         result.writeAttribution = 'unknown';
       }
-      result.output = result.spawnError ? rawOutput
+      result.output = result.writeGrantFailure ? result.friendlyError ?? rawOutput : result.spawnError ? rawOutput
         : parsed.output || extractFinalMessage(result.stdout ?? rawOutput);
       if (result.exitCode !== 0 && result.stderr?.trim() && !result.output.includes(result.stderr.trim())) {
         result.output = [result.output, result.stderr.trim()].filter(Boolean).join('\n');

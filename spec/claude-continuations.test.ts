@@ -33,7 +33,8 @@ beforeEach(() => {
   priorEnvironment = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]));
   process.env.PATH = `${bin}:${process.env.PATH ?? ''}`;
   process.env.CLAUDE_CONFIG_DIR = join(root, 'source');
-  process.env.FC_CLAUDE_CALLS = join(root, 'calls.jsonl');
+  process.env.FC_CLAUDE_CALLS = join(project, 'calls.jsonl');
+  writeFileSync(join(project, 'calls.jsonl'), '');
   priorStore = fcGlobalDir();
   setFcGlobalDir(join(root, 'store'));
   writeFileSync(join(bin, 'claude'), `#!${process.execPath}\n` + String.raw`
@@ -43,7 +44,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
   const calls = process.env.FC_CLAUDE_CALLS;
-  const count = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').length : 0;
+  const count = fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).length;
   fs.appendFileSync(calls, JSON.stringify({ argv: process.argv.slice(2), stdin: input, home: process.env.CLAUDE_CONFIG_DIR }) + '\n');
   const emit = event => console.log(JSON.stringify(event));
   const id = '11111111-1111-4111-8111-111111111111';
@@ -102,13 +103,13 @@ describe('Claude cold same-attempt continuations (G03)', () => {
       }
     }
     const result = await runStage(new ObservedClaudeAdapter(), {
-      stageId: 'work', role, dependsOn: [], promptTemplate: duties,
+      stageId: 'work', scope: ['calls.jsonl'], role, dependsOn: [], promptTemplate: duties,
       timeout_ms: 10_000, projectDir: project, runId: created.runId, runDir: created.runDirPath,
       retries: 0, outputSchema: HANDOFF_SCHEMA, artifactContract: fixtureArtifactContract('work'),
     });
     expect(injectionError).toBeUndefined();
     expect(result.exitCode, result.output).toBe(0);
-    const calls = readFileSync(join(root, 'calls.jsonl'), 'utf8').trim().split('\n')
+    const calls = readFileSync(join(project, 'calls.jsonl'), 'utf8').trim().split('\n')
       .map(line => JSON.parse(line) as { argv: string[]; stdin: string; home: string });
     expect(calls).toHaveLength(2);
     expect(calls[0].argv).not.toContain('--resume');

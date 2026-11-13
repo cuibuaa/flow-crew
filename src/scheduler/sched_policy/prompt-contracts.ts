@@ -28,7 +28,8 @@ export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
 }
 
 export function appendProjectWriteContext(prompt: string, stage: StageConfig): string {
-  return `${prompt}\n\nPlanner project-path estimate: ${JSON.stringify(stage.scope ?? [])}. This estimate informs scheduling and reporting; required project work may use other paths. `
+  return `${prompt}\n\nDeclared writable project paths: ${JSON.stringify(stage.scope ?? [])}. On capable hosts the kernel grants only these paths, declared outputs, this stage's home and scratch, explicit shared caches, and its own Git metadata. `
+    + 'Literal directories grant their descendants; existing exact files grant content writes only. Absent exact files and arbitrary globs require an explicit directory declaration. '
     + 'Preserve evidence that the task explicitly declares frozen. Input locators alone do not freeze source trees. '
     + 'Each invocation has private scratch at $TMPDIR (also $TMP and $TEMP). Use mktemp -d "$TMPDIR/probe-XXXXXX" for disposable probes; check creation succeeded before copying.';
 }

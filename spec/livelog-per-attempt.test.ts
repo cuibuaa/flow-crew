@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(root, 'source'));
   vi.stubEnv('CODEX_PLUGINS_CACHE', join(root, 'plugins'));
   vi.stubEnv('CODEX_SKILLS_CACHE', join(root, 'skills'));
-  vi.stubEnv('FC_NATIVE_ATTEMPT_COUNTER', join(root, 'counter'));
+  vi.stubEnv('FC_NATIVE_ATTEMPT_NUMBER', '1');
 });
 
 afterEach(async () => {
@@ -56,9 +56,7 @@ function fakeExecutable(kind: 'claude' | 'codex'): void {
 const fs = require('node:fs');
 process.stdin.resume();
 process.stdin.on('end', () => {
-  const counter = process.env.FC_NATIVE_ATTEMPT_COUNTER;
-  const n = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) + 1 : 1;
-  fs.writeFileSync(counter, String(n));
+  const n = Number(process.env.FC_NATIVE_ATTEMPT_NUMBER);
   const result = JSON.stringify({pass:n > 1, reason:'native attempt ' + n, criteria:{},
     audit_findings:{version:1,findings:[]},
     ...(n === 1 ? {repairability:{version:1,disposition:'repairable',evidence:'native attempt 1'}} : {})});
@@ -113,6 +111,7 @@ describe('native logs belong to scheduler attempts', () => {
             expect(readOperationalProjection(opts.runDir).activeStages).toContainEqual(
               expect.objectContaining({ id: 'review', execution: 2 }));
           }
+          vi.stubEnv('FC_NATIVE_ATTEMPT_NUMBER', String(opts.attemptIndex));
           const result = await native.run(prompt, role, opts);
           results.push(result);
           if (opts.attemptIndex === 1) firstStream = readFileSync(stageLiveLogPath(opts.runDir, 'review', 1), 'utf8');

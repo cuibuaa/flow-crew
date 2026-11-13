@@ -48,7 +48,7 @@ describe('completed author work reaches its independent gate within the validati
     const child = Object.assign(new EventEmitter(), { stdout, stderr, exitCode: null, signalCode: null, unref });
     let entered!: () => void;
     const ready = new Promise<void>(resolve => { entered = resolve; });
-    vi.spyOn(commandOwner, 'spawnOwnedCommand').mockImplementation(() => { entered(); return { child: child as unknown as commandOwner.ChildProcess, stop }; });
+    vi.spyOn(commandOwner, 'spawnOwnedCommand').mockImplementation(() => { entered(); return { child: child as unknown as commandOwner.ChildProcess, stop, publication: Promise.resolve(), writeGrantFailure: () => undefined, writeGrantApplied: () => undefined }; });
     const control = new AbortController();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
@@ -205,6 +205,8 @@ describe('declared project assertions survive engine ownership', () => {
 describe('declared validation environment preserves data isolation', () => {
   it('keeps outside data unchanged through a worktree symlink and records the isolating input', async () => {
     const root = project(), outside = project(), isolated = project();
+    mkdirSync(join(root, 'config'));
+    writeFileSync(join(root, 'config/write-grant.json'), JSON.stringify({ shared_caches: [isolated] }));
     writeFileSync(join(outside, 'ledger'), 'original');
     symlinkSync(outside, join(root, 'data'), 'dir');
     const program = "require('fs').appendFileSync(require('path').join(process.env.PROJECT_STATE || 'data','ledger'),'measured')";

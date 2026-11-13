@@ -252,7 +252,7 @@ export class ClaudeAdapter implements Adapter {
       if (exitCode !== 0 && execution.stderr?.trim() && !output.includes(execution.stderr.trim())) output = [output, execution.stderr.trim()].filter(Boolean).join('\n');
       if (exitCode === 137) output += '\n[stage cancelled by control plane]\n';
       result = { ...execution, output, exitCode, sessionId, providerFailure,
-        friendlyError: exitCode !== 0 ? providerDiagnosticReason(
+        friendlyError: execution.writeGrantFailure ? execution.friendlyError : exitCode !== 0 ? providerDiagnosticReason(
           [diagnosis.friendly, summary.diagnostic].filter(Boolean).join(' — ')) || undefined : undefined,
         writes: [...summary.writes].sort(), writeAttribution: summary.writes.size ? 'structured' : 'unknown' };
       delete (result as ExecResult).stdout;

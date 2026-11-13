@@ -263,6 +263,7 @@ export interface OperationalProjection {
 }
 
 export interface RunDetailData {
+  writeGrant?: { version: 1; capability: { kind: 'landlock'; abi: number } | { kind: 'unavailable'; reason: string; abi?: number } | { kind: 'legacy_ungranted' }; sharedCaches: string[] };
   researchRecord?: { value: ProtocolResearchRecord | null; error?: string };
   runId: string;
   projectDir?: string;

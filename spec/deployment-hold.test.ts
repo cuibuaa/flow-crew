@@ -106,7 +106,7 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
     const stdout = new PassThrough(), stderr = new PassThrough();
     let result = ''; stdout.on('data', chunk => { result += chunk; });
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const waiting = cmdDaemon(['daemon', 'hold', '--timeout-ms', '0'], {
+    const waiting = cmdDaemon(['daemon', 'hold', '--socket', '/fixture.sock', '--timeout-ms', '0'], {
       stdout: stdout as NodeJS.WriteStream, stderr: stderr as NodeJS.WriteStream,
       controls: { sendRpc: async () => orchestrator.holdDeployment() },
     });

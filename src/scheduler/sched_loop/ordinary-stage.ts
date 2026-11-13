@@ -147,6 +147,7 @@ export async function executeOrdinaryStage(
       // A code-decided substitute retains the configured identity used to size its input.
       const executionAdapter = isolatedInput?.adapter ? { ...isolatedInput.adapter, sessionKind: stageAdapter.sessionKind } : stageAdapter;
       const result = await runStage(executionAdapter, {
+        scope: stage.scope,
         stageId: stage.id,
         role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,
         dependsOn: stage.depends_on ?? [],

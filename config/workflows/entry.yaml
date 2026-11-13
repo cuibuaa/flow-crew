@@ -18,7 +18,7 @@ stages:
 dispatch:
   - id: implement
     role: coder
-    scope: ["**", "node_modules/", ".venv/"]
+    scope: ["."]
   - id: assess
     role: qa
     scope: []
@@ -39,7 +39,7 @@ dispatch:
     is_gate: true
   - id: repair
     role: coder
-    scope: ["**", "node_modules/", ".venv/"]
+    scope: ["."]
     depends_on: [review, review_full]
     retry_to: [review, review_full]
     decision:

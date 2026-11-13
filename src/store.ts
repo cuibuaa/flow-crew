@@ -1,4 +1,5 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
+import { admitWriteGrant, legacyWriteGrant, WriteGrantContractSchema, type WriteGrantContract } from './write-grant.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { withProcessLock, readLockWaits } from './lock-publication.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
@@ -119,6 +120,8 @@ export interface StageContinuation {
 }
 
 export interface StageAttempt extends InvocationUsage {
+  writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
+  writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   role?: string;
   iteration?: number;
   /** Explicit result reclassification; timing and token evidence remain. */
@@ -154,6 +157,8 @@ export interface StageAttempt extends InvocationUsage {
 }
 
 export interface StageStatus extends InvocationUsage {
+  writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
+  writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   admissionFailure?: { code: 'dispatch_refused'; attemptIndex: number };
   /** Acceptance already settled in an isolated child; no local gate execution. */
   acceptedFrom?: { runId: string; verdict: GateVerdict };
@@ -379,6 +384,8 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  /** Frozen at new-run admission; legacy continuations explicitly stay ungranted. */
+  writeGrant?: WriteGrantContract;
   /** Current-tree raw command coverage, independent of run acceptance. */
   validation?: GateVerdict['validation'];
   /** Immutable storage topology; absent only on legacy runs. */
@@ -970,6 +977,7 @@ export function initializeReservedRun(
   const stages: Record<string, StageStatus> = {};
   for (const sid of stageIds) stages[sid] = { status: 'pending', retries: 0 };
   const state: StoreState = {
+    writeGrant: admitWriteGrant(normalizedProjectDir),
     storageLayout: 2,
     runId,
     workflowName,
@@ -1344,6 +1352,12 @@ function persistRunStateUnlocked(
   }
 
   if (currentProjection?.storageLayout === 2) state.storageLayout = 2;
+  // A stale compatibility projection may neither replace nor drop admission.
+  // A legacy record acquires only an explicit ungranted marker, never a new
+  // host probe or a policy that was absent from its original admission.
+  state.writeGrant = currentProjection
+    ? WriteGrantContractSchema.parse(currentProjection.writeGrant ?? legacyWriteGrant())
+    : state.writeGrant && WriteGrantContractSchema.parse(state.writeGrant);
   const currentRef = currentProjection?.stateFormat ? historyRef(currentProjection.stateFormat) : undefined;
   const historyPath = currentRef?.path ?? relative(runPath, runRecordPath(runPath, RUN_HISTORY_FILE));
   const committedBytes = currentRef?.committedBytes ?? 0;
@@ -1520,6 +1534,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
     if (status.kind === 'known') previous.status = status.status;
     const state = structuredClone(previous);
     mutator(state);
+    state.writeGrant = previous.writeGrant && WriteGrantContractSchema.parse(previous.writeGrant);
     if (state.runId !== identity.runId || state.projectDir !== identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: operational mutation changed run identity');
     if (!isJsonPersistedEqual(previous.stateFormat, state.stateFormat)
         || !isJsonPersistedEqual(historiesFromState(previous), historiesFromState(state))) {
@@ -1540,6 +1555,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
     }
     let expected = raw;
     const persist = (): void => {
+      state.writeGrant = previous.writeGrant && WriteGrantContractSchema.parse(previous.writeGrant);
       if (state.stateFormat) state.stateFormat.revision += 1;
       publishRunProjection(identity.projectDir!, identity.directory, state, state, () => {
         if (readFileSync(path, 'utf8') !== expected) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
@@ -1731,6 +1747,8 @@ export function beginStageAttempt(
 }
 
 export interface CompleteStageAttemptInput extends InvocationUsage {
+  writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
+  writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   attribution?: AttemptAttribution;
   disposition?: AttemptDisposition;
   invocations?: NativeInvocationUsage[];
@@ -1796,6 +1814,8 @@ export function completedStageAttemptStatus(
     processExitCode: completion.processExitCode,
     processSignal: completion.processSignal,
     providerFailure: completion.providerFailure,
+    writeGrantFailure: completion.writeGrantFailure,
+    writeGrantApplied: completion.writeGrantApplied,
     ...invocationUsageFields(completion),
     tokenUsage: completion.tokenUsage ?? current.tokenUsage ?? (tokensComplete(completion) ? 'known' : 'unknown'),
     invocations: completion.invocations ?? current.invocations,
@@ -1819,6 +1839,8 @@ export function completedStageAttemptStatus(
     processExitCode: completion.processExitCode,
     processSignal: completion.processSignal,
     providerFailure: completion.providerFailure,
+    writeGrantFailure: completion.writeGrantFailure,
+    writeGrantApplied: completion.writeGrantApplied,
     duration_ms: sumAttemptField(attempts, 'duration_ms'),
     artifacts: uniqueStrings(previous?.artifacts, completion.artifacts),
     retries,
