@@ -38,9 +38,9 @@ export default function verifyTestRuntimeGeneration(): () => void {
   // aliased .tmp-* tree makes no-follow homes and engine-carrier fixtures invalid.
   // The existing owner supplies short physical storage until all workers close.
   const scratch = createInvocationScratch();
-  // Generated extensionless Node executables must not inherit the checkout's
-  // module type when an operator places temporary storage inside the checkout.
-  writeFileSync(join(scratch.path, 'package.json'), '{"type":"commonjs"}\n');
+  // Stop checkout module-type inheritance without forcing a fixture's format.
+  // Extensionless Node CLIs can use either CommonJS or ES module syntax.
+  writeFileSync(join(scratch.path, 'package.json'), '{}\n');
   // Non-repository fixtures must not discover a checkout above private TMPDIR.
   // A gitfile ends discovery here; fixtures needing Git create their own repo.
   writeFileSync(join(scratch.path, '.git'), 'gitdir: absent\n');
