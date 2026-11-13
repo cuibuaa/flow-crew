@@ -41,6 +41,9 @@ export default function verifyTestRuntimeGeneration(): () => void {
   // Generated extensionless Node executables must not inherit the checkout's
   // module type when an operator places temporary storage inside the checkout.
   writeFileSync(join(scratch.path, 'package.json'), '{"type":"commonjs"}\n');
+  // Non-repository fixtures must not discover a checkout above private TMPDIR.
+  // A gitfile ends discovery here; fixtures needing Git create their own repo.
+  writeFileSync(join(scratch.path, '.git'), 'gitdir: absent\n');
   const names = ['TMPDIR', 'TMP', 'TEMP'] as const;
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
   for (const name of names) process.env[name] = scratch.path;

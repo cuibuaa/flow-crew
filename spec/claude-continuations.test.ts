@@ -12,7 +12,7 @@ import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
 const duties = 'Unique original duties: inspect the synthetic evidence and report the completed work.';

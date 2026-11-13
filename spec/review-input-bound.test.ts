@@ -257,7 +257,7 @@ describe('an adapter that refuses the input by size', () => {
     const bin = join(root, 'bin'); mkdirSync(bin);
     const calls = join(project, 'calls.txt'); writeFileSync(calls, '');
     writeFileSync(join(bin, 'codex'), `#!${process.execPath}\n` + String.raw`
-import fs from 'node:fs';
+const fs = require('node:fs');
 process.stdin.resume();
 process.stdin.on('end', () => {
   fs.appendFileSync(process.env.FC_FIXTURE_CALLS, 'call\n');
