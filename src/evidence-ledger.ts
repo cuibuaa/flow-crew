@@ -5,7 +5,8 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import { safeEvidencePath } from './engine-owned-carriers.js';
 export { safeEvidencePath } from './engine-owned-carriers.js';
-import { fcGlobalDir } from './store.js';
+import { fcGlobalDir, type StoreState } from './store.js';
+import { readRunSnapshot } from './run-lifecycle.js';
 import { appendFileSync, mkdirSync, writeFileSync } from './engine-fs.js';
 import { readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
@@ -175,7 +176,13 @@ export function captureProjectTree(projectDir: string, brief = '', runDir?: stri
     const contract = runDir ? readAdmittedBriefContract(runDir, brief)
       : { inputs: parseBriefInputs(brief).references, outputs: extractBriefOutputDeclarations(brief) };
     const declaredInputs = new Set(contract.inputs.map(input => input.path));
-    for (const path of [...declaredInputs, ...contract.outputs.map(output => output.path)]) {
+    // One identity inventory also covers ignored terminal and admitted stage
+    // products, replacing the worker's separate scoped-content capture.
+    const state = runDir ? readRunSnapshot(runDir) as unknown as StoreState : undefined;
+    const products = [...Object.values(state?.terminalStates ?? {}).flatMap(entry => entry.paths),
+      ...(state?.planControl?.stages ?? []).flatMap(stage => stage.artifact_contract?.produces
+        .filter(output => output.root === 'project').map(output => output.path) ?? [])];
+    for (const path of [...declaredInputs, ...contract.outputs.map(output => output.path), ...products]) {
       if (!ordinary(path) || !safeEvidencePath(path)) continue;
       for (const member of listProjectFilesAt(projectDir, path, declaredInputs.has(path), { complete: true, skipDirectory: path => !safeEvidencePath(path) })) {
         if (safeEvidencePath(member) && !lstatSync(join(projectDir, member)).isDirectory()) paths.add(member);

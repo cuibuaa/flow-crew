@@ -227,13 +227,14 @@ describe('independent post-author routing', () => {
     expect(calls).toEqual(['choose', 'implement', 'assess', first, 'repair', 'assess', second]);
     const directory = runDir(project, state.runId);
     const preimage = runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1/repair_preimage.json');
-    expect(existsSync(preimage), 'repair preimages belong to the guarded engine tree').toBe(true);
+    expect(existsSync(preimage), 'generic repair preimages are retired').toBe(false);
     expect(existsSync(join(directory, 'gate_reevaluation/iteration_1/round_1/repair_preimage.json'))).toBe(false);
-    const trustedPreimage = readFileSync(preimage, 'utf8');
+    const frozenManifest = runRecordPath(directory, 'frozen_inputs.json');
+    const trustedPreimage = readFileSync(frozenManifest, 'utf8');
     await expect(withEngineIntegrity({ projectDir: project, runDir: directory, stageId: 'repair' }, async () => {
-      writeFileSync(preimage, 'forged repair preimage');
+      writeFileSync(frozenManifest, 'forged frozen identity');
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-    expect(readFileSync(preimage, 'utf8')).toBe(trustedPreimage);
+    expect(readFileSync(frozenManifest, 'utf8')).toBe(trustedPreimage);
     const rejection = JSON.parse(readFileSync(runRecordPath(directory, `gate_reevaluation/iteration_1/round_1/rejected_verdict_${first}.json`), 'utf8'));
     expect(rejection).toMatchObject({ pass: false, reason: 'Concrete defect.' });
     expect(state.stages[first].attempts![0]).toMatchObject({ status: 'complete', exitCode: 0 });
@@ -436,7 +437,7 @@ describe('decision descendants and joins', () => {
     state.stages.right.status = 'failed';
     expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
     state.stages.right.status = 'complete'; byId.get('right')!.scope = ['docs/'];
-    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
+    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(true);
     byId.get('right')!.scope = []; byId.get('route')!.decision!.kind = 'successor';
     expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
   });
@@ -499,7 +500,7 @@ describe('decision descendants and joins', () => {
 });
 
 describe('new review branches retain write isolation', () => {
-  it('restores a focused reviewer write and refuses acceptance', async () => {
+  it('fails a focused reviewer write without restoring it or accepting a clean retry', async () => {
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       let output = delivered;
@@ -511,7 +512,7 @@ describe('new review branches retain write isolation', () => {
     } };
     const state = await execute(config, adapter, task);
     expect(state.status).not.toBe('complete');
-    expect(readFileSync(join(project, 'docs/report.md'), 'utf8')).toBe('Author output.\n');
+    expect(readFileSync(join(project, 'docs/report.md'), 'utf8')).toBe('Reviewer attempted repair.\n');
     expect(state.stages.review.attempts?.some(attempt => attempt.constraintAudit?.violationCount)).toBe(true);
   });
 });

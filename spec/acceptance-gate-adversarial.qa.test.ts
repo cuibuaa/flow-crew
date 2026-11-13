@@ -1,3 +1,4 @@
+import { appendEvidence, captureProjectTree, changedTreeFiles, type ProjectTree } from '../src/evidence-ledger.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -5,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   canResumeOwnGateSession,
-  captureRepairRoundSnapshot,
   writeRepairRoundDiffArtifact,
   type StageConfig,
 } from '../src/scheduler.js';
@@ -35,9 +35,12 @@ function status(writes: string[] = []): StageStatus {
   };
 }
 
-function artifact(snapshot: ReturnType<typeof captureRepairRoundSnapshot>, writes: string[] = []) {
-  const path = writeRepairRoundDiffArtifact({
-    snapshot, projectDir: project, runDirPath: runDir, iteration: 1, round: 1,
+function artifact(before: ProjectTree, writes: string[] = []) {
+  const after = captureProjectTree(project);
+  appendEvidence(runDir, { kind: 'attempt', stageId: 'repair', attemptIndex: 1, attemptStartedAt: '2026-08-01T00:00:00.000Z',
+    exitCode: 0, status: 'complete', treeHash: after.hash, files: changedTreeFiles(before, after),
+    measurements: { inputTokens: null, outputTokens: null, durationMs: 1, provenance: 'adapter-reported' } });
+  const path = writeRepairRoundDiffArtifact({ runDirPath: runDir, iteration: 1, round: 1,
     repairStages: [repair], statuses: { repair: status(writes) },
   });
   return JSON.parse(readFileSync(path, 'utf8')) as {
@@ -80,31 +83,26 @@ describe('complete repair diff edge cases', () => {
   it('records deletion of a declared-scope text file with its content identity', () => {
     const file = join(project, 'src', 'deleted.ts');
     writeFileSync(file, 'export const removed = true;\n');
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     unlinkSync(file);
     const row = artifact(before).files.find((entry) => entry.path === 'src/deleted.ts');
-    expect(row).toMatchObject({ status: 'deleted', before: { exists: true }, after: { exists: false } });
-    expect(row?.before.sha256).toBe(sha256('export const removed = true;\n'));
-    expect(row?.before).not.toHaveProperty('text');
+    expect(row).toMatchObject({ status: 'deleted', after: { state: 'absent' } });
   });
 
   it('reports a deletion outside the estimate with the captured identity', () => {
     const file = join(project, 'docs', 'outside.md');
     writeFileSync(file, 'outside preimage\n');
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     unlinkSync(file);
     const row = artifact(before, ['docs/outside.md']).files.find((entry) => entry.path === 'docs/outside.md');
-    expect(row).toMatchObject({ status: 'deleted', before: { exists: true }, after: { exists: false } });
-    expect(row?.before.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(row?.before.sha256).toBe(sha256('outside preimage\n'));
-    expect(row?.before).not.toHaveProperty('text');
+    expect(row).toMatchObject({ status: 'deleted', after: { state: 'absent' } });
   });
 
-  it('keeps an unchanged but authoritatively reported path in the diff', () => {
+  it('does not turn an unchanged reported path into an actual content delta', () => {
     writeFileSync(join(project, 'src', 'reported.ts'), 'export const same = true;\n');
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     const row = artifact(before, ['src/reported.ts']).files.find((entry) => entry.path === 'src/reported.ts');
-    expect(row).toMatchObject({ status: 'reported-touched' });
+    expect(row).toBeUndefined();
   });
 
   it('records a symlink target change without traversing the link', () => {
@@ -112,24 +110,22 @@ describe('complete repair diff edge cases', () => {
     writeFileSync(join(project, 'src', 'two.txt'), 'two\n');
     const link = join(project, 'src', 'current.txt');
     symlinkSync('one.txt', link);
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     unlinkSync(link);
     symlinkSync('two.txt', link);
     const row = artifact(before).files.find((entry) => entry.path === 'src/current.txt');
-    expect(row).toMatchObject({ status: 'modified', before: { symlink: true, sha256: sha256('one.txt') }, after: { symlink: true, sha256: sha256('two.txt') } });
+    expect(row).toMatchObject({ status: 'changed', after: { type: 'symlink', sha256: sha256('two.txt') } });
   });
 
   it('records an executable-mode-only change as a touched path', () => {
     const file = join(project, 'src', 'tool.sh');
     writeFileSync(file, '#!/bin/sh\nexit 0\n');
     chmodSync(file, 0o644);
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     chmodSync(file, 0o755);
     const row = artifact(before).files.find((entry) => entry.path === 'src/tool.sh');
     expect(row).toMatchObject({
-      status: 'modified',
-      before: { type: 'file', mode: '0644' },
-      after: { type: 'file', mode: '0755' },
+      status: 'changed', mode: 0o755, after: { type: 'file' },
     });
   });
 
@@ -137,7 +133,7 @@ describe('complete repair diff edge cases', () => {
     const file = join(project, 'src', 'current');
     writeFileSync(file, 'target');
     chmodSync(file, 0o777);
-    const before = captureRepairRoundSnapshot(project, [repair]);
+    const before = captureProjectTree(project);
     unlinkSync(file);
     symlinkSync('target', file);
     const row = artifact(before).files.find((entry) => entry.path === 'src/current');
@@ -146,10 +142,13 @@ describe('complete repair diff edge cases', () => {
     // it at 0777 regardless of umask, while BSD/macOS gives symlinks real
     // permissions, so an exact value here only tests which kernel ran the suite.
     expect(row).toMatchObject({
-      status: 'modified',
-      before: { type: 'file', mode: '0777' },
-      after: { type: 'symlink', symlink: true },
+      status: 'changed', after: { type: 'symlink' },
     });
-    expect((row as { after?: { mode?: string } }).after?.mode).toMatch(/^0[0-7]{3}$/);
+    expect(row?.after.sha256).toBe(sha256('target'));
   });
+});
+
+it('keeps missing repair execution identities unknown rather than claiming an empty diff', () => {
+  const path = writeRepairRoundDiffArtifact({ runDirPath: runDir, iteration: 1, round: 1, repairStages: [], statuses: {} });
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ available: false, files: null });
 });

@@ -13,7 +13,7 @@ rejects unknown fields, and offers these optional stage keys:
 |---|---|
 | `id` | Lowercase letter, then lowercase letters/digits/underscores; at most 64 characters |
 | `role` | Configured role name |
-| `scope` | Estimated project paths for reporting; omission becomes `[]` |
+| `scope` | Optional string list passed unchanged as a work-division note |
 | `depends_on` | Ancestor IDs; omission is a root |
 | `prompt_template` | Stage task text; `task` remains an accepted alias |
 | `condition` | Parsed execution predicate; [condition parser](../src/condition.ts) is the grammar |
@@ -24,7 +24,7 @@ rejects unknown fields, and offers these optional stage keys:
 | `dynamic_dispatch` | Runtime plan expansion |
 | `artifact_contract` | Versioned rooted output/read locations |
 
-Whole-plan admission checks roles, graph, scope syntax, criterion coverage and
+Whole-plan admission checks roles, graph, criterion coverage and
 read reachability before execution. Ordinary authors need downstream independent
 gates. Gates are read-only in both static and dispatched graphs; product changes belong to authors
 and repairs. Existing-work audits can consist of read-only gates with separate repairs. A malformed
@@ -328,15 +328,22 @@ Sources: [result schemas](../src/handoff.ts), [gate evidence](../src/scheduler/s
 
 ## Scope and plan revisions
 
-A stage's `scope` is the planner's path estimate for reporting and production ownership.
+A stage's optional `scope` is a work-division note, passed unchanged; admission does not validate its path syntax.
 It does not authorize or forbid project content changes. Authors sharing a mutable project
 tree execute serially through the scheduling frontier, including stages with disjoint estimates.
 Required scripts, tests, reports and validation temporary files need no scope negotiation.
 Inputs locate material; only evidence the task explicitly declares frozen is immutable.
-The run binds its canonical identities and exact preimages before authors start. Settlement
-rejects changed frozen content and restores proven bytes. Exact task outputs take precedence.
-Unknown preimages never authorize deletion. Use private `$TMPDIR` scratch for isolated probes.
+The run binds frozen member hashes and topology before children start and reuses them across retries/restart.
+Settlement fails changed frozen content. A tracked leaf is restored only from the run's pinned base Git
+object when its content matches the admitted digest. Dirty or untracked content is reported unrestored.
+Nothing is restored for a read-only stage's project change: the kernel denies it on capable hosts;
+elsewhere hash-only settlement detects and fails it. Read-only settlement never restores project bytes,
+including frozen members. Other attempts restore frozen leaves only from matching pinned Git content.
+Exact task outputs retain precedence.
+Use private `$TMPDIR` scratch for isolated probes.
 Historical scope-revision decisions remain readable but do not grant or suspend execution.
+A frozen run missing its admission manifest after an execution remains readable, but active continuation
+refuses to relearn the current bytes; start a newly admitted run with the retained evidence.
 
 A settled stage can submit `work/stages/<id>/plan_revision_request.json` with version 1, request/run/stage/
 attempt identity, `attemptStartedAt`, `baseRevision`, `baseDigest`, `reason` and the complete
@@ -348,9 +355,7 @@ Removing an obligation requires a new initial plan rather than an amendment.
 Repair batches use this same idle-boundary admission. Newly appended repair stages
 for the active rejected gates finish in dependency order before those gates run
 again, within the existing repair round and budget. Every round resets its repair
-dependencies before selecting ready work. Each execution wave captures
-fresh content observations after earlier authors settle; the gate
-receives the combined repair diff from the start of the round. Failed work does not
+dependencies before selecting ready work. The gate receives the actual repair executions and their content-identity deltas from the evidence ledger; missing identities remain unknown. Failed work does not
 release its successors or clear the rejection.
 
 Sources: [content settlement](../src/scheduler/sched_scope/write-enforcement.ts), [plan revisions](../src/plan-revisions.ts).

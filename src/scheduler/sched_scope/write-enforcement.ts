@@ -1,75 +1,44 @@
-import { runRecordPath } from '../../run-layout.js';
-// Settlement alone rejects project content changes, against task-frozen bytes.
-import { normalizedProjectPath, normalizedProjectContentPath } from '../sched_admission/scope-services.js';
-import { ignoredProjectPaths } from '../../project-identity.js';
-import { restoreProjectPath } from './restore.js';
-import { compareRepairFileContents } from './file-images.js';
-import { type RepairRoundSnapshot } from './snapshots.js';
-import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, frozenEvidencePaths } from './rollback-baseline.js';
+import { join } from 'node:path';
+import { compareContentIdentities, readContentIdentity } from '../../content-identity.js';
+import { normalizedProjectContentPath } from '../sched_admission/scope-services.js';
+// Settlement checks the admitted frozen content and detects read-only changes.
+import { type ContentSettlementContext, changedContentMembers, frozenChanges, projectContentMembers, readContentMemberIdentity, restoreFrozenInput } from './frozen-inputs.js';
 
 export function settleProjectWrites(input: {
   projectDir: string;
-  snapshot: RepairRoundSnapshot;
+  context: ContentSettlementContext;
   rawWrites: string[];
-  definiteWrites: ReadonlySet<string>;
+  appliedWrites: string[] | null;
   readOnly?: boolean;
 }) {
-  const rawWrites = [...new Set(input.rawWrites.map(normalizedProjectContentPath).filter((path): path is string => path !== undefined))];
-  const appliedWrites: string[] = [], exemptedWrites: string[] = [], rolledBackWrites: string[] = [];
-  const rollbackFailures: string[] = [], durableWrites: string[] = [], unavailableComparisons: string[] = [];
+  const rawWrites = input.rawWrites.filter(path => normalizedProjectContentPath(path) !== undefined), rolledBackWrites: string[] = [], rollbackFailures: string[] = [];
   const rollbackFailureReasons: Record<string, string> = {};
-  const retainedReplacements: Record<string, string> = {};
-  const violations: Array<{ path: string; certainty: 'definite' | 'unverified'; reason: string }> = [];
-  const baseline = input.snapshot.rollbackBaseline;
-  const frozenPaths = new Set(frozenEvidencePaths(baseline));
-  const ignored = ignoredProjectPaths(input.projectDir, rawWrites);
-  const orderedFrozen = [...frozenPaths].sort((left, right) => {
-    const topology = (path: string) => ['directory', 'symlink'].includes(baseline.frozenImages.get(path)?.type ?? '');
-    return Number(topology(right)) - Number(topology(left))
-      || left.split('/').length - right.split('/').length || left.localeCompare(right);
-  });
-  for (const rawPath of new Set(orderedFrozen.concat(rawWrites))) {
-    const path = normalizedProjectPath(rawPath)!;
-    const taskFrozen = frozenPaths.has(path);
-    const frozen = taskFrozen || input.readOnly === true;
-    // Read-only batches inventory the complete tree. Preserve uncertainty below
-    // aliases/file replacements; elsewhere an inventory miss is observed absence.
-    const opaqueAncestor = input.readOnly && path.split('/').slice(0, -1).some((_, index, parts) => {
-      const image = input.snapshot.files.get(parts.slice(0, index + 1).join('/'));
-      return image !== undefined && image.type !== 'directory';
-    });
-    const before = taskFrozen ? baseline.frozenImages.get(path) ?? { exists: false, provenance: 'observed' as const }
-      : input.snapshot.files.get(path) ?? (input.readOnly && !opaqueAncestor
-        ? { exists: false, provenance: 'observed' as const } : baselineImage(baseline, path));
-    const current = readRollbackCurrentImage(baseline, input.projectDir, path, before);
-    const comparison = compareRepairFileContents(before, current);
-    if (comparison === 'equal') continue;
-    // Directories carry frozen topology, but creating a parent is not a file output.
-    if (!frozen && !before.exists && current.exists && current.type === 'directory') continue;
-    if (!input.snapshot.files.has(path)) input.snapshot.files.set(path, before);
-    if (comparison === 'unavailable') unavailableComparisons.push(path);
-    if (frozen) {
-      if (!rawWrites.includes(path)) rawWrites.push(path);
-      violations.push({ path, certainty: input.definiteWrites.has(path) ? 'definite' : 'unverified',
-        reason: comparison === 'unavailable' ? 'task-frozen evidence cannot be verified; preimage remains unknown'
-          : taskFrozen ? 'task-frozen evidence content changed' : 'read-only decision/review changed project content' });
-      const restoration = restoreProjectPath(input.projectDir, path, before,
-        baseline.runDirPath ? runRecordPath(baseline.runDirPath, 'rollback-retained') : undefined);
-      if (restoration.retainedPath) retainedReplacements[path] = restoration.retainedPath;
-      if (restoration.restored) rolledBackWrites.push(path);
-      else {
-        rollbackFailures.push(path);
-        rollbackFailureReasons[path] = restoration.failure ?? `could not restore ${path}`;
-      }
+  const violations: Array<{ path: string; certainty: 'definite' | 'unverified'; kind: 'immutable_evidence_violation' | 'read_only_project_violation'; reason: string }> = [];
+  const frozen = frozenChanges(input.projectDir, input.context.frozen);
+  const readOnlyAfter = input.readOnly ? projectContentMembers(input.projectDir) : {};
+  const readOnly = input.readOnly && input.context.readOnlyBefore
+    ? changedContentMembers(input.context.readOnlyBefore, readOnlyAfter) : [];
+  for (const path of new Set([...frozen, ...readOnly])) {
+    if (!rawWrites.includes(path)) rawWrites.push(path);
+    const taskFrozen = frozen.includes(path);
+    const before = taskFrozen ? input.context.frozen.members[path] : input.context.readOnlyBefore?.[path];
+    const after = taskFrozen ? readContentMemberIdentity(join(input.projectDir, path), input.projectDir) : readOnlyAfter[path];
+    violations.push({ path, certainty: before?.state === 'unavailable' || after?.state === 'unavailable' ? 'unverified' : 'definite', kind: taskFrozen ? 'immutable_evidence_violation' : 'read_only_project_violation',
+      reason: taskFrozen ? 'task-frozen evidence content changed or cannot be verified' : 'read-only project content changed or cannot be verified' });
+    // Read-only settlement never restores, including when the changed path is frozen.
+    if (taskFrozen && readOnly.includes(path)) violations.push({ path, certainty: violations.at(-1)!.certainty,
+      kind: 'read_only_project_violation', reason: 'read-only project content changed or cannot be verified' });
+    if (!taskFrozen) continue;
+    if (input.readOnly) {
+      rollbackFailures.push(path); rollbackFailureReasons[path] = 'read-only settlement does not restore project content';
       continue;
     }
-    if (ignored.has(path)) { exemptedWrites.push(path); continue; }
-    if (comparison === 'different') {
-      appliedWrites.push(path);
-      durableWrites.push(path);
-      settleRollbackBaselinePath(baseline, input.projectDir, path);
-    }
+    const admitted = input.context.frozen.members[path];
+    if (admitted && compareContentIdentities(admitted, readContentIdentity(join(input.projectDir, path))) === 'equal') continue;
+    const failure = restoreFrozenInput(input.projectDir, input.context.frozen, path);
+    if (failure === undefined) rolledBackWrites.push(path);
+    else { rollbackFailures.push(path); rollbackFailureReasons[path] = failure; }
   }
-  return { rawWrites, appliedWrites, exemptedWrites, rolledBackWrites, rollbackFailures,
-    rollbackFailureReasons, retainedReplacements, durableWrites, unavailableComparisons, violations };
+  return { rawWrites, appliedWrites: input.appliedWrites?.filter(path => normalizedProjectContentPath(path) !== undefined && !rolledBackWrites.includes(path)) ?? null,
+    rolledBackWrites, rollbackFailures, rollbackFailureReasons, violations };
 }

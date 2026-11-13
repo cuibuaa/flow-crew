@@ -40,7 +40,7 @@ import type {
 } from '../src/project-validation.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
-import { appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import {
   inspectShipSetupRecord,
   shipSetupBriefDigest,
@@ -379,11 +379,7 @@ describe('engine behaviour contracts', () => {
     expect(escapedEvents).toEqual([]);
     expect(escaped.status).toBe('complete');
 
-    const absentPath = 'docs/proven-absent.md';
-    write(join(projectDir, absentPath), 'new file\n');
-    const absentRestore = restoreProjectPath(projectDir, absentPath, { exists: false, provenance: 'observed' });
-    expect(absentRestore).toEqual({ restored: true });
-    expect(existsSync(join(projectDir, absentPath))).toBe(false);
+
   });
 
   it('rejects condition literals outside runtime domains', () => {

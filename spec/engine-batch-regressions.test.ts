@@ -1,3 +1,5 @@
+import { bindFrozenInputs, restoreFrozenInput } from '../src/scheduler/sched_scope/frozen-inputs.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -8,11 +10,8 @@ import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, setFcGlobalDir } from '../src/store.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
-import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
-import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
-import { readRepairFileImage } from '../src/scheduler/sched_scope/file-images.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 import { runStage } from '../src/worker.js';
 import { stageLiveLogPath } from '../src/stage-live-log.js';
@@ -27,7 +26,7 @@ beforeEach(() => {
   ({ runId, runDirPath: run } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
 });
 afterEach(() => {
-  vi.useRealTimers(); vi.restoreAllMocks(); closeRollbackBaseline(project, run);
+  vi.useRealTimers(); vi.restoreAllMocks();
   setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
 it('preflight leaves domain wording and supplied-number expectations opaque', () => {
@@ -42,12 +41,16 @@ it('preflight leaves domain wording and supplied-number expectations opaque', ()
 it.each([false, true])('replaces an outward leaf alias without following its target during rollback (project alias=%s)', projectAlias => {
   const path = 'value.txt', outside = join(root, 'outside.txt');
   writeFileSync(join(project, path), 'Admitted bytes.');
-  const before = readRepairFileImage(project, path);
+  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['add', '.'], project, root);
+  isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'Pinned frozen input'], project, root);
+  const created = createRun(project, 'frozen-alias', '', [], '---\ninputs: [{path: value.txt, frozen: true}]\n---\n');
+  const before = bindFrozenInputs(project, created.runDirPath);
   rmSync(join(project, path)); writeFileSync(outside, 'Outside bytes.');
   symlinkSync(outside, join(project, path));
   const restoreRoot = projectAlias ? join(root, 'project-alias') : project;
   if (projectAlias) symlinkSync(project, restoreRoot, 'dir');
-  expect(restoreProjectPath(restoreRoot, path, before)).toEqual({ restored: true });
+  expect(restoreFrozenInput(restoreRoot, before, path)).toBeUndefined();
   expect(readFileSync(outside, 'utf8')).toBe('Outside bytes.');
   expect(readFileSync(join(project, path), 'utf8')).toBe('Admitted bytes.');
 });

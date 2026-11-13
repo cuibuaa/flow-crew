@@ -16,10 +16,10 @@ describe('agent run-directory safety contract', () => {
   it('limits writes to owned outputs, admitted project work and invocation-private probes', () => {
     const safety = prompt('coder');
 
-    expect(safety).toContain("Write only within the stage's admitted write scope: the project worktree");
-    expect(safety).toContain('brief-declared outputs and artifact_contract.produces paths owned by this stage');
-    expect(safety).toContain("invocation's private $TMPDIR for disposable probes");
-    expect(safety).toContain('All other paths are read-only');
+    expect(safety).toContain("Authors may write the project worktree");
+    expect(safety).toContain('contract-declared external outputs/caches');
+    expect(safety).toContain("private $TMPDIR");
+    expect(safety).toContain('Gates and isolated decisions keep the project read-only');
   });
 
   it.each([false, true])('keeps run mutation absolutely prohibited with base=%s', (withBase) => {

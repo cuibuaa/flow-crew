@@ -12,7 +12,6 @@ const fixture = vi.hoisted(() => ({
   reject: vi.fn(),
   read: vi.fn(),
   iterations: vi.fn(),
-  close: vi.fn(),
   error: vi.fn(),
 }));
 vi.mock('../src/run-events.js', async importOriginal => ({
@@ -39,7 +38,7 @@ vi.mock('../src/scheduler/sched_admission/dispatch.js', () => ({
 }));
 vi.mock('../src/scheduler/sched_admission/shared.js', () => ({ log: { info: vi.fn(), warn: vi.fn(), error: (...args: unknown[]) => fixture.error(...args) } }));
 vi.mock('../src/scheduler/sched_policy/identity.js', () => ({ removeSchedulerPidIfOwned: () => { fixture.calls.push('remove-pid'); } }));
-vi.mock('../src/scheduler/sched_scope/rollback-baseline.js', () => ({ closeRollbackBaseline: () => fixture.close() }));
+vi.mock('../src/scheduler/sched_scope/frozen-inputs.js', () => ({ bindFrozenInputs: vi.fn() }));
 vi.mock('../src/store.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/store.js')>(),
   readRunState: (...args: unknown[]) => fixture.read(...args),
@@ -74,12 +73,6 @@ it('releases scheduler ownership after an ordinary workflow completes', async ()
   await expect(invoke()).resolves.toBe(fixture.state);
   expect(fixture.calls).toEqual(['remove-pid', 'release-intent']);
   expect(fixture.read).not.toHaveBeenCalled();
-});
-
-it('preserves the original lifecycle exception while closing rollback ownership', async () => {
-  const original = new Error('Original owned cleanup failure');
-  fixture.close.mockImplementation(() => { throw original; });
-  await expect(invoke()).rejects.toBe(original);
 });
 
 it('returns an already settled launch without taking cleanup ownership', async () => {

@@ -4,7 +4,6 @@ import { classifyEnding } from './attempt-ending.js';
 import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
 import { runRecordPath, stageWorkPath, stageWritePath, requestPath } from './run-layout.js';
 import { startCommandRecorder } from './recorded-command.js';
-import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
 import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
@@ -22,7 +21,7 @@ import { providerFailureDetail } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
 import { renderPlanInterface } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
@@ -99,7 +98,7 @@ export function plannerCriterionAssignmentContext(_brief: string, runDir: string
 }
 
 export interface StageOpts {
-  /** Admitted declaration; never extracted from the prompt or observed writes. */
+  /** Optional planner work-division note, never write authority. */
   scope?: readonly string[];
   /** Scheduled stages return JSON; standalone legacy workers remain readable. */
   outputSchema?: Schema;
@@ -157,28 +156,6 @@ function inferAdapterName(adapter: Adapter): string | undefined {
   if (!name) return undefined;
   const lower = name.toLowerCase();
   return lower.endsWith('adapter') ? lower.slice(0, -'adapter'.length) : lower;
-}
-
-function snapshotScopedContent(projectDir: string, paths: string[] = []): Map<string, ContentIdentity> {
-  return new Map([...new Set([...listProjectFiles(projectDir), ...paths])].map(path => [join(projectDir, path), readContentIdentity(join(projectDir, path))]));
-}
-
-function diffScopedArtifacts(
-  before: Map<string, ContentIdentity>,
-  projectDir: string,
-): string[] {
-  const after = snapshotScopedContent(projectDir, [...before.keys()].map(path => relative(projectDir, path)));
-  const changed: string[] = [];
-  const absent: ContentIdentity = { state: 'absent' };
-  for (const path of new Set([...before.keys(), ...after.keys()])) {
-    const prior = before.get(path) ?? absent;
-    const current = after.get(path) ?? absent;
-    // Unavailable content cannot prove equality across a state transition.
-    // Nominate it for settlement without inventing a restorable preimage.
-    if (compareContentIdentities(prior, current) !== 'different' && prior.state === current.state) continue;
-    changed.push(relative(projectDir, path).replace(/\\/g, '/'));
-  }
-  return changed.sort();
 }
 
 /** Keep history in attempts while ensuring the live top level describes only the new execution. */
@@ -362,7 +339,7 @@ export async function runStage(
   })}\n\n${prompt}`;
   const guidanceBeforePrompt = opts.isolatedInput ? [] : readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
   // Retain delivered, targeted notices across execution boundaries. Their
-  // original attempt identity remains explicit; only re-admission grants scope.
+  // original attempt identity remains explicit; only re-admission grants execution.
   try {
     const priorReceipt = opts.isolatedInput ? '' : readFileSync(runRecordPath(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
     for (const attempt of runningStatus.attempts ?? []) {
@@ -540,10 +517,6 @@ export async function runStage(
   prompt += `\n\nStage workspace: ${stageWorkPath(opts.runDir, 'stages', opts.stageId)}. Put probes and evidence here. The engine tree ${runRecordPath(opts.runDir, '.')} and the root run.json/events.jsonl are read-only. Run artifact paths must be inside work/.\n\n${SINGLE_AUTHOR_NOTICE}`;
   const historicalCandidates = readdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
   if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => runRecordPath(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
-  const terminalPaths = Object.values(runState?.terminalStates ?? {}).flatMap(entry => entry.paths);
-  const beforeSnapshot = snapshotScopedContent(opts.projectDir, [
-    ...terminalPaths, ...(opts.artifactContract?.produces ?? []).filter(artifact => artifact.root === 'project').map(artifact => artifact.path),
-  ]);
   // A declared run product may belong to later work, but an available product
   // cannot disappear during this attempt. This fact was only model advice;
   // deletion alone cannot preserve it, so bind the engine check to this start.
@@ -904,7 +877,7 @@ export async function runStage(
         const externalDirectories = opts.isGate || isolatedDecision ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
           .map(output => output.path);
         const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
-          runDir: opts.runDir, stageId: opts.stageId, scope: opts.scope, artifacts: writableArtifacts, externalDirectories,
+          runDir: opts.runDir, stageId: opts.stageId, readOnly: opts.isGate || isolatedDecision, artifacts: writableArtifacts, externalDirectories,
           home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };
         const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
           const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
@@ -1247,7 +1220,13 @@ export async function runStage(
     terminationCause = 'exit';
   }
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
-  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir);
+  const contentTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
+  const contentDelta = changedTreeFiles(evidenceTreeBefore, contentTreeAfter);
+  const priorContent = new Map(evidenceTreeBefore.files.map(file => [file.path, file]));
+  const artifacts = contentDelta.filter(file => compareContentIdentities(
+    priorContent.get(file.path)?.content ?? { state: 'absent' }, file.content) !== 'equal'
+    || compareContentIdentities(priorContent.get(file.path)?.targetContent ?? { state: 'absent' },
+      file.targetContent ?? { state: 'absent' }) !== 'equal').map(file => file.path);
   if (!result.engineVoid && !stageAborted && !environmentGap && result.providerFailure?.kind !== 'quota'
     && timedOut) {
     const retainedPaths = artifacts;
@@ -1322,6 +1301,7 @@ export async function runStage(
     endingCause: result.endingCause,
     engineVoid: result.engineVoid,
     writes,
+    appliedWrites: evidenceTreeBefore.hash === null || contentTreeAfter.hash === null ? null : artifacts,
     writeAttribution,
     validationGeneratedWrites: result.validationGeneratedWrites,
     timeout: timeoutSummary,

@@ -99,7 +99,7 @@ export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<stri
     const stage = stages.get(id);
     const status = state.stages[id]?.status;
     const completedReview = purpose === 'settlement' && id === stageId && status === STAGE_STATUS.COMPLETE
-      && stage?.is_gate === true && stage.scope?.length === 0;
+      && stage?.is_gate === true;
     if (!stage || (status !== STAGE_STATUS.PENDING && status !== STAGE_STATUS.SKIPPED && !completedReview)) return false;
     const incoming = [...stages.values()].filter(source => (!completedReview || source.decision?.kind === 'review')
       && decisionControls(source, id, state) && !transitivelyDependsOn(source.id, id, stages));
@@ -183,8 +183,6 @@ export function createReadyFinder({ loadGateContract, readGateEvaluation }: Gate
 export interface ScopeConflict {
   leftStageId: string;
   rightStageId: string;
-  leftScope?: string;
-  rightScope?: string;
   reason: string;
 }
 

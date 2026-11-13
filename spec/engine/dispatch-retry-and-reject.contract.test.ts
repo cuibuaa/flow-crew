@@ -327,9 +327,9 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(final.failureReason).toContain('unreviewed product writes (src/generated.ts)');
     const audit = JSON.parse(readFileSync(runRecordPath(rd, 'stages', 'finalize', `constraint_audit_attempt_${finalizerCalls}.json`), 'utf-8')) as {
       rolledBackWrites: string[];
-      durableWrites: string[];
+      appliedWrites: string[];
     };
     expect(audit.rolledBackWrites).toEqual([]);
-    expect(audit.durableWrites).toContain('src/generated.ts');
+    expect(audit.appliedWrites).toContain('src/generated.ts');
   }, 60_000);
 });

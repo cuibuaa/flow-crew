@@ -3,39 +3,24 @@ import { runRecordPath } from '../../run-layout.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { attachStageConstraintAudit, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
-import { normalizedProjectPath } from '../sched_admission/scope-services.js';
-import { type ScopeBatchContext } from './scope-batch.js';
+import { type ContentSettlementContext, isReadOnlyStage } from './frozen-inputs.js';
 import { settleProjectWrites } from './write-enforcement.js';
 import { canonicalProjectWriteUnion } from './path-capabilities.js';
-import { trackedGitlinkAncestor } from './rollback-baseline.js';
-import { readRepairFileImage } from './file-images.js';
 
 export function createScopeReconciler() {
   function reconcileStageScope(input: {
-    stage: StageConfig; projectDir: string; runId: string; context: ScopeBatchContext; attemptIndex: number;
+    stage: StageConfig; projectDir: string; runId: string; context: ContentSettlementContext; attemptIndex: number;
   }) {
     const status = readStageStatus(input.projectDir, input.runId, input.stage.id);
     const attempt = status.attempts?.find(candidate => candidate.index === input.attemptIndex);
     if (!attempt) return { status, violation: false };
-    const declaredScope = input.context.declaredScope(input.stage.id);
-    // The worker captured this attempt's delta before settlement. Rewalking the
-    // batch snapshot would attribute prior attempts and engine moves to it.
-    const rawWrites = canonicalProjectWriteUnion((attempt.writes ?? []).map(raw => {
-      const path = normalizedProjectPath(raw);
-      return path ? trackedGitlinkAncestor(input.context.snapshot.rollbackBaseline, path) ?? path : raw;
-    }));
-    const definiteWrites = new Set(rawWrites);
-    const enforcement = settleProjectWrites({ projectDir: input.projectDir, snapshot: input.context.snapshot,
-      rawWrites, definiteWrites, readOnly: ['shape', 'review'].includes(input.stage.decision?.kind ?? '')
-        || input.stage.is_gate });
+    const rawWrites = canonicalProjectWriteUnion(attempt.writes ?? []);
+    const enforcement = settleProjectWrites({ projectDir: input.projectDir, context: input.context,
+      rawWrites, appliedWrites: attempt.appliedWrites ?? null, readOnly: isReadOnlyStage(input.stage) });
     attempt.writes = canonicalProjectWriteUnion(rawWrites, enforcement.rawWrites);
-    // An unrestored content-bearing entry cannot become a retry's trusted
-    // preimage. Use the existing non-retryable integrity disposition; unknown
-    // special entries contain no publishable file bytes and remain untouched.
-    if (enforcement.rollbackFailures.some(path => {
-      const current = readRepairFileImage(input.projectDir, path);
-      return current.exists || current.inspectionFailure;
-    })) {
+    // Retain the existing non-retryable integrity disposition when forbidden
+    // content remains. A clean retry cannot adopt an unrestored review write.
+    if (enforcement.rollbackFailures.length || enforcement.violations.some(item => item.kind === 'read_only_project_violation')) {
       attempt.engineVoid = true;
       attempt.terminationCause = 'engine_void';
     }
@@ -43,20 +28,20 @@ export function createScopeReconciler() {
     const root = runDir(input.projectDir, input.runId);
     const path = `stages/${input.stage.id}/constraint_audit_attempt_${attempt.index}.json`;
     publishJsonCreateOnly(runRecordPath(root, path), { version: 1, stageId: input.stage.id, attemptIndex: attempt.index,
-      declaredScope, ...enforcement,
+      ...enforcement,
       writes: attempt.writes ?? [], writeAttribution: attempt.writeAttribution ?? 'unknown',
       timeout: attempt.timeout, completedAt: new Date().toISOString() });
     const violation = enforcement.violations.length > 0;
     return { status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, {
-      path, declaredScope, effectiveScope: declaredScope, violationCount: enforcement.violations.length,
+      path, violationCount: enforcement.violations.length,
       unresolvedViolationCount: enforcement.violations.length,
       unverifiedCount: enforcement.violations.filter(item => item.certainty === 'unverified').length,
-      rawWriteCount: enforcement.rawWrites.length, appliedWriteCount: enforcement.appliedWrites.length,
-      exemptedWriteCount: enforcement.exemptedWrites.length, rolledBackWriteCount: enforcement.rolledBackWrites.length,
-    }, violation ? `immutable_evidence_violation: ${enforcement.violations.map(item => item.path).join(', ')}` : undefined), violation };
+      rawWriteCount: enforcement.rawWrites.length, appliedWriteCount: enforcement.appliedWrites?.length,
+      rolledBackWriteCount: enforcement.rolledBackWrites.length,
+    }, violation ? `${[...new Set(enforcement.violations.map(item => item.kind))].join(', ')}: ${canonicalProjectWriteUnion(enforcement.violations.map(item => item.path)).join(', ')}` : undefined), violation };
   }
   function reconcileCompletedStageAttempts(input: {
-    stage: StageConfig; projectDir: string; runId: string; context: ScopeBatchContext;
+    stage: StageConfig; projectDir: string; runId: string; context: ContentSettlementContext;
   }) {
     let status = readStageStatus(input.projectDir, input.runId, input.stage.id), violation = false;
     for (const attempt of status.attempts ?? []) {

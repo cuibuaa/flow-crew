@@ -6,7 +6,6 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { closeSync, mkdirSync, openSync, publishEngineFiles, writeFileSync } from './engine-fs.js';
 import { stageWorkPath } from './run-layout.js';
-import { literalTreeCapabilityRoot, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
 import { resolveArtifactLocation } from './artifact-location.js';
 import { gitSync } from './git-facts.js';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
@@ -87,7 +86,7 @@ def apply_write_grant(paths, abi, opened=None, no_refer=()):
                 if stat.S_ISLNK(mode):
                     raise OSError(40, 'grant root is a symbolic link')
                 allowed = writes if stat.S_ISDIR(mode) else (1 << 1) | (1 << 14)
-                # Shared roots must never carry an inode from a private scope.
+                # Shared roots must never carry an inode from a private root.
                 # Same-directory atomic replacement still works; reparenting
                 # (link/rename) involving a shared directory is denied.
                 if path in no_refer: allowed &= ~(1 << 13)
@@ -154,7 +153,7 @@ export interface StageWriteGrant {
   runDir: string;
   stageId: string;
   home: string;
-  scope?: readonly string[];
+  readOnly?: boolean;
   artifacts?: ArtifactContract;
   /** Validated absolute directory outputs from the admitted brief. */
   externalDirectories?: readonly string[];
@@ -231,7 +230,7 @@ function gitHead(projectDir: string): string | null {
 function prepareStageGit(grant: StageWriteGrant, writable: WriteGrantRoot[], shared: string[]): NodeJS.ProcessEnv {
   const repository = grant.contract.git;
   if (!repository) {
-    // A stage may initialize a new repository inside its own scope, but cannot
+    // A stage may initialize a new repository inside its project worktree, but cannot
     // redirect the engine into a newly planted external Git directory.
     return {};
   }
@@ -281,24 +280,13 @@ export function prepareWriteGrant(grant: StageWriteGrant, scratch: string, inher
         || contains(runScratch, path) && !contains(temporary, path)) throw new WriteGrantError({ kind: 'unsafe_path', path });
     };
     const writable: WriteGrantRoot[] = [];
-    for (const raw of grant.scope ?? []) {
-      const scope = parseDeclaredScope(raw);
-      const tree = literalTreeCapabilityRoot(scope);
-      if (scope.kind === 'unknown' || scope.kind === 'glob' && !tree) throw new WriteGrantError({ kind: 'unrepresentable_scope', path: raw });
-      const path = tree ?? (scope.kind === 'exact' || scope.kind === 'tree' ? scope.value : '');
-      assertWritableRoot(resolve(project, path));
-      let directory = scope.kind === 'tree' || scope.kind === 'glob';
-      // A literal terminal glob includes its root node. Research declarations
-      // use that language for both file and directory candidates. Narrow an
-      // existing regular root to content authority, and retain that kind through
-      // launch; a replacement directory must not acquire descendant rights.
-      if (scope.kind === 'glob') {
-        try { if (lstatSync(resolve(project, path)).isFile()) directory = false; }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      }
-      writable.push({ path: literalPath(project, path, directory), kind: directory ? 'directory' : 'file' });
+    if (!grant.readOnly) {
+      assertWritableRoot(project);
+      writable.push({ path: literalPath(project, '.', true), kind: 'directory' });
     }
-    const outputs = (grant.artifacts?.produces ?? []).map(artifact => ({
+    // Own stage work is writable regardless of project access. Peer/engine roots stay closed.
+    writable.push({ path: literalPath(run, join(stages, grant.stageId), true), kind: 'directory' });
+    const outputs = (grant.artifacts?.produces ?? []).filter(artifact => !grant.readOnly || artifact.root !== 'project').map(artifact => ({
       root: artifact.root === 'project' ? project : realpathSync(grant.runDir),
       absolute: resolveArtifactLocation(artifact, project, run), tree: artifact.kind === 'directory',
     }));
@@ -315,9 +303,10 @@ export function prepareWriteGrant(grant: StageWriteGrant, scratch: string, inher
     const home = literalPath(run, relative(resolve(grant.runDir), resolve(grant.home)), true);
     writable.push({ path: home, kind: 'directory' }, { path: temporary, kind: 'directory' }, { path: '/dev/null', kind: 'device' });
     const shared: string[] = [];
-    for (const path of [...contract.sharedCaches, ...(grant.externalDirectories ?? [])]) {
+    for (const path of [...contract.sharedCaches, ...(grant.readOnly ? [] : grant.externalDirectories ?? [])]) {
       if (!isAbsolute(path)) throw new WriteGrantError({ kind: 'unsafe_path', path });
       assertWritableRoot(path);
+      if (grant.readOnly && (contains(project, path) || contains(path, project))) throw new WriteGrantError({ kind: 'unsafe_path', path });
       shared.push(literalPath('/', path, true));
     }
     const gitEnv = prepareStageGit(grant, writable, shared);

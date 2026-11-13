@@ -1,3 +1,4 @@
+import { bindFrozenInputs, restoreFrozenInput } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
@@ -8,12 +9,8 @@ import { execWithStdin, type Adapter, type RunOpts } from '../src/adapters/base.
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { writeRepairRoundDiffArtifact } from '../src/scheduler.js';
 import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js';
-import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
-import { baselineImage, closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
-import { captureRepairRoundSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
-import { compareRepairFileContents } from '../src/scheduler/sched_scope/file-images.js';
-import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
 import { resolveImmutableEvidenceBindings } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
@@ -28,7 +25,7 @@ beforeEach(() => {
   previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
 });
 afterEach(() => {
-  closeRollbackBaseline(project, directory);
+
   setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
 const stage = (id = 'author', scope: string[] = ['src/estimated.ts']) => StageConfigSchema.parse({ id, role: 'coder', scope });
@@ -53,20 +50,20 @@ function create(brief = 'Complete the required project work.', stages = [stage()
   return stages;
 }
 
-it('preserves unknown preimages below a read-only alias', () => {
+it('does not infer content changes from a reported write below an unchanged read-only alias', () => {
   write('.gitignore', 'hidden/\n');
   write('hidden/operator.txt', 'operator content');
   symlinkSync('hidden', join(project, 'alias'));
   commit();
   const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: [] });
   create('Review without changing project content.', [gate]);
-  const context = createScopeBatchContext(project, [gate], undefined, runId);
+  const context = createContentSettlementContext(project, [gate], runId);
   const result = settleProjectWrites({
-    projectDir: project, snapshot: context.snapshot, readOnly: true,
-    rawWrites: ['alias/operator.txt'], definiteWrites: new Set(['alias/operator.txt']),
+    projectDir: project, context, readOnly: true,
+    rawWrites: ['alias/operator.txt'], appliedWrites: ['alias/operator.txt'],
   });
-  expect(result.violations).toHaveLength(1);
-  expect(result.rollbackFailures).toEqual(['alias/operator.txt']);
+  expect(result.violations).toHaveLength(0);
+  expect(result.rollbackFailures).toEqual([]);
   expect(result.rolledBackWrites).toEqual([]);
   expect(readFileSync(join(project, 'hidden/operator.txt'), 'utf8')).toBe('operator content');
 });
@@ -77,13 +74,13 @@ it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
   git('init', '-q');
   const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: [] });
   create('Review without changing project entries.', [gate]);
-  const context = createScopeBatchContext(project, [gate], undefined, runId);
+  const context = createContentSettlementContext(project, [gate], runId);
   const result = settleProjectWrites({
-    projectDir: project, snapshot: context.snapshot, readOnly: true,
-    rawWrites: ['operator.pipe'], definiteWrites: new Set(['operator.pipe']),
+    projectDir: project, context, readOnly: true,
+    rawWrites: ['operator.pipe'], appliedWrites: ['operator.pipe'],
   });
   expect(result.violations).toHaveLength(1);
-  expect(result.rollbackFailures).toEqual(['operator.pipe']);
+  expect(result.rollbackFailures).toEqual([]);
   expect(result.rolledBackWrites).toEqual([]);
   expect(lstatSync(join(project, 'operator.pipe')).isFIFO()).toBe(true);
 });
@@ -141,7 +138,7 @@ describe('legitimate work outside planner estimates', () => {
     }, stages);
     accepted(result);
     expect(readdirSync(project).filter(name => name.startsWith('offline-test-'))).toEqual([]);
-    expect(result.audits[0].durableWrites).toEqual(expect.arrayContaining(['scripts/required.mjs', 'reports/test-result.txt']));
+    expect(result.audits[0].appliedWrites).toEqual(expect.arrayContaining(['scripts/required.mjs', 'reports/test-result.txt']));
     expect(readFileSync(join(project, 'reports/test-result.txt'), 'utf8')).toBe('make test passed\n');
   });
 
@@ -236,7 +233,7 @@ describe('legitimate work outside planner estimates', () => {
     write('.gitignore', 'samples/\n'); write('source.txt', 'source'); commit(); write('samples/baseline.json', 'predecessor fixture');
     create('---\ninputs: [samples]\n---\nRetain and stage predecessor fixtures.');
     const result = await execute(() => { git('add', '-f', 'samples/baseline.json'); return ['samples/baseline.json']; });
-    accepted(result); expect(result.audits[0].durableWrites).not.toContain('samples/baseline.json');
+    accepted(result); expect(result.audits[0].appliedWrites).not.toContain('samples/baseline.json');
     expect(readFileSync(join(project, 'samples/baseline.json'), 'utf8')).toBe('predecessor fixture');
   });
 
@@ -246,15 +243,15 @@ describe('legitimate work outside planner estimates', () => {
       const later = new Date(Date.now() + 60_000); utimesSync(join(project, 'evidence.txt'), later, later);
       git('add', 'evidence.txt'); return ['evidence.txt'];
     });
-    accepted(result); expect(result.audits[0].durableWrites).toEqual([]);
+    accepted(result); expect(result.audits[0].appliedWrites).toEqual([]);
   });
 
   it('does not blame an innocent reader for a predecessor change against a stale baseline', async () => {
     write('part/one.txt', 'old'); commit(); create();
-    createScopeBatchContext(project, [stage()], undefined, runId);
+    createContentSettlementContext(project, [stage()], runId);
     write('part/one.txt', 'predecessor completed');
     const result = await execute(() => { expect(readFileSync(join(project, 'part/one.txt'), 'utf8')).toBe('predecessor completed'); return []; });
-    accepted(result); expect(result.audits[0].durableWrites).not.toContain('part/one.txt');
+    accepted(result); expect(result.audits[0].appliedWrites).not.toContain('part/one.txt');
     expect(readFileSync(join(project, 'part/one.txt'), 'utf8')).toBe('predecessor completed');
   });
 });
@@ -315,24 +312,16 @@ describe('the surviving project guarantees', () => {
     expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('ORIGINAL');
   });
 
-  it('restores a frozen file replaced by a directory and retains the displaced contents', async () => {
-    const bytes = Buffer.from([0, 255, 10, 128]); write('evidence.bin', bytes); commit();
-    create('---\ninputs: [{path: evidence.bin, frozen: true}]\n---\nKeep `evidence.bin` frozen.');
+  it('fails a frozen file replaced by a directory without erasing its contents', async () => {
+    write('evidence.bin', 'FROZEN'); commit();
+    create('---\ninputs: [{path: evidence.bin, frozen: true}]\n---\n');
     writeFileSync(join(root, 'outside.txt'), 'untouched');
     const result = await execute(() => {
       rmSync(join(project, 'evidence.bin')); write('evidence.bin/nested/child', 'replacement child');
-      symlinkSync(join(root, 'outside.txt'), join(project, 'evidence.bin/link'));
-      return ['evidence.bin', 'evidence.bin/nested/child'];
+      symlinkSync(join(root, 'outside.txt'), join(project, 'evidence.bin/link')); return [];
     });
-    expect(result.status.status).toBe('failed'); expect(result.audits[0].rollbackFailures).toEqual([]);
-    expect(readFileSync(join(project, 'evidence.bin'))).toEqual(bytes);
-    const retained = result.audits[0].retainedReplacements['evidence.bin'];
-    expect(retained).toContain(runRecordPath(directory, 'rollback-retained'));
-    expect(existsSync(join(retained, 'nested/child'))).toBe(true);
-    expect(readFileSync(join(retained, 'nested/child'), 'utf8')).toBe('replacement child');
-    expect(readlinkSync(join(retained, 'link'))).toBe(join(root, 'outside.txt'));
-    closeRollbackBaseline(project, directory);
-    expect(readFileSync(join(retained, 'nested/child'), 'utf8')).toBe('replacement child');
+    expect(result.status.status).toBe('failed'); expect(result.audits[0].rollbackFailures).toContain('evidence.bin');
+    expect(readFileSync(join(project, 'evidence.bin/nested/child'), 'utf8')).toBe('replacement child');
     expect(readFileSync(join(root, 'outside.txt'), 'utf8')).toBe('untouched');
   });
 
@@ -350,10 +339,11 @@ describe('the surviving project guarantees', () => {
       symlinkSync('other', join(project, changed), 'dir');
       return [changed];
     });
-    expect(result.status.status).toBe('failed'); expect(result.audits[0].rollbackFailures).toEqual([]);
-    expect(result.audits[0].rolledBackWrites).toContain(changed);
+    expect(result.status.status).toBe('failed');
+    if (shape === 'directory') expect(result.audits[0].rollbackFailures).toContain(changed);
+    else expect(result.audits[0].rolledBackWrites).toContain(changed);
     if (shape !== 'directory') expect(readlinkSync(join(project, changed))).toBe('original');
-    expect(readFileSync(join(project, 'input/value.bin'), 'utf8')).toBe('FROZEN');
+    expect(readFileSync(join(project, 'input/value.bin'), 'utf8')).toBe(shape === 'directory' ? 'OTHER' : 'FROZEN');
     expect(readFileSync(join(project, 'original/value.bin'), 'utf8')).toBe('FROZEN');
     expect(readFileSync(join(project, 'other/value.bin'), 'utf8')).toBe('OTHER');
   });
@@ -362,15 +352,15 @@ describe('the surviving project guarantees', () => {
     write('original/value.bin', 'FROZEN'); write('other/value.bin', 'OTHER');
     symlinkSync('original', join(project, 'input'), 'dir'); commit();
     create('---\ninputs: [{path: input/value.bin, frozen: true}]\n---\nKeep `input/value.bin` frozen.');
-    const context = createScopeBatchContext(project, [stage()], undefined, runId);
-    const before = context.snapshot.rollbackBaseline.frozenImages.get('input/value.bin')!;
-    expect(before.restorationParent).toBe(join(project, 'original'));
+    const context = createContentSettlementContext(project, [stage()], runId);
+    const before = context.frozen.members['input/value.bin'];
+    expect(context.frozen.parents['input/value.bin']).toBe(join(project, 'original'));
     rmSync(join(project, 'input')); symlinkSync('other', join(project, 'input'), 'dir');
-    expect(restoreProjectPath(project, 'input/value.bin', before).restored).toBe(false);
+    expect(restoreFrozenInput(project, context.frozen, 'input/value.bin')).toContain('parent identity changed');
     expect(readFileSync(join(project, 'other/value.bin'), 'utf8')).toBe('OTHER');
-    const result = settleProjectWrites({ projectDir: project, snapshot: context.snapshot,
-      rawWrites: ['input'], definiteWrites: new Set(['input']) });
-    expect(result.violations.length).toBeGreaterThan(0); expect(result.rollbackFailures).toEqual([]);
+    const result = settleProjectWrites({ projectDir: project, context,
+      rawWrites: ['input'], appliedWrites: ['input'] });
+    expect(result.violations.length).toBeGreaterThan(0);
     expect(readlinkSync(join(project, 'input'))).toBe('original');
     expect(readFileSync(join(project, 'other/value.bin'), 'utf8')).toBe('OTHER');
   });
@@ -401,7 +391,8 @@ describe('the surviving project guarantees', () => {
     const result = await execute(() => { write('artifacts/tracked.txt', 'bad'); write('artifacts/ignored.txt', 'bad'); return ['artifacts/tracked.txt', 'artifacts/ignored.txt']; });
     expect(result.status.status).toBe('failed');
     expect(readFileSync(join(project, 'artifacts/tracked.txt'), 'utf8')).toBe('tracked');
-    expect(readFileSync(join(project, 'artifacts/ignored.txt'), 'utf8')).toBe('ignored');
+    expect(readFileSync(join(project, 'artifacts/ignored.txt'), 'utf8')).toBe('bad');
+    expect(result.audits[0].rollbackFailures).toContain('artifacts/ignored.txt');
   });
 
   it('waits for a shared-tree owner to release, then admits the next author successfully', async () => {
@@ -426,30 +417,7 @@ describe('the surviving project guarantees', () => {
     expect(readFileSync(join(project, 'shared.txt'), 'utf8')).toBe('second-complete');
   });
 
-  it('keeps unknown preimages explicit and never removes their present bytes', () => {
-    write('.gitignore', 'opaque/\n'); write('source.txt', 'baseline');
-    write('evidence/original.txt', 'original'); symlinkSync('evidence', join(project, 'alias'), 'dir');
-    commit(); write('opaque/retained.bin', 'must survive'); create();
-    const context = createScopeBatchContext(project, [stage()], undefined, runId);
-    const unknown = baselineImage(context.snapshot.rollbackBaseline, 'opaque/retained.bin');
-    const aliasUnknown = baselineImage(context.snapshot.rollbackBaseline, 'alias/original.txt');
-    expect(aliasUnknown).toMatchObject({ exists: false, provenance: 'unknown' });
-    expect(restoreProjectPath(project, 'alias/original.txt', aliasUnknown)).toMatchObject({ restored: false });
-    expect(readFileSync(join(project, 'evidence/original.txt'), 'utf8')).toBe('original');
-    expect(unknown).toMatchObject({ exists: false, provenance: 'unknown' });
-    expect(compareRepairFileContents(unknown, { exists: false, provenance: 'observed' })).toBe('unavailable');
-    expect(restoreProjectPath(project, 'opaque/retained.bin', unknown)).toMatchObject({ restored: false });
-    expect(readFileSync(join(project, 'opaque/retained.bin'), 'utf8')).toBe('must survive');
-    const result = settleProjectWrites({ projectDir: project, snapshot: context.snapshot,
-      rawWrites: ['opaque/retained.bin'], definiteWrites: new Set(['opaque/retained.bin']) });
-    expect(result.violations).toEqual([]); expect(result.rolledBackWrites).toEqual([]);
-    const diffPath = writeRepairRoundDiffArtifact({ snapshot: context.snapshot, projectDir: project, runDirPath: directory,
-      iteration: 1, round: 1, repairStages: [stage()], statuses: { author: { status: 'complete', retries: 0,
-        writes: ['opaque/retained.bin'], writeAttribution: 'structured' } } });
-    const diff = JSON.parse(readFileSync(diffPath, 'utf8'));
-    expect(diff.files.find((file: { path: string }) => file.path === 'opaque/retained.bin')).toMatchObject({
-      status: 'content-unavailable', before: { exists: false, provenance: 'unknown' } });
-  });
+
 
   it('restores an output alias retargeted onto frozen evidence without losing either preimage', async () => {
     write('inputs/prior.md', 'previous output'); write('inputs/evidence.md', 'exact evidence');
@@ -460,12 +428,12 @@ describe('the surviving project guarantees', () => {
       write('inputs/report.md', 'corrupt through output alias'); return ['inputs/report.md'];
     });
     expect(result.status.status).toBe('failed');
-    expect(readlinkSync(join(project, 'inputs/report.md'))).toBe('prior.md');
+    expect(readlinkSync(join(project, 'inputs/report.md'))).toBe('evidence.md');
     expect(readFileSync(join(project, 'inputs/prior.md'), 'utf8')).toBe('previous output');
     expect(readFileSync(join(project, 'inputs/evidence.md'), 'utf8')).toBe('exact evidence');
   });
 
-  it('restores large frozen evidence from owned backing after settlement', async () => {
+  it('restores large frozen evidence from the pinned Git blob after settlement', async () => {
     const bytes = Buffer.alloc(2 * 1024 * 1024, 0x81); write('evidence.bin', bytes); commit();
     create('---\ninputs: [{path: evidence.bin, frozen: true}]\n---\nKeep `evidence.bin` immutable.');
     const result = await execute(() => { write('evidence.bin', 'bad'); return ['evidence.bin']; });
@@ -482,20 +450,19 @@ describe('the surviving project guarantees', () => {
     write(member, 'original'); writeFileSync(join(root, 'outside.txt'), 'outside sentinel'); commit();
     const frozen = input ?? 'evidence';
     create(`---\ninputs: [{path: ${frozen}, frozen: true}]\n---\nKeep \`${frozen}\` frozen.`);
-    const context = createScopeBatchContext(project, [stage()], undefined, runId);
-    expect(context.snapshot.rollbackBaseline.frozenImages.get(ancestor)).toMatchObject({ exists: true, type: 'directory' });
+    const context = createContentSettlementContext(project, [stage()], runId);
+    expect(context.frozen.members[ancestor]).toMatchObject({ state: 'present', type: 'directory' });
     rmSync(join(project, ancestor), { recursive: true });
     if (replacement === 'file') write(ancestor, 'replacement sentinel');
     else symlinkSync(root, join(project, ancestor), 'dir');
     let result!: ReturnType<typeof settleProjectWrites>;
-    expect(() => { result = settleProjectWrites({ projectDir: project, snapshot: context.snapshot,
-      rawWrites: writes, definiteWrites: new Set() }); }).not.toThrow();
+    expect(() => { result = settleProjectWrites({ projectDir: project, context,
+      rawWrites: writes, appliedWrites: [] }); }).not.toThrow();
     expect(result.violations.length).toBeGreaterThan(0);
-    expect(result.rollbackFailures).toEqual([]);
-    expect(result.rolledBackWrites).toContain(member);
-    expect(readFileSync(join(project, member), 'utf8')).toBe('original');
+    expect(result.rollbackFailures).toContain(member);
+    expect(result.rolledBackWrites).not.toContain(member);
     expect(readFileSync(join(root, 'outside.txt'), 'utf8')).toBe('outside sentinel');
-    if (replacement === 'file') expect(readFileSync(result.retainedReplacements[ancestor], 'utf8')).toBe('replacement sentinel');
+    if (replacement === 'file') expect(readFileSync(join(project, ancestor), 'utf8')).toBe('replacement sentinel');
   });
 
   it('rejects additive files only when the task explicitly freezes the entire evidence tree', async () => {
@@ -503,8 +470,8 @@ describe('the surviving project guarantees', () => {
     create('---\ninputs: [{path: evidence, frozen: true}]\n---\nKeep `evidence` frozen.');
     const result = await execute(() => { write('evidence/addition.txt', 'forbidden addition'); return ['evidence/addition.txt']; });
     expect(result.status.status).toBe('failed');
-    expect(result.audits[0].rolledBackWrites).toContain('evidence/addition.txt');
-    expect(existsSync(join(project, 'evidence/addition.txt'))).toBe(false);
+    expect(result.audits[0].rollbackFailures).toContain('evidence/addition.txt');
+    expect(readFileSync(join(project, 'evidence/addition.txt'), 'utf8')).toBe('forbidden addition');
     expect(readFileSync(join(project, 'evidence/original.txt'), 'utf8')).toBe('original');
   });
 
@@ -522,38 +489,56 @@ describe('the surviving project guarantees', () => {
 });
 
 
-it('keeps ordinary wave snapshots and settled writes as identities without rollback payloads', () => {
-  write('src/tracked.py', 'print(1)\n'); commit();
-  write('src/tracked.py', 'print(2)\n');
-  write('data/untracked.bin', Buffer.alloc(3_000_000, 7));
-  write('notes.md', 'operator notes\n');
-  const stages = create('---\noutputs: [out.md]\n---\nDo work.', [stage('author', ['src'])]);
-  const snapshot = captureRepairRoundSnapshot(project, stages, { runDirPath: directory });
-  expect(readdirSync(runRecordPath(directory, '.rollback-preimages'))).toEqual([]);
-  for (const image of snapshot.files.values()) {
-    expect(image.text).toBeUndefined(); expect(image.bytes).toBeUndefined(); expect(image.backingPath).toBeUndefined();
-  }
-  write('src/new_output.py', 'x = 1\n'.repeat(1000));
-  const settled = settleProjectWrites({ projectDir: project, snapshot,
-    rawWrites: ['src/new_output.py'], definiteWrites: new Set(['src/new_output.py']) });
-  expect(settled).toMatchObject({ appliedWrites: ['src/new_output.py'], durableWrites: ['src/new_output.py'],
-    rolledBackWrites: [], rollbackFailures: [], violations: [] });
-  expect(readdirSync(runRecordPath(directory, '.rollback-preimages'))).toEqual([]);
-});
+
 
 it('restores the original task-frozen bytes at two successive settlements', () => {
   write('frozen.txt', 'ORIGINAL'); commit();
   const stages = create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\nKeep the evidence.', [stage()]);
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const snapshot = captureRepairRoundSnapshot(project, stages, { runDirPath: directory });
-    expect(snapshot.rollbackBaseline.frozenImages.get('frozen.txt')?.backingPath).toBeTruthy();
+    const context = { frozen: bindFrozenInputs(project, directory) };
+    expect(context.frozen.members['frozen.txt']).toMatchObject({ state: 'present', type: 'file' });
     write('frozen.txt', `CORRUPT ${attempt}`);
     write('report.md', `delivered ${attempt}`);
-    const settled = settleProjectWrites({ projectDir: project, snapshot,
-      rawWrites: ['frozen.txt', 'report.md'], definiteWrites: new Set(['frozen.txt', 'report.md']) });
-    expect(settled).toMatchObject({ appliedWrites: ['report.md'], durableWrites: ['report.md'],
+    const settled = settleProjectWrites({ projectDir: project, context,
+      rawWrites: ['frozen.txt', 'report.md'], appliedWrites: ['frozen.txt', 'report.md'] });
+    expect(settled).toMatchObject({ appliedWrites: ['report.md'],
       rolledBackWrites: ['frozen.txt'], rollbackFailures: [], rollbackFailureReasons: {},
-      violations: [{ path: 'frozen.txt', certainty: 'definite', reason: 'task-frozen evidence content changed' }] });
+      violations: [{ path: 'frozen.txt', certainty: 'definite', reason: 'task-frozen evidence content changed or cannot be verified' }] });
     expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('ORIGINAL');
   }
+});
+
+it('read-only fallback fails even tracked frozen changes without restoring any project bytes', () => {
+  write('frozen.txt', 'ORIGINAL'); commit();
+  const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: ['arbitrary note'] });
+  create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\n', [gate]);
+  const context = createContentSettlementContext(project, [gate], runId);
+  write('frozen.txt', 'CHANGED');
+  const result = settleProjectWrites({ projectDir: project, context, readOnly: true, rawWrites: [], appliedWrites: ['frozen.txt'] });
+  expect(result.violations.map(item => item.kind)).toEqual(['immutable_evidence_violation', 'read_only_project_violation']);
+  expect(result.rolledBackWrites).toEqual([]); expect(result.rollbackFailures).toEqual(['frozen.txt']);
+  expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('CHANGED');
+});
+
+it('refuses to relearn frozen admission bytes when the manifest is missing after execution', async () => {
+  write('frozen.txt', 'ORIGINAL'); commit();
+  create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\n');
+  accepted(await execute(() => []));
+  rmSync(runRecordPath(directory, 'frozen_inputs.json'));
+  write('frozen.txt', 'CORRUPTED BETWEEN CONTROLLERS');
+  expect(() => bindFrozenInputs(project, directory)).toThrow('IMMUTABLE_EVIDENCE_UNAVAILABLE');
+  expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('CORRUPTED BETWEEN CONTROLLERS');
+});
+
+it('restores from the pinned base when the project HEAD moves after admission', () => {
+  write('frozen.txt', 'ORIGINAL'); commit();
+  create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\n');
+  const context = createContentSettlementContext(project, [stage()], runId);
+  write('frozen.txt', 'NEXT HEAD'); git('add', 'frozen.txt');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'Move project HEAD');
+  write('frozen.txt', 'STAGE CORRUPTION');
+  const result = settleProjectWrites({ projectDir: project, context, rawWrites: [], appliedWrites: ['frozen.txt'] });
+  expect(result.rolledBackWrites).toEqual(['frozen.txt']); expect(result.rollbackFailures).toEqual([]);
+  expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('ORIGINAL');
+  expect(git('show', 'HEAD:frozen.txt').trim()).toBe('NEXT HEAD');
 });

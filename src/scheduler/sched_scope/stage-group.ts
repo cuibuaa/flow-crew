@@ -8,8 +8,7 @@ import { log } from "../sched_admission/shared.js";
 import { type RunResult } from '../../adapters/base.js';
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { isStageInSkippedBranch, selectRunnableBatch } from "../sched_admission/frontier.js";
-import { type RepairRoundSnapshot } from './snapshots.js';
-import { type ScopeBatchContext, createScopeBatchContext } from './scope-batch.js';
+import { type ContentSettlementContext, createContentSettlementContext } from './frozen-inputs.js';
 import { type createScopeReconciler } from './reconciliation.js';
 
 export function allDone(state: StoreState, stages: StageConfig[]): boolean {
@@ -92,7 +91,7 @@ interface ScopeSafeStageServices {
 
 /** Settlement projects one content-contract decision after child closure. */
 export function createStageSettlementBoundary(input: {
-  stage: StageConfig; projectDir: string; runId: string; context: ScopeBatchContext;
+  stage: StageConfig; projectDir: string; runId: string; context: ContentSettlementContext;
 }, services: Pick<ScopeSafeStageServices, 'reconcileCompletedStageAttempts'>): (phase: 'attempt_closed') => Promise<void> {
   return async () => {
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -108,7 +107,6 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
     runId: string,
     iteration: number,
     execute: (stage: StageConfig, settlementBoundary?: (phase: 'attempt_closed') => Promise<void>) => Promise<RunResult | void>,
-    repairEvidence?: RepairRoundSnapshot,
   ): Promise<void> {
     const declaredStageById = new Map(stages.map((stage) => [stage.id, stage]));
     let pending = stages;
@@ -125,10 +123,9 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
           level: 'info', detail,
         });
       }
-      const context = createScopeBatchContext(
+      const context = createContentSettlementContext(
         projectDir,
         selected.map((stage) => declaredStageById.get(stage.id) ?? stage),
-        undefined,
         runId,
       );
       const wave = await Promise.allSettled(selected.map(async (initialStage) => {
@@ -147,19 +144,8 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         }
       }));
       executedStages.push(...selected);
-      // Each serialized wave observes the preceding author's settled content.
-      // Retain those captures for independent repair review,
-      // preserving the earliest image when the round touched a path already.
-      if (repairEvidence) {
-        for (const [path, image] of context.snapshot.files) {
-          if (!repairEvidence.files.has(path)) repairEvidence.files.set(path, image);
-        }
-        Object.assign(repairEvidence.declaredScopes, context.snapshot.declaredScopes);
-      }
       const executionError = wave.find((item): item is PromiseRejectedResult => item.status === 'rejected');
       if (executionError) throw executionError.reason;
-      // Let recursive filesystem notifications queued by a synchronous adapter
-      // reach the run-scoped journal before reconciliation reads its cursor.
       await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
       if (isPausedRunStatus(readRunState(projectDir, runId).status)) {
         interrupted = true;

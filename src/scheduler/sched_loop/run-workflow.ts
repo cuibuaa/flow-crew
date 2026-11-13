@@ -15,7 +15,7 @@ import { WorkflowConfig, loadDefaults } from '../sched_admission/configuration.j
 import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
-import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
+import { bindFrozenInputs } from '../sched_scope/frozen-inputs.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, readStageStatus, readRunReservation, runDir, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
@@ -97,6 +97,7 @@ export async function runWorkflow(
   recordRunEvent(projectDir, runId, { type: 'execution_notice', runId, timestamp: new Date().toISOString(), detail: SINGLE_AUTHOR_NOTICE, source: 'scheduler' });
   const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, { resumingExistingRun, briefWasAdmitted: launch.briefWasAdmitted }, taskDescription, campaignId, inheritCampaignContext, briefAdmission);
   if (configured.kind === 'settled') return settled = configured.state;
+  bindFrozenInputs(projectDir, runDirPath);
   taskDescription = configured.taskDescription;
   const researchState = configured.researchState ?? checkpointState;
   const research = researchState.research;
@@ -140,7 +141,6 @@ export async function runWorkflow(
     return settled;
   } finally {
     // Complete research bookkeeping while this scheduler still owns the run.
-    closeRollbackBaseline(projectDir, runDirPath);
     await schedulerHeartbeat?.stop();
     watchdog?.stop();
     removeSchedulerPidIfOwned(schedulerPidPath);
@@ -151,4 +151,3 @@ export async function runWorkflow(
   }
   });
 }
-

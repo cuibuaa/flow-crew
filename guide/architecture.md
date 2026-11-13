@@ -88,17 +88,15 @@ Sources: [shim](../src/supervise-shim.ts), [supervision records](../src/supervis
 ## Write and publication ownership
 
 The scheduling frontier admits one stage at a time into a shared mutable project tree.
-Planner scopes describe estimated work and product ownership. They never veto legitimate
-project writes. The run baseline binds task-declared immutable evidence once, including its
-canonical identities, exact output precedence and restorable bytes. Settlement owns content
-rejection and restoration; the audit projects its result without assigning snapshot changes
-to an invented author. Git owns ordinary disposable-output accounting. Tracked and frozen
-content remains evidence regardless of spelling, and unknown preimages never imply absence.
-
-Settling an admitted write retains its bytes in the existing run rollback content store before
-the next writer starts. Task-frozen preimages remain bound to run admission and are never
-relearned from a changed tree. Ordinary input locators remain mutable; unknown preimages
-never authorize destructive restoration.
+The admitted contract and stage kind determine write access. Authors get the whole project worktree,
+their own stage workspace and admitted external outputs/caches. Planner scope lists are only work-division
+notes. Read-only gates and isolated decisions get no project grant; hash-only settlement detects changes
+on hosts without a kernel grant, fails that attempt and leaves the project untouched by restoration.
+Frozen member identities bind once at admission and survive retries/restart. Settlement fails changes;
+only matching pinned-base Git content can restore a tracked leaf. Untracked and admission-dirty content
+is reported unrestored. There is no generic preimage, byte store, watcher or project rollback.
+The worker's existing before/after content identities produce actual applied-write receipts for terminal
+independent-review checks. Repair diffs project the evidence ledger rather than planner ownership.
 
 Project validation owns dependency preparation. Each configured validation batch
 installs from the current project lockfiles with the discovered package manager's
@@ -125,8 +123,8 @@ These checks do not turn shell-enabled workers into an OS sandbox. Use an isolat
 when the task needs stronger access isolation. The brief and injected constraints remain part
 of the agent's instructions.
 
-Sources: [batch owner](../src/scheduler/sched_scope/scope-batch.ts),
-[restoration](../src/scheduler/sched_scope/restore.ts), [integrity](../src/engine-integrity.ts),
+Sources: [batch owner](../src/scheduler/sched_scope/stage-group.ts),
+[frozen inputs](../src/scheduler/sched_scope/frozen-inputs.ts), [integrity](../src/engine-integrity.ts),
 [filesystem](../src/engine-fs.ts), [ownership](../src/engine-owned-carriers.ts),
 [lint rules](../eslint.config.js).
 

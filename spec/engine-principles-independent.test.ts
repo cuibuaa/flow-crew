@@ -244,7 +244,7 @@ describe('independent revision and exact-input controls', () => {
   function admitted(pending: Partial<StageConfig> = {}) {
     const stages = [stage('writer'), stage('pending', pending)];
     writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt, completedAt: startedAt, status: 'complete', exitCode: 0 }] });
-    updateRunState(project, runId, s => { recordAdmittedPlan(s, stages, directory, 'Independent admitted construction', true); });
+    updateRunState(project, runId, s => { recordAdmittedPlan(s, stages, directory, 'Independent admitted construction'); });
     return stages;
   }
   function revise(stages: StageConfig[], proposed: StageConfig[], requestId = 'independent') {

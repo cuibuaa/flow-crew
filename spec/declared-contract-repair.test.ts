@@ -17,8 +17,7 @@ import { WorkflowConfigSchema, runWorkflow } from '../src/scheduler.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { removeSchedulerPidIfOwned } from '../src/scheduler/sched_policy/identity.js';
-import { captureRepairRoundSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
-import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
+import { bindFrozenInputs } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
 import { readAdmittedBriefContract, verifyDeclaredBriefInputs } from '../src/ship-inputs.js';
 import { evaluateRealityGate, fcGlobalDir, initializeReservedRun, listRuns, readRunState, reserveRun, setFcGlobalDir } from '../src/store.js';
@@ -123,7 +122,7 @@ it.each(['snapshot', 'criterion coverage', 'frozen settlement'])('recovers inter
     expect(result.status).toBe('failed');
     expect(result.failureReason).toContain(property === 'criterion coverage'
       ? 'criterion preserved: not assigned to a gate' : `immutable_evidence_violation: ${source}`);
-    expect(readFileSync(join(dir, source), 'utf8')).toBe('ORIGINAL');
+    expect(readFileSync(join(dir, source), 'utf8')).toBe(property === 'frozen settlement' ? 'MUTATED' : 'ORIGINAL');
   }
 });
 
@@ -175,11 +174,11 @@ it('ordinary declared frozen input still detects and restores mutation', () => {
   const created = reserveRun(dir); initializeReservedRun(dir, created.runId, 'fixture', 'name: fixture\nstages: []\n', [], createBriefAdmission(inspectBrief(text), { kind: 'not_required' }));
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), text); writeBriefCriteriaArtifact(created.runDirPath, text);
   expect(verifyDeclaredBriefInputs(text, dir).unresolvedInputs).toEqual([]);
-  const snapshot = captureRepairRoundSnapshot(dir, [], { runDirPath: created.runDirPath });
+  const context = { frozen: bindFrozenInputs(dir, created.runDirPath) };
   try {
     writeFileSync(join(dir, 'source.txt'), 'MUTATED');
-    const settled = settleProjectWrites({ projectDir: dir, snapshot, rawWrites: ['source.txt'], definiteWrites: new Set(['source.txt']) });
+    const settled = settleProjectWrites({ projectDir: dir, context, rawWrites: ['source.txt'], appliedWrites: ['source.txt'] });
     expect(settled.violations).toMatchObject([{ path: 'source.txt' }]);
     expect(readFileSync(join(dir, 'source.txt'), 'utf8')).toBe('ORIGINAL');
-  } finally { closeRollbackBaseline(dir, created.runDirPath); }
+  } finally { }
 });

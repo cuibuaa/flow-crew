@@ -1,5 +1,4 @@
 import { runRecordPath, stageWorkPath, requestPath } from '../src/run-layout.js';
-import * as rollbackFiles from '../src/rollback-content-store.js';
 import * as engineFs from '../src/engine-fs.js';
 import { atomicWrite, renameSync as publishRename } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -103,10 +102,8 @@ describe('structural engine state protection', () => {
   it('restores engine decisions without creating rollback evidence payloads', async () => {
     const carrier = runRecordPath(run, 'stage_watchdog.json');
     write(carrier, 'trusted state');
-    const capture = vi.spyOn(rollbackFiles.RollbackContentStore.prototype, 'capture');
     await voided(async () => { writeFileSync(carrier, 'child edit'); });
     expect(readFileSync(carrier, 'utf8')).toBe('trusted state');
-    expect(capture).not.toHaveBeenCalled();
     expect(existsSync(runRecordPath(run, '.rollback-preimages'))).toBe(false);
   });
 

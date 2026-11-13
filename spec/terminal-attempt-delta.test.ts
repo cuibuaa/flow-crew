@@ -11,8 +11,7 @@ import { createRun } from './test-support/create-run.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { type Adapter, type AgentConfig } from '../src/adapters/base.js';
 import { createScopeReconciler } from '../src/scheduler/sched_scope/reconciliation.js';
-import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
-import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
+import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { renameSync } from '../src/engine-fs.js';
 
@@ -59,7 +58,8 @@ it.each([false, true])('direct author keeps shell writes with ignored=%s', async
   expect(attempt.writes).toContain(terminalPath);
   const audit = JSON.parse(readFileSync(runRecordPath(directory, attempt.constraintAudit!.path), 'utf8'));
   expect(attempt.writes).toEqual(audit.rawWrites);
-  if (ignored) expect(audit.exemptedWrites).toContain(terminalPath);
+  expect(audit.appliedWrites).toContain(terminalPath);
+  expect(audit).not.toHaveProperty('exemptedWrites');
   expect(readFileSync(join(project, terminalPath), 'utf8')).toContain('this execution');
 });
 
@@ -105,7 +105,7 @@ it('does not attribute an engine quarantine or restore to the following attempt'
   const created = createRun(project, 'fixture', 'name: fixture', ['implement']);
   const stage = StageConfigSchema.parse({ id: 'implement', role: 'coder', scope: ['docs/'], prompt_template: 'fixture', artifact_contract: { version: 1, produces: [], reads: [] } });
   const reconciler = createScopeReconciler();
-  const context = createScopeBatchContext(project, [stage], undefined, created.runId);
+  const context = createContentSettlementContext(project, [stage], created.runId);
   const execute = async (write: () => void, exitCode = 0) => {
     await runStage({ run: async () => { write(); return { output: 'Finished.', exitCode, duration_ms: 1 }; } }, {
       stageId: stage.id, role, dependsOn: [], promptTemplate: 'fixture', timeout_ms: 60000,
@@ -129,5 +129,5 @@ it('does not attribute an engine quarantine or restore to the following attempt'
     await execute(() => writeFileSync(join(project, terminalPath), 'failed attempt content\n'), 7);
     await execute(() => writeFileSync(join(project, terminalPath), 'result from this execution\n'));
     expect(readStageStatus(project, created.runId, stage.id).attempts?.at(-1)?.writes).toContain(terminalPath);
-  } finally { closeRollbackBaseline(project, created.runDirPath); }
+  } finally { }
 });

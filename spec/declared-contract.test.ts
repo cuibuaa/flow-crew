@@ -1,3 +1,4 @@
+import { bindFrozenInputs } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,8 +23,6 @@ import { runRecordPath } from '../src/run-layout.js';
 import { createWatchState, pollWatch } from '../src/watch.js';
 import { startDashboard } from '../src/dashboard.js';
 import { spawnSync } from 'node:child_process';
-import { captureRepairRoundSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
-import { ensureRollbackBaseline, closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { createHash } from 'node:crypto';
 
 const roots: string[] = [];
@@ -219,8 +218,8 @@ it('keeps legacy in-flight metadata readable but refuses active configuration wi
     expect(readBriefCriteriaArtifact(created.runDirPath)).toEqual(old);
     expect(() => readBriefCriteriaForAdmission(created.runDirPath)).toThrow('contract_hash_missing');
     expect(() => configureWorkflowBrief(workflow, project, created.runId, created.runDirPath, 1, { resumingExistingRun: true, briefWasAdmitted: true }, oldBrief)).toThrow('contract_hash_missing');
-    expect(() => ensureRollbackBaseline(project, created.runDirPath)).toThrow('contract_hash_missing');
-    closeRollbackBaseline(project, created.runDirPath);
+    expect(() => bindFrozenInputs(project, created.runDirPath)).toThrow('contract_hash_missing');
+
   } finally { setFcGlobalDir(previous); }
 });
 
@@ -239,10 +238,10 @@ it.each(['path', 'dataset'])('refuses active frozen-input inference for hashless
     const archived = JSON.parse(readFileSync(recordPath, 'utf8')); delete archived.briefAdmission;
     writeFileSync(recordPath, JSON.stringify(archived));
     expect(briefDeclarationFailures(brief).length).toBeGreaterThan(0);
-    expect(() => ensureRollbackBaseline(project, directory)).toThrow('contract_hash_missing');
-    expect(() => captureRepairRoundSnapshot(project, [], { runDirPath: directory })).toThrow('contract_hash_missing');
+    expect(() => bindFrozenInputs(project, directory)).toThrow('contract_hash_missing');
+    expect(() => bindFrozenInputs(project, directory)).toThrow('contract_hash_missing');
     expect(readFileSync(join(project, 'source.txt'), 'utf8')).toBe('frozen bytes');
-  } finally { closeRollbackBaseline(project, directory); setFcGlobalDir(previous); }
+  } finally { setFcGlobalDir(previous); }
 });
 
 it('refuses active import of legacy aliased frozen inputs even with an exact setup receipt', () => {
@@ -262,7 +261,7 @@ it('refuses active import of legacy aliased frozen inputs even with an exact set
     const recordPath = runRecordPath(directory, 'run.json');
     const archived = JSON.parse(readFileSync(recordPath, 'utf8')); delete archived.briefAdmission;
     writeFileSync(recordPath, JSON.stringify(archived));
-    expect(() => captureRepairRoundSnapshot(project, [], { runDirPath: directory })).toThrow('contract_hash_missing');
+    expect(() => bindFrozenInputs(project, directory)).toThrow('contract_hash_missing');
     expect(readFileSync(join(project, 'source.txt'), 'utf8')).toBe('original');
-  } finally { closeRollbackBaseline(project, directory); setFcGlobalDir(previous); }
+  } finally { setFcGlobalDir(previous); }
 });

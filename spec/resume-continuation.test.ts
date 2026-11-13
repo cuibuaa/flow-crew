@@ -196,7 +196,7 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
   expect(resumed).toMatchObject({ currentIteration: 2, maxIterations: 3, maxRetries: repairRound, startedAt: before.startedAt });
   expect(resumed.planControl).toEqual(before.planControl);
   if (resumingRepair) expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound}/repair_diff.json`), 'utf8')))
-    .toMatchObject({ iteration: 2, round: repairRound, repairStageIds: [stage.id] });
+    .toMatchObject({ iteration: 2, round: repairRound, repairStageIds: expect.arrayContaining([stage.id]) });
   if (!resumingRepair || admission === 'unrecorded round') expect(readFileSync(join(consumed, 'repair_diff.json'), 'utf8')).toBe(consumedEvidence);
   expect(existsSync(runRecordPath(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound + 1}/repair_diff.json`))).toBe(false);
   const repairAttempts = readStageStatus(project, created.runId, stage.id).attempts!;

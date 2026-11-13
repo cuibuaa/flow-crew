@@ -93,16 +93,16 @@ describe('terminal production preserves reviewed product bytes', () => {
     expect(final.failureReason).toContain('unreviewed product writes (value.json)');
     const audit = final.stages.finalize.attempts?.at(-1)?.constraintAudit;
     expect(audit).toBeDefined();
-    const receipt = JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit!.path), 'utf8')) as { durableWrites: string[]; rolledBackWrites: string[] };
-    expect(receipt.durableWrites).toContain('value.json');
+    const receipt = JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit!.path), 'utf8')) as { appliedWrites: string[]; rolledBackWrites: string[] };
+    expect(receipt.appliedWrites).toContain('value.json');
     expect(receipt.rolledBackWrites).toEqual([]);
   });
 
-  it('allows gitignored product changes after review, preserving the exemption', async () => {
+  it('requires re-review for a changed declared product even when gitignored', async () => {
     const { final, project } = await runReviewedTerminal(false, true, true);
     const audit = final.stages.finalize.attempts!.at(-1)!.constraintAudit!;
-    expect(JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit.path), 'utf8')).exemptedWrites).toContain('value.json');
-    expect(final.status, final.failureReason).toBe('complete');
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit.path), 'utf8')).appliedWrites).toContain('value.json');
+    expect(final.status, final.failureReason).not.toBe('complete');
   });
 
   it('retains product changes independently reviewed after terminal production', async () => {

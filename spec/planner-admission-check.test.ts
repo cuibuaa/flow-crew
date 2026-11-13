@@ -109,7 +109,7 @@ describe('optional planner proposal diagnostics', () => {
     expect(exitCode).toBe(1);
     expect(report.errors).toHaveLength(1);
     expect(report.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review', field: 'retry_to' }));
-    expect(report.errors.map(error => error.message)).toContain('review: missing repair route; declare an ordinary repair stage with retry_to: [review], depends_on: [review], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.');
+    expect(report.errors.map(error => error.message)).toContain('review: missing repair route; declare an ordinary repair stage with retry_to: [review], depends_on: [review]. The engine bounds repair rounds by gate_retry_loops without re-planning.');
     expect(snapshot()).toEqual(before);
     expect(report.errors).toEqual(inject(ctx).errors);
     mkdirSync(runRecordPath(ctx.directory, 'stages/plan'), { recursive: true });

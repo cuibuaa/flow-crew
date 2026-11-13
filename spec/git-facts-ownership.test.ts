@@ -42,7 +42,6 @@ import { spawnOwnedCommand, withRunProcessOwnership } from '../src/adapters/base
 import { Orchestrator } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
-import { closeRollbackBaseline, ensureRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { captureProjectTree } from '../src/evidence-ledger.js';
 import { startCommandRecorder } from '../src/recorded-command.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';
@@ -70,7 +69,7 @@ beforeEach(() => {
     : args.includes('config') ? { status: 1 } : success();
 });
 afterEach(() => {
-  closeRollbackBaseline(project); setFcGlobalDir(previous);
+  setFcGlobalDir(previous);
   if (previousSocket === undefined) delete process.env.FLOWCREW_DAEMON_SOCKET;
   else process.env.FLOWCREW_DAEMON_SOCKET = previousSocket;
   vi.useRealTimers(); rmSync(root, { recursive: true, force: true });
@@ -129,18 +128,7 @@ it('cancellation retires owned work but never publishes successful settlement fo
   expect(fixture.git.calls).toHaveLength(1);
 });
 
-it('directory watcher events nominate physical descendants without acquiring Git outside the operation', async () => {
-  fixture.git.answer = () => ({ status: 128 });
-  const { baseline } = ensureRollbackBaseline(project);
-  expect(fixture.watch).toBeTypeOf('function');
-  mkdirSync(join(project, 'new-directory', 'nested'), { recursive: true });
-  writeFileSync(join(project, 'new-directory', 'nested', 'file'), 'new bytes');
-  const calls = fixture.git.calls.length;
-  terminate();
-  expect(() => fixture.watch!('rename', 'new-directory')).not.toThrow();
-  expect(fixture.git.calls).toHaveLength(calls);
-  expect(baseline.journal.has('new-directory/nested/file')).toBe(true);
-});
+
 
 it('process identity publication joins the owning operation and retires its child before rejecting the original non-answer', async () => {
   const { runId } = reserveRun(project);

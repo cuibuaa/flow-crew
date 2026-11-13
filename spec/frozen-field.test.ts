@@ -13,7 +13,6 @@ import { parseBriefInputs } from '../src/ship-inputs.js';
 import { resolveImmutableEvidenceBindings } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js';
-import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -35,7 +34,7 @@ beforeEach(() => {
   setFcGlobalDir(join(root, 'store'));
 });
 afterEach(() => {
-  closeRollbackBaseline(project, directory);
+
   setFcGlobalDir(previous);
   rmSync(root, { recursive: true, force: true });
 });

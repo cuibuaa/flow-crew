@@ -155,7 +155,7 @@ describe('declared products are part of gate admission', () => {
     const base = runDir(project, id);
     const stage = (name: string, extra: object) => StageConfigSchema.parse({ id: name, role: 'coder', scope: [], depends_on: [], prompt_template: 'fixture', artifact_contract: { version: 1, produces: [], reads: [] }, ...extra });
     updateRunState(project, id, state => {
-      state.planControl = { version: 1, capabilities: ['report.md'], stages: [stage('review', { is_gate: true }), stage('report', { scope: ['report.md'], depends_on: ['review'], ...(repair ? { retry_to: ['review'] } : {}) })] };
+      state.planControl = { version: 1, capabilities: ['report.md'], stages: [stage('review', { is_gate: true }), stage('report', { artifact_contract: { version: 1, produces: [{ id: 'report', root: 'project', path: 'report.md', kind: 'file' }], reads: [] }, scope: ['report.md'], depends_on: ['review'], ...(repair ? { retry_to: ['review'] } : {}) })] };
     });
     writeFileSync(runRecordPath(base, 'verdict_review.json'), '{"pass":true}');
     expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(!repair);

@@ -97,7 +97,7 @@ function initializeRevision(): { stages: StageConfig[]; request: Record<string, 
   const startedAt = new Date().toISOString();
   const status = { status: 'complete' as const, retries: 0, attempts: [{ index: 1, startedAt, completedAt: new Date().toISOString(), status: 'complete' as const, exitCode: 0 }] };
   writeStageStatus(project, runId, 'writer', status);
-  const state = updateRunState(project, runId, (state) => { state.stages.writer = status; recordAdmittedPlan(state, stages, directory, 'admitted fixture', true); });
+  const state = updateRunState(project, runId, (state) => { state.stages.writer = status; recordAdmittedPlan(state, stages, directory, 'admitted fixture'); });
   return { stages, request: { version: 1, requestId: 'revision_1', runId, stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: state.queryState!.planRevision!.revision, baseDigest: planDigest(stages), reason: 'Outcome needs another stage', stages: [...stages, stage('extra', { depends_on: ['writer'], dependency_reasons: { writer: 'Uses settled outcome' } })] } };
 }
 function revise(request: unknown) {

@@ -1,3 +1,4 @@
+import { bindFrozenInputs } from './scheduler/sched_scope/frozen-inputs.js';
 import { BriefDeclarationsSchema } from './brief-declarations.js';
 import { declarationConfiguration } from './scheduler/sched_admission/brief-contract.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
@@ -95,8 +96,8 @@ export interface StageAttemptTimeoutSummary {
 
 export interface StageConstraintAuditSummary {
   path: string;
-  declaredScope: string[] | null;
-  effectiveScope: string[] | null;
+  declaredScope?: string[] | null;
+  effectiveScope?: string[] | null;
   violationCount: number;
   unverifiedCount: number;
   rawWriteCount?: number;
@@ -124,6 +125,8 @@ export interface StageContinuation {
 }
 
 export interface StageAttempt extends InvocationUsage {
+  /** Actual worker content delta; null means inspection was unavailable. */
+  appliedWrites?: string[] | null;
   writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
   writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   role?: string;
@@ -1016,6 +1019,7 @@ export function initializeReservedRun(
   // State is the directory's identity. Publish it before any optional child
   // directories so every observable initialization point is classifiable.
   writeRunState(normalizedProjectDir, runId, state);
+  if (briefAdmission) bindFrozenInputs(normalizedProjectDir, dir);
   mkdirSync(runRecordPath(dir, 'stages'), { recursive: true });
   for (const sid of stageIds) {
     mkdirSync(stageDir(normalizedProjectDir, runId, sid), { recursive: true });
@@ -1820,6 +1824,7 @@ export function beginStageAttempt(
 }
 
 export interface CompleteStageAttemptInput extends InvocationUsage {
+  appliedWrites?: string[] | null;
   writeGrantFailure?: import('./write-grant.js').WriteGrantFailure;
   writeGrantApplied?: { abi: number; linkedFileCount: 0 };
   attribution?: AttemptAttribution;
@@ -1898,6 +1903,7 @@ export function completedStageAttemptStatus(
     engineVoid: completion.engineVoid,
     adapterFailureKind: completion.adapterFailureKind,
     writes: completion.writes,
+    appliedWrites: completion.appliedWrites,
     writeAttribution: completion.writeAttribution,
     validationGeneratedWrites: completion.validationGeneratedWrites,
     constraintAudit: completion.constraintAudit,

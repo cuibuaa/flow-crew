@@ -11,7 +11,7 @@ import { fcGlobalDir, setFcGlobalDir, runDir, readRunState, writeRunState, write
 import { runRecordPath } from '../src/run-layout.js';
 import { parseBriefFrontmatter, entryWorkflow } from '../src/scheduler/sched_admission/brief-contract.js';
 import { inspectBrief } from '../src/brief-preflight.js';
-import { stageScopeOwnsPath } from '../src/scheduler/sched_admission/dispatch.js';
+import { literalProjectScope } from '../src/scheduler/sched_admission/scope-services.js';
 import { initializeResearchInstrument, researchInstrumentState, researchDirectory, researchAuthorContext } from '../src/research-measurement.js';
 import { runResearchLoop, researchStages, admitResearchStages, researchReviewContract } from '../src/scheduler/sched_policy/research.js';
 import { type ResearchConfig } from '../src/research-instrument.js';
@@ -48,7 +48,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'research-loop-')); project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   setEngineDefaults({ max_iterations: 1, max_retries: 0, stage_technical_retries: 0, gate_retry_loops: 0 });
-  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'baseline'], project, root);
   time = controlResearchTime();
 });
@@ -322,6 +322,8 @@ describe('versioned declaration-owned research loop', () => {
   });
   it('restores frozen project config when an author attempts a permanent edit', async () => {
     const text = brief(), original = readFileSync(join(project, 'instrument/config.json'), 'utf8');
+    isolatedProjectCommand('git', ['add', '.'], project, root);
+    isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'Pin frozen instrument'], project, root);
     const adapter = new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1}', 'instrument/config.json': '{"value":1}' } } });
     const { state, directory } = await run(text, adapter);
     expect(adapter.calls.map(c => c.stageId)).toEqual(['produce']); expect(state.status).toBe('failed');
@@ -831,16 +833,13 @@ it('cannot release protocol-frozen instrument roots through ordinary output decl
 it.each(['baseline: 100', 'measurement: {replicates: 2}', 'protocol: research-instrument/v2'])('refuses legacy or unknown research declaration %s', field => {
   expect(parseBriefFrontmatter(`---\nresearch:\n  ${field}\n---\nTask`).frontmatterError).toContain('research');
 });
-it('preserves literal root membership through protocol construction and admission', () => {
+it('retains literal candidate work-division notes through protocol construction and admission', () => {
   for (const path of ['src', 'a b/file.json', 'src/[a].json', 'src/a?file.json', 'src/a*file', 'src/{one,two}', 'src/@(one|two)', 'src/[!]', 'src/[*]', 'src/one]two']) {
     const config = parseBriefFrontmatter(brief(rc => { rc.candidate = [path]; }));
     expect(config.workflowError).toBeUndefined();
     const stages = researchStages(config.research!);
+    expect(stages[0].scope).toEqual([literalProjectScope(path)]);
     expect(admitResearchStages(config.research!, stages, project, root).pass).toBe(true);
-    expect(stageScopeOwnsPath(stages[0], path), path).toBe(true);
-    expect(stageScopeOwnsPath(stages[0], path + '/.hidden/member'), path).toBe(true);
-    expect(stageScopeOwnsPath(stages[0], 'src/a.json'), path).toBe(path === 'src');
-    expect(stageScopeOwnsPath(stages[0], 'unrelated.json'), path).toBe(false);
   }
 });
 it('refuses nonportable roots, overlapping authority, duplicate declarations and nonfinite caps', () => {

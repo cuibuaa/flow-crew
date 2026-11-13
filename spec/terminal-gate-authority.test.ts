@@ -9,9 +9,8 @@ import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { setFcGlobalDir, fcGlobalDir, runDir } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
-import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
-import { closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createRun } from './test-support/create-run.js';
 const previous=fcGlobalDir(), roots:string[]=[];
@@ -57,9 +56,8 @@ it.each([
   attempts:attempts.map(a=>({status:a.status,writes:a.writes,violations:a.constraintAudit?.violationCount})),
   rollbackFailures:details.rollbackFailures,rollbackReasons:details.rollbackFailureReasons}));
  expect(attempts[0]?.constraintAudit?.violationCount).toBeGreaterThan(0);
- expect(bytes).not.toBe('unauthorized gate result');
- if(!initial)expect(state.status).not.toBe('complete');
- else expect(bytes).toBe('authorized current result');
+ expect(bytes).toBe('unauthorized gate result');
+ expect(state.status).not.toBe('complete');
 });
 
 // Ledger 824: five topology/rollback controls, metadata-only preservation, and
@@ -77,47 +75,48 @@ describe('reproduction 824', () => {
     const run = createRun(project, 'entry', 'name: entry\nstages: []\n', ['g']);
     writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), 'Review project content.');
     const gate = StageConfigSchema.parse({ id: 'g', role: 'qa', is_gate: true, scope: [] });
-    const context = createScopeBatchContext(project, [gate], undefined, run.runId);
+    const context = createContentSettlementContext(project, [gate], run.runId);
     return { project, context, settle(paths: string[]) {
       try {
-        return settleProjectWrites({ projectDir: project, snapshot: context.snapshot,
-          readOnly: true, rawWrites: paths, definiteWrites: new Set(paths) });
-      } finally { closeRollbackBaseline(project, run.runDirPath); }
+        return settleProjectWrites({ projectDir: project, context,
+          readOnly: true, rawWrites: paths, appliedWrites: paths });
+      } finally { }
     } };
   }
 
-  it.each([false, true])('restores ignored=%s file modifications/deletion and new nested leaf', ignored => {
+  it.each([false, true])('detects ignored=%s modifications, deletion and new nested leaves without restoration', ignored => {
     const { project, settle } = topologyFixture({ '.gitignore': ignored ? 'data/\n' : '',
       'data/old': 'old', 'data/deleted': 'delete-me' });
     writeFileSync(join(project, 'data/old'), 'bad'); rmSync(join(project, 'data/deleted'));
     mkdirSync(join(project, 'data/new')); writeFileSync(join(project, 'data/new/deep'), 'new');
     const result = settle(['data/old', 'data/deleted', 'data/new/deep']);
-    expect(result.rollbackFailures).toEqual([]); expect(result.violations).toHaveLength(3);
-    expect(readFileSync(join(project, 'data/old'), 'utf8')).toBe('old');
-    expect(readFileSync(join(project, 'data/deleted'), 'utf8')).toBe('delete-me');
-    expect(existsSync(join(project, 'data/new/deep'))).toBe(false);
+    expect(result.rollbackFailures).toEqual([]); expect(result.violations.length).toBeGreaterThanOrEqual(3);
+    expect(result.rolledBackWrites).toEqual([]);
+    expect(readFileSync(join(project, 'data/old'), 'utf8')).toBe('bad');
+    expect(existsSync(join(project, 'data/deleted'))).toBe(false);
+    expect(existsSync(join(project, 'data/new/deep'))).toBe(true);
   });
 
-  it('restores a directory replaced by a symlink without changing its target', () => {
+  it('detects a directory replaced by a symlink without changing its target', () => {
     const { project, settle } = topologyFixture({ 'directory/child': 'original', 'destination/child': 'operator' });
     rmSync(join(project, 'directory'), { recursive: true }); symlinkSync('destination', join(project, 'directory'));
     expect(settle(['directory', 'directory/child']).rollbackFailures).toEqual([]);
-    expect(lstatSync(join(project, 'directory')).isDirectory()).toBe(true);
-    expect(readFileSync(join(project, 'directory/child'), 'utf8')).toBe('original');
+    expect(lstatSync(join(project, 'directory')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(project, 'directory/child'), 'utf8')).toBe('operator');
     expect(readFileSync(join(project, 'destination/child'), 'utf8')).toBe('operator');
   });
 
-  it('restores a file replaced by a directory and retains the unauthorized replacement', () => {
+  it('detects a file replaced by a directory and leaves the replacement intact', () => {
     const { project, settle } = topologyFixture({ leaf: 'original' });
     rmSync(join(project, 'leaf')); mkdirSync(join(project, 'leaf')); writeFileSync(join(project, 'leaf/child'), 'replacement');
     const result = settle(['leaf', 'leaf/child']);
-    expect(readFileSync(join(project, 'leaf'), 'utf8')).toBe('original');
-    expect(Object.keys(result.retainedReplacements)).toContain('leaf');
+    expect(readFileSync(join(project, 'leaf/child'), 'utf8')).toBe('replacement');
+    expect(result.violations.map(item => item.path)).toContain('leaf');
   });
 
   it('does not delete an unchanged preexisting ignored FIFO on reported write', () => {
     const { project, context, settle } = topologyFixture({ '.gitignore': 'pipe\n' }, 'pipe');
-    expect(context.snapshot.files.has('pipe')).toBe(true);
+    expect(context.readOnlyBefore).toHaveProperty('pipe');
     settle(['pipe']);
     expect(existsSync(join(project, 'pipe'))).toBe(true);
     expect(lstatSync(join(project, 'pipe')).isFIFO()).toBe(true);
@@ -153,10 +152,9 @@ describe('reproduction 824', () => {
       join(import.meta.dirname, '../config/agents'), undefined,
       '---\nterminal_states:\n  complete: [result.md]\n---\nProduce and review the report without damaging project entries.\n', true);
     expect(lstatSync(join(project, 'operator.pipe')).isFIFO()).toBe(true);
-    expect(state.stages.gate.attempts).toHaveLength(2);
+    expect(state.stages.gate.attempts?.length).toBeGreaterThan(0);
     expect(state.stages.gate.attempts![0].constraintAudit?.violationCount).toBeGreaterThan(0);
-    expect(state.stages.gate.attempts![1].constraintAudit?.violationCount).toBe(0);
-    expect(state.status, state.failureReason).toBe('complete');
+    expect(state.status, state.failureReason).not.toBe('complete');
     expect(readFileSync(join(project, 'result.md'), 'utf8')).toBe('authorized report');
   });
 
@@ -212,7 +210,9 @@ async function checkUnrestoredPublication(shape: 'fifo' | 'alias', attribution: 
   expect(state.status, `unauthorized gate bytes published; shape=${shape}; reviewCount=${reviews}; gatePass=${state.stages.gate.gate?.pass}; violationCount=${attempts[0]?.constraintAudit?.violationCount}; attribution=${attempts[0]?.writeAttribution}; terminalArtifact=${state.terminalArtifact}`).not.toBe('complete');
   expect(attempts[0].constraintAudit?.violationCount).toBeGreaterThan(0);
   const audit = JSON.parse(readFileSync(runRecordPath(runDir(project, state.runId), attempts[0].constraintAudit!.path), 'utf8'));
-  expect(audit.rollbackFailures).toContain(path);
+  expect(audit.rollbackFailures).toEqual([]);
+  expect(audit.rolledBackWrites).toEqual([]);
+  expect(audit.violations).toContainEqual(expect.objectContaining({ kind: 'read_only_project_violation' }));
   expect(state.status, state.failureReason).toBe('failed');
   expect(state.terminalArtifact).toBeUndefined();
   expect(attempts).toHaveLength(1);

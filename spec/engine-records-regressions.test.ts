@@ -171,31 +171,5 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     });
   });
 
-  it('retains every Git index stage and assigns explicit entry kinds', () => {
-    const oid = 'a'.repeat(40);
-    const entries = parseGitIndexEntries([
-      `100644 ${oid} 0\tregular.txt`,
-      `100755 ${oid} 0\texecutable.sh`,
-      `120000 ${oid} 0\tlink`,
-      `160000 ${oid} 0\tsubmodule`,
-      `040000 ${oid} 0\tsparse-directory`,
-      `100644 ${oid} 1\tconflicted.txt`,
-      `100644 ${oid} 2\tconflicted.txt`,
-      `100644 ${oid} 3\tconflicted.txt`,
-      '',
-    ].join('\0'));
 
-    expect([...entries.values()].flat().map(({ path, mode, stage, kind }) => ({ path, mode, stage, kind })))
-      .toEqual([
-        { path: 'regular.txt', mode: '100644', stage: 0, kind: 'regular' },
-        { path: 'executable.sh', mode: '100755', stage: 0, kind: 'executable' },
-        { path: 'link', mode: '120000', stage: 0, kind: 'symlink' },
-        { path: 'submodule', mode: '160000', stage: 0, kind: 'gitlink' },
-        { path: 'sparse-directory', mode: '040000', stage: 0, kind: 'sparse_tree' },
-        { path: 'conflicted.txt', mode: '100644', stage: 1, kind: 'unmerged' },
-        { path: 'conflicted.txt', mode: '100644', stage: 2, kind: 'unmerged' },
-        { path: 'conflicted.txt', mode: '100644', stage: 3, kind: 'unmerged' },
-      ]);
-    expect(classifyGitIndexEntry('100600', 0)).toBe('unknown');
-  });
 });

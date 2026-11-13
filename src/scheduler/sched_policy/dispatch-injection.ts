@@ -289,7 +289,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     writeFileSync(runRecordPath(runDirPath, 'dispatch.yaml'), stringifyYaml(Array.isArray(items) ? dispatched : { ...items as object, stages: dispatched }), 'utf-8');
     state.dispatchedStages = dispatched;
     refreshRunQueryState(state, sorted);
-    recordAdmittedPlan(state, sorted, runDirPath, 'Initial dispatch admitted', true, admission);
+    recordAdmittedPlan(state, sorted, runDirPath, 'Initial dispatch admitted', admission);
     // Dispatch topology and reachability have now been admitted as
     // one proposal. Only at this boundary may candidate check bytes replace the
     // prior scheduler-owned snapshot.

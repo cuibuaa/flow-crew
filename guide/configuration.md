@@ -136,11 +136,10 @@ through the same boundary. Static stages use the fields in the stage schema, inc
 optional ordinary `max_retries`; stage wins over workflow, then the engine technical retry
 default. Dynamic dispatch does not control retry policy: recorded `max_retries` is stripped.
 
-Static parsing preserves absent scope for compatibility. Scope entries are planning and
-reporting estimates; neither missing nor empty estimates prohibit project writes. Authors
+Static and dynamic parsing preserve optional scope lists unchanged as work-division notes; neither missing nor empty estimates prohibit project writes. Authors
 sharing a mutable project tree wait for the active author to settle. Settlement protects
 task-declared immutable evidence, with exact task outputs taking precedence.
-See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
+See [content settlement](../src/scheduler/sched_scope/reconciliation.ts).
 
 A brief declaring `research.protocol: research-instrument/v1` constructs its author and optional declared project reviewer directly. The frozen project instrument owns verdicts and final report content.
 Engineering briefs enter `entry.yaml`; its chooser selects a fixed author/review/repair shape or
@@ -154,7 +153,7 @@ closed risk-area objects and the engineering chooser returns `assumptions`.
 The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
 reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
 declared default and record why; invalid chooser outputs fail their attempt and use the existing retry. Outside-set
-choices are refused and recorded. Declared paths remain subject to full plan, scope, result-duty
+choices are refused and recorded. Declared paths remain subject to full plan, result-duty
 and finite-budget admission. Replanning cannot change executed duties or discard result obligations.
 Gate verdicts and historical repair edges translate to these same bounded successor transitions.
 Unstarted descendants of an unchosen alternative are skipped. A dependency join covering all

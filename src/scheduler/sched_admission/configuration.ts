@@ -41,7 +41,7 @@ const StageFields = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   role: z.string().min(1),
   depends_on: z.array(z.string()).optional().default([]),
-  /** Project-relative write capability. Missing is closed for writes and conflicts with writer scopes. */
+  /** Optional work-division note, passed to the stage unchanged. */
   scope: z.array(z.string()).optional(),
   /** Optional historical dependency prose; graph edges carry execution order. */
   dependency_reasons: z.record(z.string(), z.string()).optional(),
@@ -119,8 +119,6 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
     raw = { ...fields, prompt_template: fields.prompt_template ?? task };
   }
   const stage = StageConfigSchema.parse(raw);
-  // Live omission is a closed capability, never the legacy ungoverned scope state.
-  stage.scope ??= [];
   if (stage.decision?.kind === 'shape') throw new Error('shape decisions belong to the single entry workflow');
   if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
   normalizeStageContracts([stage]);

@@ -31,8 +31,8 @@ Deferred does not mean rejected; cancelling does not prove that children have cl
 
 The daemon serializes tasks by canonical project guard and queues conflicts; different projects
 can run concurrently. A parked run releases its execution slot. A foreground quick run also
-uses the project lock. Do not edit an active run's project: scope restoration cannot distinguish
-an unrelated human edit from every stage-caused change.
+uses the project lock. Do not edit an active run's project: content observations cannot attribute
+an unrelated human edit to a stage.
 
 Sources: [lifecycle vocabulary](../src/lifecycle-status.ts), [task registry](../src/task-registry.ts),
 [orchestrator](../src/orchestrator.ts), [run lock](../src/run-lock.ts).
@@ -110,19 +110,16 @@ PID and process group. Reads remain unrestricted. A successful launch receipt is
 are typed `writeGrantFailure` outcomes, with exit 125, rather than inferred from
 agent diagnostics.
 
-Declare writable project directories in stage `scope`, for example `src/`, or
-use `.` for the whole worktree, including dot directories and dependencies.
-An existing exact file permits content writes without granting its siblings;
-atomic replacement, deletion and creation need the containing directory grant.
-Preparation retains the declared file/directory kind through launch. The bridge
-checks that kind against its pinned descriptor before counting links or applying
-rules; replacing a declared file with a directory refuses with `unsafe_path`
-before the agent executes. A terminal literal tree rooted at an existing regular
-file is narrowed to file authority and receives the same replacement check.
-A literal terminal tree such as `src/**` is also representable. Arbitrary globs
-and absent exact files refuse launch: declare the intended directory explicitly.
-Declared artifacts add their literal paths; a new file likewise needs a declared
-parent directory. Run artifacts must stay in the stage's permitted `work/` area.
+Writing stages receive the whole project worktree, including dot directories and dependencies,
+plus their own stage workspace and contract-declared external outputs/caches. Optional stage `scope`
+arrays are work-division notes; neither their presence nor syntax changes the grant. Gates and isolated
+decisions receive no project write grant, including additive project output or cache grants.
+Admitted shared caches outside the project remain available; overlapping cache roots still refuse.
+On hosts without a kernel grant, hash-only settlement detects read-only project changes and fails the
+attempt without restoration. Frozen changes fail too; only a pinned-base Git blob matching the admitted
+digest can restore a tracked leaf. Untracked or dirty-at-admission content is reported unrestored.
+Exact shared run outputs still need existing inodes or declared directories; they do not grant siblings.
+Run artifacts must stay in the stage's permitted `work/` area.
 Engine-published verdict carriers are written by the engine from the typed result.
 The planner's declared proposal file is prepared as an exact inode before launch.
 An absolute directory output already admitted in the brief is also writable by
@@ -150,7 +147,7 @@ within that tree. This prevents a live stage from exporting a private file as
 an alias that a peer can overwrite. Creating/writing shared files and replacing
 files atomically within one directory still work. Private project, home and
 scratch directories retain ordinary internal moves. Use engine-prepared linked
-worktrees; a project scope containing the common Git directory refuses preparation.
+worktrees; a project root containing the common Git directory refuses preparation.
 An unborn repository is admitted with a null base commit. The engine prepares an
 unborn private stage branch using the same private metadata layout, so a
 first commit need not create or change the primary checkout's HEAD. Shared Git
@@ -201,7 +198,7 @@ files, home, caches and Git objects. Any nonzero count refuses execution with
 `{kind: "linked_files", count: N}`. It does not inspect file text or ignore rules.
 Materialize independent copies/reflinks or configure the dependency manager's
 copy mode before launch. Alternatively keep linked dependencies outside every
-writable root and read them without a grant, using narrow project scopes and a
+writable root and read them without a grant, with dependencies outside the worktree and a
 declared separate directory for generated outputs. A dependency install then
 needs an independently materialized writable dependency directory. Declare an
 external shared cache only if it needs writes and satisfies the same link-count
@@ -232,7 +229,7 @@ service socket remains access to that service; filesystem confinement alone does
 not remove it. Existing after-the-fact integrity and content checks remain active,
 including frozen-input protection within an otherwise writable directory.
 
-Before deployment, prepare independent dependency files, review writable scopes
+Before deployment, prepare independent dependency files, review project topology
 and cache declarations, verify bridge prerequisites, and obtain the normal
 engine-owned build/test/lint validation. Use the existing deployment hold and
 generation procedure below; inspect a **new** run's capability and its launch

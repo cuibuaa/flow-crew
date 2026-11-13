@@ -686,7 +686,7 @@ describe('operator dashboard vocabulary', () => {
     expect(lifecycle).toContain('A daemon **task**');
     expect(lifecycle).toContain('stage **execution**');
     expect(lifecycle).toContain('gate **re-evaluation**');
-    expect(protocol).toContain("planner's path estimate");
+    expect(protocol).toContain("work-division note");
     expect(protocol).toContain('including stages with disjoint estimates');
     expect(protocol).toContain('Whole-plan admission');
     expect(contract).toContain('immutable submitted snapshot');

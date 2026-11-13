@@ -108,12 +108,12 @@ describe('stage result contract', () => {
     });
     const text = assembled.replace(/\s+/g, ' ');
     expect(text).toContain('The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result.');
-    expect(text).toContain('brief-declared outputs and artifact_contract.produces paths owned by this stage');
-    expect(text).toContain('Only exact output paths already assigned to this stage by its admitted artifact_contract.produces or brief retain write authority');
-    expect(text).toContain('output ownership never authorizes additional evidence files or engine-record writes');
-    expect(text).toContain("invocation's private $TMPDIR for disposable probes");
+    expect(text).toContain('contract-declared external outputs/caches');
+    expect(text).toContain('Authors may write the project worktree');
+    expect(text).toContain('These grants never authorize engine-record writes');
+    expect(text).toContain("private $TMPDIR");
     expect(text).toContain('commands run, exit codes, short excerpts and file:line references');
-    expect(text).toContain('Do not create additional evidence files');
+    expect(text).toContain('Put additional evidence files in your own stage workspace or private scratch');
     expect(text).not.toMatch(/Cite durable evidence|admitted evidence paths|copy final.*evidence.*from scratch/i);
     expect(text).not.toContain('explicitly authorized task-local run paths');
   });

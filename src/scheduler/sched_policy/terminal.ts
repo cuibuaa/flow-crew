@@ -153,7 +153,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
       const accepting = isSuccessfulRunStatus(terminalStatus);
       for (const path of entry.paths) {
-        
+
         const projPath = join(ctx.projectDir, path);
         const snapPath = runRecordPath(ctx.runDirPath, terminalArtifactSnapshotName(path));
         if (!existsSync(projPath)) {
@@ -177,7 +177,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         const floorCheck = evaluateTerminalFloor(state, entry, ctx.projectDir);
         if (!floorCheck.passed) {
           if (floorCheck.reasonCode) return { decision: 'deferred', reasonCode: floorCheck.reasonCode, reasons: [floorCheck.reason!] };
-          
+
           const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
           appendSchedulerGuidanceOnce(
             ctx.runDirPath,
@@ -236,21 +236,28 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             entry.stageGlob ?? `${dirname(entry.paths[0] ?? '.')}/stage_*_verdict.md`,
           ]),
         ]).map(parseDeclaredScope);
-        const unreviewed = Object.values(state.stages).flatMap(stage => (
+        let unavailableWrites = false;
+        const unreviewed = Object.entries(state.stages).flatMap(([writerId, stage]) => (
           (stage.attempts?.length ? stage.attempts : [stage]).flatMap(attempt => {
             if (!attempt.constraintAudit) return [];
             let applied: string[];
             try {
-              applied = JSON.parse(readFileSync(runRecordPath(ctx.runDirPath, attempt.constraintAudit.path), 'utf8')).appliedWrites ?? [];
+              const receipt = JSON.parse(readFileSync(runRecordPath(ctx.runDirPath, attempt.constraintAudit.path), 'utf8'));
+              if (receipt.appliedWrites === null) { unavailableWrites = true; return []; }
+              applied = receipt.appliedWrites ?? [];
             } catch { return []; } // Legacy records have no content-delta receipt.
             return applied.filter(product => !terminalScopes.some(scope => scopeMatchesProjectPath(scope, product)))
               .filter(() => !gates.evaluations.some(gate => (
-                gate.status === STAGE_STATUS.COMPLETE && gate.effectiveVerdict?.pass === true
+                gate.id !== writerId && gate.status === STAGE_STATUS.COMPLETE && gate.effectiveVerdict?.pass === true
                 && Date.parse(state.stages[gate.id]?.attempts?.at(-1)?.startedAt ?? state.stages[gate.id]?.startedAt ?? '')
                   >= Date.parse(attempt.completedAt ?? '')
               )));
           })
         ));
+        if (unavailableWrites) {
+          deferredReasons.push(`${terminalStatus}: actual content delta unavailable`);
+          continue;
+        }
         if (unreviewed.length > 0) {
           deferredReasons.push(`${terminalStatus}: unreviewed product writes (${[...new Set(unreviewed)].join(', ')})`);
           continue;
@@ -272,7 +279,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           }
         }
         state.terminalArtifact = path;
-        
+
         try {
           mkdirSync(dirname(snapPath), { recursive: true });
           copyFileSync(sourcePath, snapPath);

@@ -1,3 +1,4 @@
+import { bindFrozenInputs } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { readAdapterCapabilityMemory, rememberUnsupportedEffort } from '../src/adapters/diagnose.js';
@@ -19,7 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import * as codexModule from '../src/adapters/codex.js';
-import { captureRepairRoundSnapshot, inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, runWorkflow, writeRepairRoundDiffArtifact, type WorkflowConfig } from '../src/scheduler.js';
+import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, runWorkflow, writeRepairRoundDiffArtifact, type WorkflowConfig } from '../src/scheduler.js';
 import * as schedulerModule from '../src/scheduler.js';
 import * as workerModule from '../src/worker.js';
 import { createRun } from './test-support/create-run.js';
@@ -162,70 +163,11 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(failureEvents[0].detail).toContain('synthetic adapter settlement failure');
   }, 15_000);
 
-  it('item 11: warm project observations reuse clean identities without reading or hashing bytes', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-rollback-run-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const runDirectory = createRun(projectDir, 'rollback', 'name: rollback\nstages: []\n', []).runDirPath;
-    mkdirSync(join(projectDir, 'scoped'), { recursive: true });
-    mkdirSync(join(projectDir, 'outside'), { recursive: true });
-    writeFileSync(join(projectDir, 'scoped', 'only.txt'), 'scope\n');
-    for (let index = 0; index < 3; index++) {
-      writeFileSync(join(projectDir, 'outside', `${index}.txt`), `${index}\n`);
-    }
-    runFixtureGit(projectDir, ['init', '-q'], runDirectory);
-    runFixtureGit(projectDir, ['add', '.'], runDirectory);
-    runFixtureGit(projectDir, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], runDirectory);
-    const scopedStage = stage({
-      id: 'work', role: 'coder', scope: ['scoped/only.txt'], depends_on: [], dependency_reasons: {},
-    });
-    const first = captureRepairRoundSnapshot(projectDir, [scopedStage], { runDirPath: runDirectory });
-    const warm = captureRepairRoundSnapshot(projectDir, [scopedStage], { runDirPath: runDirectory });
-    expect(first.measurement).toMatchObject({
-      baselineInitialized: true, baselineStrategy: 'git-index-plus-dirty-images',
-      baselineFilesRead: 0, baselineFilesHashed: 0, baselineBytesRead: 0, baselineBytesHashed: 0,
-    });
-    expect(warm.measurement).toMatchObject({
-      baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0,
-      scopedBytesRead: 0, scopedBytesHashed: 0,
-      outsideScopeFilesVisited: 0, outsideScopeFilesRead: 0, outsideScopeFilesHashed: 0,
-      outsideScopeBytesVisited: 0, outsideScopeBytesRead: 0, outsideScopeBytesHashed: 0,
-      conservativeFallback: false,
-    });
-  }, 20_000);
 
-  it('item 11: a watcher reliability loss takes the conservative full audit and detects an outside write', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-rollback-overflow-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const runDirectory = createRun(projectDir, 'rollback', 'name: rollback\nstages: []\n', []).runDirPath;
-    mkdirSync(join(projectDir, 'scoped'), { recursive: true });
-    mkdirSync(join(projectDir, 'outside'), { recursive: true });
-    writeFileSync(join(projectDir, 'scoped', 'only.txt'), 'scope\n');
-    writeFileSync(join(projectDir, 'outside', 'guarded.txt'), 'before\n');
-    runFixtureGit(projectDir, ['init', '-q'], runDirectory);
-    runFixtureGit(projectDir, ['add', '.'], runDirectory);
-    runFixtureGit(projectDir, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], runDirectory);
-    const scopedStage = stage({
-      id: 'work', role: 'coder', scope: ['scoped/only.txt'], depends_on: [], dependency_reasons: {},
-    });
-    const snapshot = captureRepairRoundSnapshot(projectDir, [scopedStage], { runDirPath: runDirectory });
-    (snapshot.rollbackBaseline as unknown as { reliable: boolean }).reliable = false;
-    writeFileSync(join(projectDir, 'outside', 'guarded.txt'), 'after\n');
-    runFixtureGit(projectDir, ['add', 'outside/guarded.txt'], runDirectory);
-    runFixtureGit(projectDir, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'move head after baseline'], runDirectory);
-    const artifact = writeRepairRoundDiffArtifact({
-      snapshot, projectDir, runDirPath: runDirectory, iteration: 1, round: 1,
-      repairStages: [scopedStage], statuses: {},
-    });
-    const parsed = JSON.parse(readFileSync(artifact, 'utf-8')) as { files: Array<{ path: string }> };
-    expect(snapshot.measurement.conservativeFallback).toBe(true);
-    expect(parsed.files.map((file) => file.path)).toContain('outside/guarded.txt');
-  });
 
-  it('item 11: admitted writable content preserves clean, dirty, untracked, deleted, and mode preimages', async () => {
+
+
+  it('item 11: frozen content uses pinned Git only and reports dirty, untracked and added members unrestored', async () => {
     const projectDir = temporaryRoot();
     const stateRoot = temporaryRoot('flowcrew-rollback-shapes-state-');
     priorStateRoot = fcGlobalDir();
@@ -265,16 +207,8 @@ describe('UX/performance engine-loop evidence replays', () => {
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
-    // A previous writer admission owns rollback for these mutable source files;
-    // the later empty-scope stage must still be caught and restored independently.
-    const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/**'],
-      depends_on: [], dependency_reasons: {} });
-    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief);
-    const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
-    expect(admitted.files.get('src/dirty.txt')?.backingPath).toBeTruthy();
-    expect(admitted.files.get('src/untracked.txt')?.backingPath).toBeTruthy();
-    const warm = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
-    expect(warm.measurement).toMatchObject({ baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0 });
+    const admitted = bindFrozenInputs(projectDir, created.runDirPath);
+    expect(admitted.members['src/dirty.txt']).toMatchObject({ state: 'present' });
     const paths = ['src/clean.txt', 'src/dirty.txt', 'src/untracked.txt', 'src/deleted.txt', 'src/mode.txt', 'src/new.txt'];
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
@@ -287,15 +221,15 @@ describe('UX/performance engine-loop evidence replays', () => {
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
     expect(readFileSync(join(projectDir, 'src', 'clean.txt'), 'utf-8')).toBe(originals.clean);
-    expect(readFileSync(join(projectDir, 'src', 'dirty.txt'), 'utf-8')).toBe(originals.dirty);
-    expect(readFileSync(join(projectDir, 'src', 'untracked.txt'), 'utf-8')).toBe(originals.untracked);
+    expect(readFileSync(join(projectDir, 'src', 'dirty.txt'), 'utf-8')).toBe('unauthorized\n');
+    expect(readFileSync(join(projectDir, 'src', 'untracked.txt'), 'utf-8')).toBe('unauthorized\n');
     expect(readFileSync(join(projectDir, 'src', 'deleted.txt'), 'utf-8')).toBe(originals.deleted);
     expect(readFileSync(join(projectDir, 'src', 'mode.txt'), 'utf-8')).toBe(originals.mode);
     expect(statSync(join(projectDir, 'src', 'mode.txt')).mode & 0o777).toBe(0o755);
-    expect(() => statSync(join(projectDir, 'src', 'new.txt'))).toThrow();
+    expect(readFileSync(join(projectDir, 'src', 'new.txt'), 'utf8')).toBe('unauthorized new\n');
   }, 20_000);
 
-  it('item 11: a non-Git run captures admitted content once and restores a later task-frozen overwrite', async () => {
+  it('item 11: a non-Git run retains admitted hashes and fails a later frozen overwrite unrestored', async () => {
     const projectDir = temporaryRoot();
     const stateRoot = temporaryRoot('flowcrew-nongit-rollback-state-');
     priorStateRoot = fcGlobalDir();
@@ -320,16 +254,8 @@ describe('UX/performance engine-loop evidence replays', () => {
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
-    const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/protected.txt'],
-      depends_on: [], dependency_reasons: {} });
-    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief);
-    const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
-    expect(admitted.measurement.baselineStrategy).toBe('filesystem-images');
-    expect(admitted.files.get('src/protected.txt')?.backingPath).toBeTruthy();
-    const warm = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
-    expect(warm.measurement).toMatchObject({ baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0,
-      scopedBytesRead: 0, scopedBytesHashed: 0 });
-    expect(readdirSync(runRecordPath(created.runDirPath, '.rollback-preimages')).length).toBeGreaterThanOrEqual(1);
+    const admitted = bindFrozenInputs(projectDir, created.runDirPath);
+    expect(admitted.members['src/protected.txt']).toMatchObject({ state: 'present' });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(join(projectDir, 'src', 'protected.txt'), 'unauthorized\n');
@@ -339,7 +265,7 @@ describe('UX/performance engine-loop evidence replays', () => {
       }, opts);
     } };
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
-    expect(readFileSync(join(projectDir, 'src', 'protected.txt'), 'utf-8')).toBe('operator preimage\n');
+    expect(readFileSync(join(projectDir, 'src', 'protected.txt'), 'utf-8')).toBe('unauthorized\n');
   }, 15_000);
 
   it('items 13–14: capability identity is run-scoped and supervisor static/novel evidence stays stable', () => {

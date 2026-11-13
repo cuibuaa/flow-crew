@@ -3,12 +3,11 @@ import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, rmSync, sta
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { RollbackContentStore, hashRollbackFileSync } from '../src/rollback-content-store.js';
+import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 import { inspectBriefOutputs, nodeShipInputFileSystem } from '../src/ship-inputs.js';
-import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
 import { createArchivedPathVerifier, archiveDeclaredOutputs } from '../src/declared-output-archive.js';
 
 let root: string | undefined;
@@ -18,7 +17,7 @@ afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
-it('guards sparse multi-GiB rollback payloads and verifies their digest at restore', { timeout: 240_000 }, async () => {
+it('hashes and archives sparse multi-GiB declared outputs with bounded memory', { timeout: 240_000 }, async () => {
   root = mkdtempSync(join(tmpdir(), 'large-file-state-'));
   const project = join(root, 'project');
   mkdirSync(join(project, 'hf_cache'), { recursive: true });
@@ -31,34 +30,7 @@ it('guards sparse multi-GiB rollback payloads and verifies their digest at resto
   expect(statSync(absolute).blocks * 512).toBeLessThan(1024 * 1024);
   setFcGlobalDir(join(root, 'store'));
   const run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['plan']).runDirPath;
-  const contentStore = new RollbackContentStore(run);
-  const captured = contentStore.capture(absolute, path);
-  const input = { projectDir: project, runDir: run, stageId: 'plan' };
-  let invocations = 0;
-  await withEngineIntegrity(input, async () => { invocations++; });
-  expect(invocations).toBe(1);
-
-  const corrupt = () => {
-    const fd = openSync(captured.backingPath, 'r+');
-    try { writeSync(fd, Buffer.from([1]), 0, 1, size - 1); } finally { closeSync(fd); }
-  };
-  // Rollback material is in the engine tree, so corruption during execution
-  // voids the stage and restores the engine's last trusted bytes.
-  await expect(withEngineIntegrity(input, async () => {
-    invocations++;
-    corrupt();
-  })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-  expect(invocations).toBe(2);
-  expect(hashRollbackFileSync(captured.backingPath).sha256).toBe(captured.sha256);
-  // Restoration must also refuse a preimage corrupted outside a live guard.
-  corrupt();
-  const restored = restoreProjectPath(project, path, {
-    exists: true, type: 'file', sha256: captured.sha256,
-    byteLength: captured.byteLength, backingPath: captured.backingPath,
-  });
-  expect(restored).toMatchObject({ restored: false, failure: expect.stringContaining('staged preimage verification failed') });
-  expect(hashRollbackFileSync(absolute).sha256).toBe(captured.sha256);
-
+  const captured = hashRollbackFileSync(absolute);
   const brief = `---\noutputs:\n  - path: ${path}\n    on_existing: update\n---\n`;
   expect(inspectBriefOutputs(brief, project).entries[0].sha256).toBe(captured.sha256);
   const declaration = { path, expectedType: 'file' as const, disposition: 'update' as const, source: 'outputs' as const, line: 2 };

@@ -68,7 +68,7 @@ function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {description: '', 
+    config: {description: '',
       name: 'e7-acceptance-loop',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
       stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
@@ -267,7 +267,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
     expect(result.gateOpts[0].sessionOwnerStageId).toBeUndefined();
     expect(result.gateOpts[0].resumeSessionId).not.toBe(BUILDER_UUID);
-    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false,
       id: GATE_ID, role: 'qa', depends_on: ['plan'], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: BUILDER_UUID, ownerStageId: 'plan', capturedAt: '2026-08-01T00:00:00.000Z',
@@ -280,7 +280,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
     expect(existsSync(gateVerdictCorrectionPath(result.runDirPath, GATE_ID))).toBe(false);
-    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false,
       id: GATE_ID, role: 'qa', depends_on: [], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: GATE_UUID, ownerStageId: GATE_ID, capturedAt: '2026-08-01T00:00:00.000Z',
@@ -298,17 +298,16 @@ describe('compressed acceptance loop', () => {
           truncated: boolean;
           files: Array<{ path: string; status: string; before: { sha256?: string }; after: { text?: string; binary?: boolean; sha256?: string } }>;
         };
-        expect(artifact.truncated).toBe(false);
+        expect(artifact).toHaveProperty('available', true);
         const touched = artifact.files.find((file) => file.path === 'src/checked.ts');
-        expect(touched).toMatchObject({ status: 'modified' });
-        expect(touched?.before.sha256).toBe(createHash('sha256').update('export const state = "BROKEN";\n').digest('hex'));
+        expect(touched).toMatchObject({ status: 'changed' });
         expect(touched?.after.sha256).toBe(createHash('sha256').update('export const state = "FIXED";\n').digest('hex'));
         const scopeEscape = artifact.files.find((file) => file.path === 'src/outside.ts');
-        expect(scopeEscape).toMatchObject({ status: 'modified' });
+        expect(scopeEscape).toMatchObject({ status: 'changed' });
         expect(scopeEscape?.after.sha256).toBe(createHash('sha256').update('export const outside = "CHANGED";\n').digest('hex'));
         expect(JSON.stringify(artifact)).not.toContain('\"text\":');
         const binary = artifact.files.find((file) => file.path === 'src/outside.bin');
-        expect(binary).toMatchObject({ status: 'added', after: { binary: true } });
+        expect(binary).toMatchObject({ status: 'changed', after: { state: 'present', type: 'file' } });
         expect(binary?.after.sha256).toMatch(/^[0-9a-f]{64}$/);
         touchedCheckProbe('fixture-marker-check');
       },

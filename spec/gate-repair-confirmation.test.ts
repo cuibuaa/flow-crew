@@ -320,7 +320,7 @@ describe('repair requires a reviewer reproduction', () => {
       dependsOn: [], promptTemplate: 'Independent reviewer', isGate: true, stageId: 'review' });
     for (const text of ['must cite its reproduction record', 'integer sequence in evidence-ledger.jsonl', 'native shell tool',
       'structured exit code, output digest and tree hash', 'explicit absolute cwd and shell', 'engine-recorded command endpoint', 'returns record.sequence',
-      'independent read-only scope []', 'run your own experiments']) expect(prompt).toContain(text);
+      'Keep the project read-only', 'run your own experiments']) expect(prompt).toContain(text);
     const legacy = { pass: false, reason: 'legacy', criteria: {}, audit_findings: { version: 1, findings: [finding('legacy')] },
       repairability: { version: 1, disposition: 'repairable', evidence: 'legacy evidence' } };
     expect(parseStageRecord(JSON.stringify(legacy), stageRecordSchema({ isGate: true }))).toEqual(legacy);

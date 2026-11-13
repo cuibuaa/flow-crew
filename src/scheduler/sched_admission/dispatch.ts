@@ -11,8 +11,7 @@ import { readAdmittedContract, readBriefCriteriaArtifact, type BriefCriteriaArti
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
-import { normalizedProjectPath, scopeMatchesProjectPath, scopeIntersectsProjectTree } from './scope-services.js';
-import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
+import { inspectStageGraph, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
 function finiteStatusConditionDomainError(
@@ -203,15 +202,6 @@ export function validatedCriterionDischarges(
   });
 }
 
-export function stageScopeOwnsPath(stage: StageConfig, rawPath: string, includeDescendants = false): boolean {
-  const path = normalizedProjectPath(rawPath);
-  if (!path || !stage.scope) return false;
-  return stage.scope.some((rawScope) => {
-    const scope = parseDeclaredScope(rawScope);
-    return scope.kind !== 'unknown' && (includeDescendants ? scopeIntersectsProjectTree(scope, path) : scopeMatchesProjectPath(scope, path));
-  });
-}
-
 export function createDispatchAdmission() {
   return (function inspectDispatchAdmission(input: {
     dispatched: StageConfig[];
@@ -233,7 +223,7 @@ export function createDispatchAdmission() {
       if (stage.decision) {
         if (stage.decision.kind === 'review' && (stage.decision.successors.length !== 2
           || new Set(stage.decision.successors).size !== 2
-          || stage.decision.successors.some(id => !byId.get(id)?.is_gate || byId.get(id)?.scope?.length !== 0))) {
+          || stage.decision.successors.some(id => !byId.get(id)?.is_gate))) {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: focused/full review requires two distinct independent read-only gate successors`, 'decision.successors', stage.id));
         }
         for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor) && stage.decision.kind !== 'shape') {
@@ -241,7 +231,7 @@ export function createDispatchAdmission() {
         }
       }
       if (stage.is_gate && !input.research && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
-        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
+        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}]. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
       }
       if (stage.condition?.trim()) {
         try {
@@ -252,10 +242,6 @@ export function createDispatchAdmission() {
         } catch (error) {
           errors.push(admissionError('stage_condition', `${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`, 'condition', stage.id));
         }
-      }
-      for (const [index, scope] of (stage.scope ?? []).entries()) {
-        const parsed = parseDeclaredScope(scope);
-        if (parsed.kind === 'unknown') errors.push(admissionError('stage_scope', `${stage.id}.scope.${index}: ${parsed.reason}`, `scope.${scope}`, stage.id));
       }
       if (stage.retry_to?.length) {
         const retrySet = new Set(stage.retry_to);
@@ -290,11 +276,6 @@ export function createDispatchAdmission() {
       const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
       if (workers.length === 0 && gates.length === 0 && !discharged.has(criterion.id)) {
         errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: not assigned to a work stage or gate`, `${criterion.id}`));
-      }
-      // Review duties need no fictitious author. A gate with project write
-      // authority still cannot stand in for the independent product author.
-      if (workers.length === 0 && gates.some((gate) => gate.scope?.length)) {
-        errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: product-writing gate requires an independent work stage`, `${criterion.id}`));
       }
       if (workers.length > 0 && gates.length === 0) {
         const emptyDownstreamGates = input.dispatched.filter((stage) => (

@@ -16,7 +16,7 @@ const repositoryRoot = join(import.meta.dirname, '..');
 const fixtures: string[] = [];
 
 function fixture(): { root: string; home: string; fcHome: string; temp: string } {
-  const root = mkdtempSync(join(tmpdir(), 'flowcrew-p10-cli-'));
+  const root = mkdtempSync(join(tmpdir(), 'cli-'));
   fixtures.push(root);
   const home = join(root, 'home');
   const fcHome = join(root, 'state');

@@ -44,7 +44,7 @@ describe('planner results contain consumed dispatch fields', () => {
 
   it('admits a minimal author, gate and repair plan through the real validators', () => {
     const plan = minimalPlan();
-    expect(parseDispatchedStageConfig({ id: 'closed', role: 'coder' }).scope).toEqual([]);
+    expect(parseDispatchedStageConfig({ id: 'closed', role: 'coder' }).scope).toBeUndefined();
     expect(parseStageRecord(JSON.stringify(plan), PLAN_SCHEMA)).toEqual(plan);
     expect(stageRecordSchema({})).toBe(HANDOFF_SCHEMA);
     expect(() => parseStageRecord(JSON.stringify(plan), stageRecordSchema({}))).toThrow();

@@ -1,10 +1,6 @@
-import { runRecordPath } from './run-layout.js';
-import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
-import { existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
-import { constants as fsConstants } from 'node:fs';
+import { closeSync, openSync } from './engine-fs.js';
+import { fstatSync, readSync } from 'node:fs';
 import { createHash, type Hash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 export interface RollbackStatIdentity {
   type: 'file' | 'symlink' | 'other';
@@ -20,31 +16,6 @@ export interface RollbackHashResult {
   sha256: string;
   byteLength: number;
   statIdentity: RollbackStatIdentity;
-}
-
-export interface RollbackCaptureResult extends RollbackHashResult {
-  backingPath: string;
-}
-
-/** Identity fields an ordinary unprivileged content replacement cannot restore. */
-export function rollbackStatIdentity(path: string): RollbackStatIdentity | undefined {
-  try {
-    // This identity nominates the directory entry itself. Following a link
-    // here would make an unchanged symlink look like its regular-file target
-    // and send the cooperative reader down the wrong content path.
-    const stat = lstatSync(path, { bigint: true });
-    return {
-      type: stat.isFile() ? 'file' : stat.isSymbolicLink() ? 'symlink' : 'other',
-      dev: stat.dev.toString(),
-      ino: stat.ino.toString(),
-      size: stat.size.toString(),
-      mode: stat.mode.toString(),
-      ctimeNs: stat.ctimeNs.toString(),
-      mtimeNs: stat.mtimeNs.toString(),
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 export function rollbackStatIdentitiesEqual(
@@ -104,49 +75,4 @@ export function hashRollbackFileSync(path: string): RollbackHashResult {
   const hash = createHash('sha256');
   const result = updateFileHashSync(path, hash);
   return { ...result, sha256: hash.digest('hex') };
-}
-
-export class RollbackContentStore {
-  readonly root: string;
-
-  constructor(runDirPath?: string) {
-    this.root = runDirPath
-      ? runRecordPath(runDirPath, '.rollback-preimages')
-      : mkdtempSync(join(tmpdir(), 'flowcrew-rollback-preimages-'));
-    mkdirSync(this.root, { recursive: true });
-  }
-
-  capture(sourcePath: string, _logicalPath: string): RollbackCaptureResult {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const before = rollbackStatIdentity(sourcePath);
-      if (!before || before.type !== 'file') throw new Error(`${sourcePath} is not a regular file`);
-      const hashed = hashRollbackFileSync(sourcePath);
-      const target = join(this.root, hashed.sha256);
-      if (existsSync(target)) return { ...hashed, backingPath: target };
-      try {
-        // COPYFILE_FICLONE requests copy-on-write but portably falls back to a
-        // kernel copy. Neither route retains the file in a JavaScript Buffer.
-        copyFileSync(sourcePath, target, fsConstants.COPYFILE_EXCL | fsConstants.COPYFILE_FICLONE);
-        const after = rollbackStatIdentity(sourcePath);
-        if (!rollbackStatIdentitiesEqual(before, after)) {
-          throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
-        }
-        const copied = hashRollbackFileSync(target);
-        if (copied.sha256 !== hashed.sha256 || copied.byteLength !== hashed.byteLength) {
-          throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
-        }
-        return { ...hashed, statIdentity: after!, backingPath: target };
-      } catch (error) {
-        lastError = error;
-        try { unlinkSync(target); } catch { /* best effort */ }
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error(`could not capture ${sourcePath}`);
-  }
-
-  cleanup(): void {
-    if (!existsSync(this.root)) return;
-    rmSync(this.root, { recursive: true, force: true });
-  }
 }

@@ -48,10 +48,8 @@ import { fcGlobalDir, initializeReservedRun, readRunState, reserveRun, setFcGlob
 import { renderRunSummary } from '../src/run-summary.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { listProjectFiles, listProjectFilesAt } from '../src/scheduler/sched_scope/path-capabilities.js';
-import { baselineImage, closeRollbackBaseline, ensureRollbackBaseline, type RunRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
-import { gitObjectIdForPath, readRepairFileImage, type GitIndexEntry } from '../src/scheduler/sched_scope/file-images.js';
-import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
+import { bindFrozenInputs, restoreFrozenInput } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { recordThrownStageAttempt } from '../src/scheduler/sched_scope/stage-group.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
@@ -95,7 +93,7 @@ beforeEach(() => {
   writeFileSync(join(directory, 'validation_baseline.json'), JSON.stringify({ baseCommit: oid }));
 });
 afterEach(() => {
-  closeRollbackBaseline(project); setFcGlobalDir(previous);
+  setFcGlobalDir(previous);
   vi.useRealTimers(); rmSync(root, { recursive: true, force: true });
 });
 
@@ -179,7 +177,6 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     ['tree inventory', () => captureProjectTree(project)],
     ['campaign identity', () => campaignBaseDirectory(project)],
     ['run summary', () => renderRunSummary(project, directory, state)],
-    ['staged-hash verification', () => gitObjectIdForPath(project, join(project, 'file.txt'))],
   ];
   it.each(consumers)('%s waits in place and preserves its answer', (_name, operation) => {
     // Make the historical fallback observably different from a valid fact.
@@ -290,73 +287,24 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
   });
 });
 
-describe('rollback Git facts', () => {
-  it('waits for every baseline probe and config read without changing the preimage strategy', () => {
-    const immediate = ensureRollbackBaseline(project).baseline;
-    const expected = { initialization: immediate.initialization, clean: [...immediate.cleanTracked], lazy: [...immediate.lazyGitTracked.keys()] };
-    closeRollbackBaseline(project);
-    const held = heldSync(() => ensureRollbackBaseline(project).baseline);
-    expect({ initialization: held.initialization, clean: [...held.cleanTracked], lazy: [...held.lazyGitTracked.keys()] }).toEqual(expected);
-  });
-  it.each(['rev-parse', 'ls-files', 'diff', 'core.autocrlf', 'core.eol', 'check-attr'])('propagates terminated %s without a filesystem/config fallback', target => {
-    terminateAt(args => args[0] === target || args.includes(target));
-    expect(() => ensureRollbackBaseline(project)).toThrow(GitNotAnswered);
-  });
-  it('keeps the filesystem strategy for a real non-repository Git error', () => {
-    driver.answer = () => ({ status: 128 });
-    const baseline = ensureRollbackBaseline(project).baseline;
-    expect(baseline.initialization.strategy).toBe('filesystem-images');
-    expect(baseline.images.get('file.txt')?.sha256).toBeDefined();
-  });
-  function materializationBaseline(): RunRollbackBaseline {
-    const baseline = ensureRollbackBaseline(project).baseline;
-    baseline.lazyGitTracked.clear();
-    return baseline;
-  }
-  it('materializes held blob bytes identically and caches no unavailable preimage on termination', () => {
-    const baseline = materializationBaseline();
-    const immediate = baselineImage(baseline, 'file.txt'); baseline.images.delete('file.txt');
-    expect(heldSync(() => baselineImage(baseline, 'file.txt'))).toEqual(immediate);
-    baseline.images.delete('file.txt'); terminateAt(args => args[0] === 'cat-file');
-    expect(() => baselineImage(baseline, 'file.txt')).toThrow(GitNotAnswered);
-    expect(baseline.images.has('file.txt')).toBe(false);
-  });
-  it('inspects held initialized submodule HEAD and status without an inspection failure', () => {
-    mkdirSync(join(project, 'module')); writeFileSync(join(project, 'module', 'member'), 'nested');
-    const entry: GitIndexEntry = { path: 'module', objectId: oid, mode: '160000', stage: 0, kind: 'gitlink' };
-    const operation = () => readRepairFileImage(project, 'module', [entry]);
-    const immediate = operation(); expect(immediate.inspectionFailure).toBeUndefined();
-    expect(heldSync(operation)).toEqual(immediate);
-    terminateAt(args => args.includes('rev-parse')); expect(operation).toThrow(GitNotAnswered);
-    driver.answer = args => args.includes('status') ? { status: null, signal: 'SIGKILL' } : success(oid);
-    expect(operation).toThrow(GitNotAnswered);
-  });
-  it.each(['cat-file', 'hash-object'])('restores held blobs but preserves the target on terminated %s before replacement', command => {
-    const before = { exists: true, type: 'file' as const, gitObjectId: oid };
-    const operation = () => restoreProjectPath(project, 'file.txt', before, join(root, 'retained'));
-    writeFileSync(join(project, 'file.txt'), 'operator');
-    expect(operation()).toEqual({ restored: true });
-    writeFileSync(join(project, 'file.txt'), 'operator');
-    expect(heldSync(operation)).toEqual({ restored: true });
+describe('frozen Git facts', () => {
+  it.each(['ls-tree', 'cat-file'])('waits for pinned frozen Git restoration and preserves the target on terminated %s', command => {
+    state.briefAdmission = createBriefAdmission(inspectBrief('---\ninputs: [{path: file.txt, frozen: true}]\n---\n'), { kind: 'not_required' });
+    writeFileSync(join(directory, 'run.json'), JSON.stringify(state));
+    const frozen = bindFrozenInputs(project, directory);
+    const answer = driver.answer;
+    driver.answer = (args, options) => args[0] === 'ls-tree' ? success(`100644 blob ${oid}\tfile.txt\0`) : answer(args, options);
+    const restore = () => restoreFrozenInput(project, frozen, 'file.txt');
+    writeFileSync(join(project, 'file.txt'), 'operator'); expect(restore()).toBeUndefined();
+    writeFileSync(join(project, 'file.txt'), 'operator'); expect(heldSync(restore)).toBeUndefined();
     expect(readFileSync(join(project, 'file.txt'), 'utf8')).toBe('content');
     writeFileSync(join(project, 'file.txt'), 'operator'); terminateAt(args => args[0] === command);
-    expect(operation).toThrow(GitNotAnswered);
+    expect(restore).toThrow(GitNotAnswered);
     expect(readFileSync(join(project, 'file.txt'), 'utf8')).toBe('operator');
     expect(readdirSync(project)).toEqual(['file.txt']);
   });
-  it('does not report a restoration when the final post-rename hash is terminated', () => {
-    const answer = driver.answer; let hashes = 0;
-    driver.answer = (args, options) => args[0] === 'hash-object' && ++hashes === 2
-      ? { status: null, signal: 'SIGTERM' } : answer(args, options);
-    expect(() => restoreProjectPath(project, 'file.txt', { exists: true, type: 'file', gitObjectId: oid })).toThrow(GitNotAnswered);
-    expect(hashes).toBe(2);
-  });
-  it('does not turn termination into a write-settlement audit or thrown-stage verdict', () => {
-    const baseline = ensureRollbackBaseline(project).baseline;
-    terminateAt(args => args[0] === 'check-ignore');
-    const snapshot = { files: new Map(), rollbackBaseline: baseline, declaredScopes: {} };
-    expect(() => settleProjectWrites({ projectDir: project, snapshot: snapshot as never,
-      rawWrites: ['file.txt'], definiteWrites: new Set(['file.txt']) })).toThrow(GitNotAnswered);
+
+  it('propagates a missing Git answer before publishing a thrown-stage verdict', () => {
     const missing = new GitNotAnswered('SIGTERM');
     expect(() => recordThrownStageAttempt(project, 'fixture', 'author', 0, missing)).toThrow(missing);
     expect(existsSync(join(fcGlobalDir(), 'runs', 'fixture'))).toBe(false);

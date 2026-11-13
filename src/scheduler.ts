@@ -17,11 +17,8 @@ export type { StageConfig, WorkflowConfig } from './scheduler/sched_admission/co
 export type { ScopeConflict } from './scheduler/sched_admission/frontier.js';
 export type { GateVerdictCorrection } from './scheduler/sched_admission/sessions.js';
 export { appendIterationLog, tryTerminateOnTerminalState, writeCampaignEntry } from './scheduler/sched_loop/services.js';
-export { immutableEvidenceConflict, resolveImmutableEvidenceBindings, scopeContainsPath } from './scheduler/sched_scope/path-capabilities.js';
-export { captureRepairRoundSnapshot } from './scheduler/sched_scope/snapshots.js';
-export { restoreProjectPath } from './scheduler/sched_scope/restore.js';
+export { immutableEvidenceConflict, resolveImmutableEvidenceBindings } from './scheduler/sched_scope/path-capabilities.js';
 export type { ImmutableEvidenceConflict, ImmutableEvidenceBinding } from './scheduler/sched_scope/path-capabilities.js';
-export type { RepairRoundSnapshot, RepairSnapshotMeasurement } from './scheduler/sched_scope/snapshots.js';
 export type { GateContract } from './scheduler/sched_settlement/gate-contract.js';
 export { loadGateContract } from './scheduler/sched_settlement/gate-contract.js';
 export { recordGateValidationDelta, snapshotShipSetupValidationBaseline } from './scheduler/sched_settlement/gate-validation.js';

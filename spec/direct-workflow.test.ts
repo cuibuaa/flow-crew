@@ -1,3 +1,4 @@
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
@@ -91,7 +92,7 @@ describe('direct workflow', () => {
       } else {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }
-      expect(call.user).toContain('Declared writable project paths');
+      expect(call.user).toContain('Work-division note (scope)');
       expect(call.user).toContain('Stage budget:');
       expect(call.user).toContain('# Execution clock');
       expect(call.user).toContain('Engine state query');
@@ -231,6 +232,7 @@ describe('direct workflow', () => {
 
   it('rejects frozen input corruption across repairs while restoring exact bytes', async () => {
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
+    for (const args of [['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'Pinned frozen input']]) isolatedProjectCommand('git', args, projectDir, fixtureRoot);
     const final = await runDirect(brief('inputs: [{path: notes.md, frozen: true}]\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair') {
         writeFileSync(join(projectDir, 'notes.md'), 'unauthorized\n');
@@ -245,7 +247,7 @@ describe('direct workflow', () => {
     expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain('notes.md');
   });
 
-  it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('restores an input write to %s despite broad scope', async (path) => {
+  it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('fails a frozen input write to %s and restores only pinned Git content', async (path) => {
     mkdirSync(join(projectDir, 'evidence'));
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
     writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
@@ -264,12 +266,12 @@ describe('direct workflow', () => {
     expect(final.status).not.toBe('complete');
     expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
-    expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(false);
+    expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(path === 'evidence/new.md');
     expect(final.stages.implement.attempts?.length).toBeGreaterThan(0);
     const audits = final.stages.implement.attempts!.flatMap(attempt => attempt.constraintAudit
       ? [JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
     const canonicalPath = path.replace(/^alias\//, 'evidence/');
-    expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain(canonicalPath);
-    expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);
+    if (path === 'evidence/new.md') expect(audits.flatMap(audit => audit.rollbackFailures)).toContain(canonicalPath);
+    else { expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain(canonicalPath); expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]); }
   });
 });

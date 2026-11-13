@@ -5,7 +5,6 @@ import { projectValidationResult } from '../../project-validation.js';
 import { assessFindings, AuditFindingsSchema, projectLegacyFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
-import { scopeContainsPath } from '../sched_scope/path-capabilities.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport } from '../sched_admission/dispatch.js';
 import { transitivelyDependsOn } from '../sched_admission/frontier.js';
@@ -176,7 +175,8 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
       // intermediate gate. Repair wiring cannot postpone a missing product.
       if (stages.some(stage => stage.id !== stageId && !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length
           && state.stages[stage.id]?.status !== STAGE_STATUS.COMPLETE && !transitivelyDependsOn(stageId, stage.id, byId)
-          && scopeContainsPath(stage.scope ?? [], output.path))) continue;
+          && stage.artifact_contract?.produces.some(product => product.root === 'project'
+            && (product.path === output.path || product.kind === 'directory' && output.path.startsWith(`${product.path}/`))))) continue;
       if (state.research && (state.research.publication !== undefined && state.research.publication === output.path || Object.values(state.terminalStates ?? {}).some(entry => entry.paths.includes(output.path)))) continue;
       if (!output.available) return { pass: false, refusal: { kind: 'declared_output' }, reason: `DECLARED_OUTPUT_REQUIRED: ${output.path}: ${output.reason}; restore the required product before gate acceptance; Guidance cannot override the brief` };
     }

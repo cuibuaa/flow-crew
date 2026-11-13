@@ -56,7 +56,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
       const admission = admitRevisionCandidate(sorted, state, projectDir, directory, roles);
       if (admission.pass) {
         refreshRunQueryState(state, sorted);
-        recordAdmittedPlan(state, sorted, directory, 'Initial typed workflow admitted', true, admission);
+        recordAdmittedPlan(state, sorted, directory, 'Initial typed workflow admitted', admission);
         writeRunState(projectDir, runId, state);
       } else {
         return concludeRun(state, { status: 'failed', reasonCode: 'dispatch_refused', detail: admission.errors.join('; ') });

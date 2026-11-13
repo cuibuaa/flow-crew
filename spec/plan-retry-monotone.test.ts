@@ -17,7 +17,7 @@ import { withEngineIntegrity } from '../src/engine-integrity.js';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function directory(): string { const root = mkdtempSync(join(tmpdir(), 'fc-plan-retry-')); roots.push(root); return root; }
-const requirement = planRetryRequirement({ code: 'stage_scope', stageId: 'work', field: 'scope', message: 'work.scope: refused' });
+const requirement = planRetryRequirement({ code: 'stage_role', stageId: 'work', field: 'role', message: 'work.role: refused' });
 function pair(root: string, scope: string, attemptIndex: number, checks?: string) {
   const dispatch = stringify({ stages: [{ id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: [scope], artifact_contract: { version: 1, produces: [], reads: [] } }] });
   writeFileSync(stageWorkPath(root, 'dispatch.yaml'), dispatch);
@@ -105,11 +105,11 @@ describe('complete proposal retries', () => {
 
 describe('structured planner refusal identity', () => {
   it('uses code, stage and field regardless of diagnostics or embedded engine-like prose', () => {
-    const error = { code: 'stage_scope', stageId: 'writer', field: 'scope', message: 'work.role: unknown role 42' };
+    const error = { code: 'stage_role', stageId: 'writer', field: 'role', message: 'work.role: unknown role 42' };
     const first = planRetryRequirement(error);
-    expect(first.id).toBe('stage_scope:writer:scope');
+    expect(first.id).toBe('stage_role:writer:role');
     expect(planRetryRequirement({ ...error, message: '此字段需要修改：99' }).id).toBe(first.id);
-    expect(planRetryRequirement({ ...error, field: 'role' }).id).not.toBe(first.id);
+    expect(planRetryRequirement({ ...error, field: 'depends_on' }).id).not.toBe(first.id);
     expect(planRetryRequirement({ ...error, stageId: 'reviewer' }).id).not.toBe(first.id);
     expect(planRetryRequirement({ ...error, code: 'different_rule' }).id).not.toBe(first.id);
   });

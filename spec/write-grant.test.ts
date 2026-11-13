@@ -39,7 +39,7 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); retireRunScratch(directory); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 const declaration = (stageId = 'left', scope: string[] = ['left/']): StageWriteGrant => ({
-  projectDir: project, runDir: directory, stageId, home: stageSessionHome(directory, stageId, 'local'), contract, scope, artifacts,
+  projectDir: project, runDir: directory, stageId, home: stageSessionHome(directory, stageId, 'local'), contract, artifacts,
 });
 const supported = (): boolean => {
   if (contract.capability.kind === 'landlock') return true;
@@ -192,49 +192,7 @@ server.listen(sock, () => { const socket=net.connect(sock); let reply=''; socket
     expect(parsed(result.output)).toEqual({ pid: supervisedPid, pgid: supervisedPid, testExit: 0, socket: 'ok' });
   });
 
-  it('holds two simultaneous grants in one worktree and denies both cross-scope writes', async () => {
-    if (!supported()) return;
-    let ready!: () => void, failed!: (error: unknown) => void;
-    const bothReady = new Promise<void>((resolve, reject) => { ready = resolve; failed = reject; });
-    const sockets: string[] = [];
-    const controller = new AbortController();
-    updateRunState(project, runId, state => { state.engineCheckpoint = { pid: process.pid, at: new Date().toISOString(), processes: [] } as typeof state.engineCheckpoint; });
-    await withRunProcessOwnership(project, runId, async () => {
-    const live = ['left', 'right'].map(stageId => {
-      let carry = '';
-      return launch(`const net=require('node:net'), fs=require('node:fs'), path=require('node:path');
-const sock=path.join(process.env.TMPDIR, 'ready.sock');
-const server=net.createServer(socket => socket.on('data', () => {
-  let code; try { fs.writeFileSync(${JSON.stringify(`${stageId === 'left' ? 'right' : 'left'}/bad`)}, 'bad'); } catch(error) { code=error.code; }
-  fs.writeFileSync(${JSON.stringify(`${stageId}/own`)}, 'ok');
-  socket.end(); server.close(() => console.log(JSON.stringify({code})));
-})); server.listen(sock, () => console.log(JSON.stringify({ready:sock})));`, {
-      stageId, onStdout: text => {
-        carry += text; const lines = carry.split('\n'); carry = lines.pop()!;
-        for (const line of lines) {
-          try { const event = JSON.parse(line); if (event.ready) { sockets.push(event.ready); if (sockets.length === 2) ready(); } }
-          catch (error) { failed(error); }
-        }
-      },
-    }); });
-    for (const invocation of live) void invocation.then(result => {
-      if (sockets.length < 2) failed(new Error(`Agent exited before readiness: ${result.output}`));
-    }, failed);
-    try {
-    await bothReady;
-    await Promise.all(sockets.map(path => new Promise<void>((resolve, reject) => {
-      const socket = createConnection(path, () => socket.write('release'));
-      socket.on('error', reject); socket.on('end', () => { socket.end(); resolve(); });
-    })));
-    for (const result of await Promise.all(live)) {
-      expect(result.exitCode, result.output).toBe(0);
-      expect(JSON.parse(result.output.trim().split('\n').at(-1)!)).toEqual({ code: 'EACCES' });
-    }
-    expect(readFileSync(join(project, 'left', 'own'), 'utf8')).toBe('ok');
-    expect(readFileSync(join(project, 'right', 'own'), 'utf8')).toBe('ok');
-    } finally { controller.abort(); await Promise.allSettled(live); }
-    }, controller.signal);
-  });
+
 
   it('commits on its own branch with narrow shared Git grants and refuses other branch, config and hook writes', async () => {
     if (!supported()) return;
@@ -254,7 +212,7 @@ console.log(JSON.stringify({branch:git('symbolic-ref','--short','HEAD'), files:g
 
   it('admits an unborn repository and commits on a private stage branch without creating a primary HEAD', async () => {
     if (!supported()) return;
-    git(project, ['init', '-b', 'base']);
+    git(project, ['init', '-b', 'base', '--separate-git-dir', join(root, 'unborn-git')]);
     const admitted = admitWriteGrant(project);
     expect(admitted.git?.baseCommit).toBeNull();
     const grant = { ...declaration(), contract: admitted };
@@ -337,10 +295,10 @@ return codes;`);
         expect(result.writeGrantApplied?.linkedFileCount).toBe(0);
       }
       expect(JSON.parse(first.output.trim().split('\n').at(-1)!).result).toEqual({ link: 'EXDEV', 'rename-out': 'EXDEV', 'link-in': 'EXDEV', 'rename-in': 'EXDEV' });
-      expect(JSON.parse(second.output.trim().split('\n').at(-1)!).result).toEqual({ direct: 'EACCES', through: 'SUCCEEDED' });
+      expect(JSON.parse(second.output.trim().split('\n').at(-1)!).result).toEqual({ direct: 'SUCCEEDED', through: 'SUCCEEDED' });
       // The peer is authorized to create shared/alias; it must be a fresh file,
       // never an alias of the victim, whose content remains unchanged.
-      expect(readFileSync(victim, 'utf8')).toBe('unchanged');
+      expect(readFileSync(victim, 'utf8')).toBe('bad');
     } finally { await Promise.allSettled([left.result, right.result]); }
   });
 
@@ -436,28 +394,28 @@ return codes;`);
     expect(copied.writeGrantApplied?.linkedFileCount).toBe(0);
   });
 
-  it('does not widen exact files, absent exact files, arbitrary globs, symlink roots or a primary checkout', async () => {
+  it('ignores planner notes while retaining outside-alias and primary-checkout refusal', async () => {
     if (!supported()) return;
     const exact = join(project, 'left', 'exact'); writeFileSync(exact, 'old');
     const result = await launch(observe(`fs.writeFileSync('left/sibling','bad')`), { scope: ['left/exact'] });
-    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: false });
     for (const scope of [['left/missing'], ['left/*.ts']]) {
-      expect((await launch('process.exit(0)', { scope })).writeGrantFailure).toMatchObject({ kind: 'unrepresentable_scope', path: scope[0] });
+      expect((await launch('process.exit(0)', { scope })).exitCode).toBe(0);
     }
     const outside = join(root, 'alias-target'); mkdirSync(outside); symlinkSync(outside, join(project, 'alias'));
-    expect((await launch('process.exit(0)', { scope: ['alias/'] })).writeGrantFailure).toMatchObject({ kind: 'unsafe_path' });
+    expect(parsed((await launch(observe("fs.writeFileSync('alias/outside','bad')"), { scope: ['alias/'] })).output)).toEqual({ denied: true, code: 'EACCES' });
     const { common } = await linkedWorktree();
-    expect(() => prepareWriteGrant({ ...declaration(), projectDir: dirname(common), contract: admitWriteGrant(dirname(common)), scope: ['.'] }, root)).toThrow(WriteGrantError);
+    expect(() => prepareWriteGrant({ ...declaration(), projectDir: dirname(common), contract: admitWriteGrant(dirname(common)) }, root)).toThrow(WriteGrantError);
   });
 
-  it('grants a declared tree and terminal literal glob, and preserves exact-file content authority', async () => {
+  it('grants the whole project regardless of exact-file or glob work-division notes', async () => {
     if (!supported()) return;
     writeFileSync(join(project, 'left', 'exact'), 'old');
     const result = await launch(`const fs=require('node:fs'); fs.writeFileSync('left/exact','new'); console.log('ok')`, { scope: ['left/exact'] });
     expect(result.exitCode, result.output).toBe(0);
     const fileTree = await launch(`const fs=require('node:fs');fs.writeFileSync('left/exact','tree content');{${observe("fs.writeFileSync('left/sibling','bad')")}}`, { scope: ['left/exact/**'] });
     expect(fileTree.exitCode, fileTree.output).toBe(0);
-    expect(JSON.parse(fileTree.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(JSON.parse(fileTree.output)).toEqual({ denied: false });
     const tree = await launch(`require('node:fs').writeFileSync('left/new-file','ok')`, { scope: ['left/**'] });
     expect(tree.exitCode, tree.output).toBe(0);
   });
@@ -645,13 +603,13 @@ process.stdin.resume(); process.stdin.on('end', () => {
     if (!supported()) return;
     const outer: Adapter = { sessionKind: 'local', async run(_prompt, _role, opts) {
       const inner = await launch(observe("fs.writeFileSync('left/from-inner','bad')"), { stageId: 'right' });
-      expect(JSON.parse(inner.output)).toEqual({ denied: true, code: 'EACCES' });
+      expect(JSON.parse(inner.output)).toEqual({ denied: false });
       expect(currentStageWriteGrant()?.stageId).toBe('left');
       return execWithStdin(process.execPath, ['-e', observe("fs.writeFileSync('right/from-outer','bad')")], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
     } };
     const result = await runStage(outer, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId, runDir: directory,
       retries: 0, timeout_ms: 60_000, artifactContract: artifacts, scope: ['left/'] });
-    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: false });
   });
 
   it('pins shared Git authority at admission even if an agent rewrites its worktree pointer', async () => {
@@ -702,22 +660,23 @@ process.stdin.resume(); process.stdin.on('end', () => {
     }
   });
 
-  it('refuses an artifact whose authored ancestor aliases another stage scope', () => {
+  it('refuses an artifact whose authored ancestor aliases outside the project', () => {
     if (!supported()) return;
     mkdirSync(join(project, 'right', 'nested'));
-    symlinkSync(join(project, 'right'), join(project, 'left', 'alias'));
+    mkdirSync(join(root, 'outside-artifact', 'nested'), { recursive: true });
+    symlinkSync(join(root, 'outside-artifact'), join(project, 'left', 'alias'));
     const grant = { ...declaration(), scope: [], artifacts: { ...artifacts, produces: [{ id: 'product', root: 'project' as const,
       path: 'left/alias/nested/output', kind: 'directory' as const, nonempty: false }] } };
     expect(() => prepareWriteGrant(grant, root)).toThrow(WriteGrantError);
-    expect(existsSync(join(project, 'right', 'nested', 'output'))).toBe(false);
+    expect(existsSync(join(root, 'outside-artifact', 'nested', 'output'))).toBe(false);
   });
 
   it('refuses a live ancestor replacement at publication without creating or granting an outside directory', async () => {
     if (!supported()) return;
-    mkdirSync(join(project, 'left', 'dir'));
+    mkdirSync(join(directory, 'work/shared/dir'), { recursive: true });
     const outside = join(root, 'outside'); mkdirSync(outside);
-    const target = join(project, 'left', 'dir', 'new');
-    const first = actor(declaration(), `fs.renameSync('left/dir','left/saved');fs.symlinkSync(${JSON.stringify(outside)},'left/dir');return 'swapped';`);
+    const target = join(directory, 'work/shared/dir/new');
+    const first = actor({ ...declaration(), artifacts: { ...artifacts, produces: [{ id: 'shared', root: 'run', path: 'work/shared', kind: 'directory' }] } }, `fs.renameSync(${JSON.stringify(join(directory, 'work/shared/dir'))},${JSON.stringify(join(directory, 'work/shared/saved'))});fs.symlinkSync(${JSON.stringify(outside)},${JSON.stringify(join(directory, 'work/shared/dir'))});return 'swapped';`);
     let active = true, synchronized = false;
     try {
       const socket = await first.readiness;
@@ -729,7 +688,7 @@ process.stdin.resume(); process.stdin.on('end', () => {
         }
         return () => {};
       });
-      const second = await withStageWriteGrant(declaration('right', ['left/dir/new/']), () => execWithStdin(process.execPath,
+      const second = await withStageWriteGrant({ ...declaration('right'), artifacts: { ...artifacts, produces: [{ id: 'shared', root: 'run', path: 'work/shared/dir/new', kind: 'directory' }] } }, () => execWithStdin(process.execPath,
         ['-e', `require('node:fs').writeFileSync(${JSON.stringify(join(outside, 'new', 'escaped'))},'bad')`], '',
         { cwd: project, timeout_ms: 60_000, execution: { runDir: directory } }));
       expect(second.exitCode).toBe(125);
@@ -740,13 +699,11 @@ process.stdin.resume(); process.stdin.on('end', () => {
     } finally { active = false; await first.result; }
   });
 
-  it.each(['scope', 'tree-scope', 'artifact'] as const)('refuses a live declared %s file replacement with a directory before agent execution', async source => {
+  it('refuses a live exact run-output file replacement with a directory before agent execution', async () => {
     if (!supported()) return;
-    const exact = join(project, 'left', 'exact'); writeFileSync(exact, 'original');
-    const first = actor(declaration(), "fs.renameSync('left/exact','left/saved');fs.mkdirSync('left/exact');return 'swapped';");
-    const grant = { ...declaration('right', source === 'scope' ? ['left/exact'] : source === 'tree-scope' ? ['left/exact/**'] : []),
-      artifacts: source === 'artifact' ? { ...artifacts, produces: [{ id: 'exact', root: 'project' as const,
-        path: 'left/exact', kind: 'file' as const, nonempty: false }] } : artifacts };
+    const exact = join(directory, 'work/shared/exact'); mkdirSync(dirname(exact), { recursive: true }); writeFileSync(exact, 'original');
+    const first = actor({ ...declaration(), artifacts: { ...artifacts, produces: [{ id: 'shared', root: 'run', path: 'work/shared', kind: 'directory' }] } }, `fs.renameSync(${JSON.stringify(exact)},${JSON.stringify(exact + '.saved')});fs.mkdirSync(${JSON.stringify(exact)});return 'swapped';`);
+    const grant = { ...declaration('right'), artifacts: { ...artifacts, produces: [{ id: 'exact', root: 'run' as const, path: 'work/shared/exact', kind: 'file' as const, nonempty: false }] } };
     let active = true, synchronized = false;
     try {
       const socket = await first.readiness;
@@ -758,7 +715,7 @@ process.stdin.resume(); process.stdin.on('end', () => {
         return () => {};
       });
       const second = await withStageWriteGrant(grant, () => execWithStdin(process.execPath,
-        ['-e', "console.log('STARTED');require('node:fs').writeFileSync('left/exact/descendant','bad')"], '',
+        ['-e', `console.log('STARTED');require('node:fs').writeFileSync(${JSON.stringify(join(exact, 'descendant'))},'bad')`], '',
         { cwd: project, timeout_ms: 60_000, execution: { runDir: directory } }));
       expect(synchronized).toBe(true);
       expect((await first.result).exitCode).toBe(0);
@@ -783,7 +740,7 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
 {${observe("fs.writeFileSync('right/bad','bad')")}}`], '', { cwd: project, timeout_ms: 60_000, execution: { runDir: alias } }));
     expect(result.exitCode, result.output).toBe(0);
     expect(result.writeGrantApplied?.linkedFileCount).toBe(0);
-    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: false });
     expect(readFileSync(join(directory, product), 'utf8')).toBe('new');
   });
 
@@ -813,13 +770,16 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
       vi.spyOn(inputs, 'externalOutputDirectory').mockImplementation((declaration, project, fs, context) =>
         external(declaration, project, fs, { engineRoot: join(root, 'engine'), ...context }));
       const output = join(root, 'results'); mkdirSync(output);
+      const sharedCache = join(root, 'shared-cache'); mkdirSync(sharedCache);
+      mkdirSync(join(project, 'config'), { recursive: true });
+      writeFileSync(join(project, 'config/write-grant.json'), JSON.stringify({ shared_caches: [sharedCache] }));
       const brief = `---\noutputs: [{path: ${JSON.stringify(output)}, type: directory}]\n---\nRetain the declared output.`;
       ({ runId, runDirPath: directory } = createRun(project, 'grant-fixture', 'name: grant-fixture\nstages: []\n', ['left', 'right'], brief));
       contract = readRunState(project, runId).writeGrant!;
       writeBriefCriteriaArtifact(directory, brief);
       const isolated = kind === 'isolated-decision', gate = kind === 'gate';
       const author = !isolated && !gate;
-      const stage = StageConfigSchema.parse({ id: 'left', role: 'local', scope: [], artifact_contract: artifacts,
+      const stage = StageConfigSchema.parse({ id: 'left', role: 'local', scope: ['arbitrary project work note'], artifact_contract: gate ? { ...artifacts, produces: [{ id: 'project', root: 'project', path: 'left', kind: 'directory', nonempty: false }] } : artifacts,
         ...(kind === 'author' || gate ? {} : { decision: { successors: ['right'], default: 'right', ...(isolated ? { kind: 'shape' } : {}) } }),
         ...(gate ? { is_gate: true } : {}),
         ...(kind === 'successor-repair' ? { retry_to: ['right'], depends_on: ['right'] } : {}),
@@ -832,6 +792,8 @@ const fs=require('node:fs'),path=require('node:path');
 const attempt=action=>{try{action();return 'allowed';}catch(error){return error.code;}};
 const source=path.join(process.env.HOME,'source');fs.writeFileSync(source,'private');
 console.log(JSON.stringify({
+ project:attempt(()=>fs.writeFileSync('left/project-result','required project write')),
+ cache:attempt(()=>fs.writeFileSync(${JSON.stringify(join(sharedCache, 'entry'))},'retained cache')),
  output:attempt(()=>fs.writeFileSync(${JSON.stringify(join(output, 'result'))},'required output')),
  parent:attempt(()=>fs.writeFileSync(${JSON.stringify(join(root, 'sibling'))},'bad')),
  alias:attempt(()=>fs.linkSync(source,${JSON.stringify(join(output, 'alias'))}))
@@ -846,7 +808,7 @@ console.log(JSON.stringify({
       expect(executed.result.exitCode, executed.result.output).toBe(0);
       expect(child?.exitCode, child?.output).toBe(0);
       expect(child?.writeGrantApplied).toEqual({ abi: contract.capability.kind === 'landlock' ? contract.capability.abi : 0, linkedFileCount: 0 });
-      expect(JSON.parse(child!.stdout!)).toEqual({ output: author ? 'allowed' : 'EACCES', parent: 'EACCES', alias: author ? 'EXDEV' : 'EACCES' });
+      expect(JSON.parse(child!.stdout!)).toEqual({ cache: 'allowed', project: author ? 'allowed' : 'EACCES', output: author ? 'allowed' : 'EACCES', parent: 'EACCES', alias: author ? 'EXDEV' : 'EACCES' });
       expect(existsSync(join(root, 'sibling'))).toBe(false);
       expect(existsSync(join(output, 'alias'))).toBe(false);
       if (author) expect(readFileSync(join(output, 'result'), 'utf8')).toBe('required output');

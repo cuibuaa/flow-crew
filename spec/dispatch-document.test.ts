@@ -6,7 +6,7 @@ import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { executeOrdinaryStage } from '../src/scheduler/sched_loop/ordinary-stage.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, setFcGlobalDir } from '../src/store.js';
 
@@ -34,7 +34,7 @@ describe('dispatch transport and role readers', () => {
     const run = vi.fn<Adapter['run']>(async () => ({ output: JSON.stringify({ status: 'delivered', summary: 'Role loaded.', checks: [], caveats: [] }), exitCode: 0, duration_ms: 1 }));
     const execute = async () => boundary === 'ordinary'
       ? (await executeOrdinaryStage(stage, [stage], state, project, runId, runDirPath, { run }, agents, agentsDir,
-          new Map(), new Map(), createScopeBatchContext(project, [stage], undefined, runId))).result
+          new Map(), new Map(), createContentSettlementContext(project, [stage], runId))).result
       : executeSingleStage(stage, project, runId, runDirPath, { name: 'fixture', defaults: {}, stages: [stage] }, { run }, agents, agentsDir, state, [stage]);
     await expect(execute()).rejects.toMatchObject({ code: 'ENOENT' });
     writeFileSync(join(agentsDir, 'writer.yaml'), JSON.stringify({ name: 'writer', prompt: false }));

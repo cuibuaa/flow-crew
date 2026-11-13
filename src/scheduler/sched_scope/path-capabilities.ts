@@ -3,8 +3,7 @@ import { parseBriefDeclarations } from '../../brief-declarations.js';
 import { gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { basename, dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, readdirSync, statSync, realpathSync } from "node:fs";
-import { normalizedProjectPath, normalizedProjectContentPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
-import { parseDeclaredScope } from "../sched_admission/frontier.js";
+import { normalizedProjectPath, normalizedProjectContentPath } from "../sched_admission/scope-services.js";
 import { extractBriefOutputDeclarations, parseBriefInputs } from "../../ship-inputs.js";
 
 
@@ -171,12 +170,6 @@ export function firstImmutableEvidenceConflict(
     }
   }
   return undefined;
-}
-
-/** Planner membership is reporting metadata, never write authority. */
-export function scopeContainsPath(scope: string[], rawPath: string): boolean {
-  const normalized = normalizedProjectPath(rawPath);
-  return Boolean(normalized && scope.some(entry => scopeMatchesProjectPath(parseDeclaredScope(entry), normalized)));
 }
 
 export function canonicalProjectWriteUnion(...collections: string[][]): string[] {

@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, scopeContainsPath, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
+import { checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import {
   STAGE_STATUS,
@@ -208,8 +208,6 @@ describe('engine generalization binding contracts', () => {
       'alias/evidence.txt', 'alias/report.md/child.txt', 'fixtures/source/generated-peer/new.json']) {
       expect(!firstImmutableEvidenceConflict([path], declaredInputs, projectDir), path).toBe(false);
     }
-    expect(scopeContainsPath([], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
-    expect(scopeContainsPath(['fixtures/other/**'], 'fixtures/source/report.md')).toBe(false);
   });
 
   it('keeps an output directory alias from authorizing preserved siblings outside its canonical tree', () => {

@@ -21,7 +21,7 @@ import type {
   ValidationCommandResult,
   ValidationCommandRunner,
 } from '../src/project-validation.js';
-import { captureRepairRoundSnapshot, inspectDispatchAdmission, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, writeCampaignEntry, type StageConfig } from '../src/scheduler.js';
+import { inspectDispatchAdmission, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, writeCampaignEntry, type StageConfig } from '../src/scheduler.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { createRun } from './test-support/create-run.js';
 import {
@@ -235,18 +235,13 @@ describe('engine self-collision after-state replays and controls', () => {
     expect(existsSync(localPath)).toBe(false);
 
     write(localPath, 'stage-authored\n');
-    const restored = restoreProjectPath(projectDir, localRelative, {
-      exists: false,
-      provenance: 'observed',
-    });
-    expect(restored).toEqual({ restored: true });
-    expect(existsSync(localPath)).toBe(false);
+    expect(existsSync(localPath)).toBe(true);
 
     recordAfter(1, 'write a scored campaign row while an empty-scope stage guard is active', {
       engineWrite: { path: globalPath.slice(root.length + 1), projectRelative: false },
       projectLedgerExists: existsSync(localPath),
       frameworkReservedScopes: reservation.frameworkReservedScopes,
-      control: { actor: 'stage', path: localRelative, restored },
+      control: { actor: 'stage', path: localRelative, retained: true },
     });
   });
 

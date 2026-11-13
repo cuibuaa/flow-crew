@@ -158,7 +158,7 @@ Paths mentioned in prose are references and grant no input or output authority.
 Only `frozen: true` freezes an input; omission or `false` leaves it mutable. Nonboolean
 values and unknown annotations are schema errors. Input/output identity and admitted frozen
 bytes are checked by hashes and physical paths, not by preservation wording.
-Settlement rejects and restores changed frozen bytes, and accepts identical bytes.
+Settlement fails changed frozen bytes and accepts identical bytes. Restoration uses only a pinned-base Git object whose content matches the admitted digest; untracked or locally dirty inputs are reported unrestored.
 
 Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
 and `on_existing: create|update|append|replace`. They are create-only by default. Declaring an existing
@@ -564,11 +564,10 @@ Existing frozen-input, read-only review and engine-record
 protections still refuse unauthorized writes. Criterion review uses the same admission rules for
 terminal reports and other work. Intermediate reports belong in outputs, not terminal declarations.
 Passing independent review must follow the product changes it accepts; a dependency edge does not
-substitute for that execution order. Read-only execution preserves ignored-file preimages for rollback;
-special filesystem entries retain unknown preimages, which never authorize destructive restoration.
-If a refused write leaves an unrestored file or topology, the existing integrity disposition stops
-the run before a retry can adopt that content. Unsupported special entries remain untouched and
-cannot qualify as terminal files.
+substitute for that execution order. Read-only stages have no project kernel grant. Without kernel
+support, complete content identities (including ignored members) detect project changes and fail the
+attempt without restoring them. Frozen hashes persist across retries; restoration never reads a stage's
+moving HEAD. Unsupported special entries stay unknown, remain untouched and cannot qualify as terminal files.
 An archived engine snapshot remains reader evidence; it does not substitute for an absent declared
 project artifact at settlement. Multiple fresh outcomes are ambiguous and cannot terminate the run.
 Historical records without a content baseline show terminal artifacts as `unverified` in

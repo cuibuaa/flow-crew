@@ -99,10 +99,9 @@ it('admits and finishes dependent repair slices at the last repair boundary befo
   expect(JSON.parse(readFileSync(join(archive, 'rejected_verdict_review.json'), 'utf8')).pass).toBe(false);
   const diff = JSON.parse(readFileSync(join(archive, 'repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
-  expect(diff.effectiveScopes).toEqual(Object.fromEntries(result.state.planControl!.stages
-    .filter(stage => diff.repairStageIds.includes(stage.id)).map(stage => [stage.id, stage.scope ?? []])));
-  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ before: { sha256: sha256('baseline sample\n') }, after: { sha256: sha256('measured\n') } });
-  expect(diff.files.find((file: { path: string }) => file.path === 'final.txt')).toMatchObject({ before: { exists: false }, after: { sha256: sha256('measurement reported\n') } });
+  expect(diff).not.toHaveProperty('effectiveScopes');
+  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ after: { sha256: sha256('measured\n') } });
+  expect(diff.files.find((file: { path: string }) => file.path === 'final.txt')).toMatchObject({ after: { sha256: sha256('measurement reported\n') } });
 });
 
 it('admits changed path estimates without a capability-union veto', async () => {
@@ -131,7 +130,7 @@ it('preserves the same gate and repair budget when review rejects the measured r
   expect(result.state.stages.review.attempts).toHaveLength(2);
 });
 
-it.each([false, true])('reruns dependent repair work with current inputs and fresh guard preimages (shared scopes: %s)', async shared => {
+it.each([false, true])('reruns dependent repair work with current inputs and fresh content identities (overlapping notes: %s)', async shared => {
   const result = await scenario({ repeat: true, shared });
   expect(result.state.status, result.state.failureReason).toBe('complete');
   expect(result.calls).toEqual(['author', 'review', 'repair', 'measure', 'publish', 'review', 'repair', 'measure', 'publish', 'review']);
@@ -140,9 +139,8 @@ it.each([false, true])('reruns dependent repair work with current inputs and fre
   expect(readFileSync(join(project, 'sample.txt'), 'utf8')).toBe('measured 2\n');
   const diff = JSON.parse(readFileSync(runRecordPath(result.directory, 'gate_reevaluation/iteration_1/round_2/repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
-  expect(diff.effectiveScopes).toEqual(Object.fromEntries(result.state.planControl!.stages
-    .filter(stage => diff.repairStageIds.includes(stage.id)).map(stage => [stage.id, stage.scope ?? []])));
-  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ before: { sha256: sha256('measured 1\n') }, after: { sha256: sha256('measured 2\n') } });
+  expect(diff).not.toHaveProperty('effectiveScopes');
+  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ after: { sha256: sha256('measured 2\n') } });
   for (const id of ['repair', 'measure', 'publish']) {
     const audit = JSON.parse(readFileSync(runRecordPath(result.directory, `stages/${id}/constraint_audit_attempt_2.json`), 'utf8'));
     expect(audit.violations).toEqual([]);

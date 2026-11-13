@@ -168,8 +168,9 @@ export async function concludeWorkflowIteration(
             );
             try {
               const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+              if (!Array.isArray(parsed.files)) return undefined;
               return createHash('sha256')
-                .update(JSON.stringify(parsed.files ?? []), 'utf8')
+                .update(JSON.stringify(parsed.files), 'utf8')
                 .digest('hex');
             } catch { return undefined; }
           })(),

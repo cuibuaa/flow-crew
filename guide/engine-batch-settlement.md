@@ -26,8 +26,8 @@ acceptance must rerun the retained specs against the final source.
 | E11 | fixed | Declared ignored outputs are distinguished from ignored inputs, with exact file and directory coverage; see [batch regressions](../spec/engine-batch-regressions.test.ts). |
 | E12 | already fixed | The reported watchdog carrier-deletion failure did not reproduce on the base: deletion controls returned 125 and restored the carrier. See [carrier integrity](../spec/engine-integrity-settlement.test.ts). No carrier-deletion repair or historical-flake cause is claimed. |
 | E13 | already fixed | Later attempts preserve earlier native provider streams; see [per-attempt log specs](../spec/livelog-per-attempt.test.ts). |
-| E14 | already fixed | Admitted writers returning to the batch preimage already resettle the baseline; see [baseline specs](../spec/write-scope-subtraction.test.ts). |
-| E15 | fixed | Settlement retains admitted restoration bytes and the first batch preimage; later unauthorized overwrites restore them. See [rollback storage](../src/scheduler/sched_scope/rollback-baseline.ts) and [batch regressions](../spec/engine-batch-regressions.test.ts). |
+| E14 | historical fix; machinery retired in C1 | Generic baseline resettlement is removed; actual content deltas remain in [settlement specs](../spec/write-scope-subtraction.test.ts). |
+| E15 | historical fix; machinery retired in C1 | Generic byte retention and preimages are removed. [Frozen hashes and pinned Git restoration](../src/scheduler/sched_scope/frozen-inputs.ts) replace them. |
 | E16 | declined | Independent setup copies preserve source isolation; hardlinks permit source mutation and copy failure already refuses READY. See [project validation](../spec/project-validation.test.ts). |
 | E17 | declined | Older build members may be declared products or required evidence; directory names do not grant disposal authority. Disposable copies use [invocation scratch](../spec/validation-scratch.test.ts). |
 | E18 | declined | Explicit pytest temporary trees inside declared artifacts retain that artifact's lifetime; default disposable fixtures use [invocation scratch](../spec/validation-scratch.test.ts). |
@@ -40,10 +40,10 @@ twice. See [watchdog source](../src/stage-watchdog.ts) and the stream-growth con
 in [batch regressions](../spec/engine-batch-regressions.test.ts). This does not
 reclassify the original carrier-deletion entry or establish the historical flake's cause.
 
-The first review also required two production corrections. R1 confines rollback
+The first review also required two production corrections. R1 originally confined rollback; C1 confines frozen Git restoration
 to a physically confined parent: a substituted outward ancestor yields an honest
 restoration failure and leaves outside bytes untouched. Outward leaf aliases can
-still be replaced safely; see [restoration](../src/scheduler/sched_scope/restore.ts)
+still be replaced safely; see [frozen Git restoration](../src/scheduler/sched_scope/frozen-inputs.ts)
 and the ancestor-substitution controls in [batch regressions](../spec/engine-batch-regressions.test.ts).
 
 The legacy result-slot publication mechanism has been retired. Research submissions are

@@ -20,7 +20,7 @@ export const PlanRevisionRequestSchema = z.object({
 export interface PlanControl {
   version: 1;
   stages: RecordedStageConfig[];
-  capabilities: string[];
+  capabilities?: string[]; // historical scope aggregate; never recomputed
 }
 export function planDigest(stages: readonly StageConfig[]): string { return sha256Canonical(stages); }
 
@@ -54,7 +54,7 @@ function publishImmutable(path: string, content: string): void {
 }
 
 /** Called only after whole-plan admission; the carrier precedes its committed reference. */
-export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], directory: string, reason: string, establishCapability = false, admission?: object, forceRevision = false): void {
+export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], directory: string, reason: string, admission?: object, forceRevision = false): void {
   const digest = planDigest(stages);
   if (!forceRevision && state.queryState?.planRevision?.digest === digest) return;
   const revision = (state.queryState?.planRevision?.revision ?? -1) + 1;
@@ -64,9 +64,7 @@ export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], dir
   publishImmutable(runRecordPath(directory, path), `${JSON.stringify({ version: 1, runId: state.runId, revision, digest, admittedAt, reason, stages, admission }, null, 2)}\n`);
   const record = { revision, digest, admittedAt, reason, path };
   state.queryState = { ...(state.queryState ?? { version: 1 }), version: 1, planRevision: record, planHistory: [...(state.queryState?.planHistory ?? []), record] };
-  state.planControl = { version: 1, stages, capabilities: establishCapability
-    ? [...new Set([...(state.planControl?.capabilities ?? []), ...stages.flatMap((stage) => stage.scope ?? [])])]
-    : state.planControl?.capabilities ?? stages.flatMap((stage) => stage.scope ?? []) };
+  state.planControl = { version: 1, stages };
 }
 
 export interface RevisionAdmission { pass: boolean; errors: string[]; warnings?: string[] }
@@ -148,7 +146,7 @@ export function applyPlanRevision(input: {
         const next = candidate.find((stage) => stage.id === previous.id);
         const executed = (state.stages[previous.id]?.attempts?.length ?? 0) > 0 || [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, STAGE_STATUS.RUNNING, 'suspended'].includes(state.stages[previous.id]?.status ?? '');
         if (executed) {
-          if (!next || planDigest([previous]) !== planDigest([next])) fail(`PLAN_REVISION_EXECUTED_STAGE: ${previous.id} identity, duties and history are immutable`);
+          if (!next || planDigest([{ ...previous, scope: undefined }]) !== planDigest([{ ...next, scope: undefined }])) fail(`PLAN_REVISION_EXECUTED_STAGE: ${previous.id} identity, duties and history are immutable`);
         } else if (resultDuties(previous).length) {
           if (resultDuties(previous).some((duty) => !candidateDuties.has(duty))) fail(`PLAN_REVISION_DUTIES_CHANGED: retain admitted result obligations for ${previous.id}`);
         } else if (!next || previous.condition !== next.condition || previous.prompt_template !== next.prompt_template) {
@@ -162,7 +160,7 @@ export function applyPlanRevision(input: {
         }
       }
       if (!decision.errors.length) {
-        recordAdmittedPlan(state, candidate, directory, request.reason, false, admission, true);
+        recordAdmittedPlan(state, candidate, directory, request.reason, admission, true);
         for (const id of original.keys()) if (!ids.has(id)) delete state.stages[id];
         state.unresolvedStageObligations = state.unresolvedStageObligations?.filter((entry) => entry.declaredIteration !== state.currentIteration || !original.has(entry.stageId) || ids.has(entry.stageId));
         for (const stage of candidate) state.stages[stage.id] ??= { status: 'pending', retries: 0 };

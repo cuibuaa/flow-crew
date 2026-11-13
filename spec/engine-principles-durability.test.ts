@@ -25,7 +25,7 @@ beforeEach(() => {
   const startedAt = new Date().toISOString();
   const status = { status: 'complete' as const, retries: 0, attempts: [{ index: 1, startedAt, completedAt: startedAt, status: 'complete' as const, exitCode: 0 }] };
   writeStageStatus(project, runId, 'writer', status);
-  updateRunState(project, runId, (state) => { state.stages.writer = status; recordAdmittedPlan(state, stages, directory, 'Admitted fixture', true); });
+  updateRunState(project, runId, (state) => { state.stages.writer = status; recordAdmittedPlan(state, stages, directory, 'Admitted fixture'); });
   request = { version: 1, requestId: 'recover_projection', runId, stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: 0, baseDigest: planDigest(stages), reason: 'Settled result requires more work.', stages: [...stages, stage('extra')] };
 });
 
@@ -130,4 +130,12 @@ describe('revision decisions survive interruption and concurrent publication', (
     expect(JSON.parse(readFileSync(decisionPath(), 'utf8'))).toEqual(first.decision);
     expect(readRunState(project, runId).queryState?.planHistory).toHaveLength(2);
   });
+});
+
+ it('allows a scope-note-only revision of an executed stage without changing its duties', () => {
+  const stages = readRunState(project, runId).planControl!.stages;
+  const result = revise({ ...request, stages: stages.map(stage => ({ ...stage, scope: ['unparsed work-division note', ''] })) });
+  expect(result.decision.accepted).toBe(true);
+  expect(result.state.planControl).not.toHaveProperty('capabilities');
+  expect(result.state.planControl!.stages[0].scope).toEqual(['unparsed work-division note', '']);
 });

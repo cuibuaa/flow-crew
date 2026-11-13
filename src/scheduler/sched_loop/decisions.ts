@@ -1,14 +1,12 @@
+import { isReadOnlyStage } from '../sched_scope/frozen-inputs.js';
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
-import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
-import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
-import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
+import { normalizedProjectPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
 import { readEvidence } from '../../evidence-ledger.js';
 import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { atomicWrite, mkdirSync, unlinkSync } from '../../engine-fs.js';
+import { existsSync } from 'node:fs';
+import { atomicWrite, unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
 import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
@@ -85,7 +83,6 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       graph.records.push(record); event(record, state, project, run);
       graph.visits[`${iteration}/${gateId}`] = Math.max(0, state.gateRetryRound.round - 1);
     }
-    if (pending.length) saveRepairPreimage(project, directory, iteration, state.gateRetryRound.round, pending);
   }
   for (const source of [...sorted]) {
     const declaration = declaredDecision(source, sorted, state), status = state.stages[source.id];
@@ -147,11 +144,16 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const repeatedGap = state.stages[target]?.attempts?.at(-1)?.endingCause === 'environment_gap' ? target
       : gateAccepted === false ? gaps.find(({ blocks, unknownCriterionIds }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
         && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id) && !unknownCriterionIds.includes(id)))
-          && (!blocks.paths.length || finding.paths.some(path => stageScopeOwnsPath({ ...source, scope: blocks.paths }, path)))))?.id : undefined;
+          && (!blocks.paths.length || finding.paths.some(raw => {
+            const path = normalizedProjectPath(raw);
+            return path !== undefined && blocks.paths.some(block => {
+              const declaration = parseDeclaredScope(block);
+              return declaration.kind !== 'unknown' && scopeMatchesProjectPath(declaration, path);
+            });
+          }))))?.id : undefined;
     if (repeatedGap || unconfirmedRejection || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
-      || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${record.reason}`;
+      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination or exhausted visit budget (${used}/${limit}). ${record.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);
@@ -174,13 +176,11 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
         const coordinate = gateArchiveCoordinate(iteration, used + 1);
         archiveRejectedGateRuntimeFacts(directory, coordinate, facts);
         archiveGateRoundEvidence(directory, coordinate, [source.id], new Map(facts.evaluations.filter(fact => fact.effectiveVerdict).map(fact => [fact.id, fact.effectiveVerdict!])));
-        const group = sorted.filter(stage => stage.retry_to?.includes(source.id));
-        if (group.length && !resumed) saveRepairPreimage(project, directory, iteration, used + 1, group);
         state.gateRetryRound = { iteration, round: used + 1 };
       }
       graph.enabled[target] = source.id;
       graph.visits[`${iteration}/${target}`] = used + Number(!resumed && (revisiting || source.is_gate));
-      if (destination.is_gate && source.retry_to?.length) finishRepairEvidence(project, directory, state, sorted);
+      if (destination.is_gate && !isReadOnlyStage(source)) finishRepairEvidence(directory, state, sorted, destination.id);
       if (state.stages[target]?.status !== STAGE_STATUS.PENDING) { repend(target, state); targetsToPublish.push(target); }
     }
     writeRunState(project, run, state);
@@ -191,29 +191,18 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
   return state;
 }
 
-function preimagePath(directory: string, iteration: number, round: number): string {
-  return runRecordPath(directory, 'gate_reevaluation', `iteration_${iteration}`, `round_${round}`, 'repair_preimage.json');
-}
-function saveRepairPreimage(project: string, directory: string, iteration: number, round: number, stages: StageConfig[]): void {
-  const path = preimagePath(directory, iteration, round);
-  if (existsSync(path)) return;
-  const snapshot = captureRepairRoundSnapshot(project, stages, { runDirPath: directory });
-  const { files, rollbackBaseline: _baseline, ...metadata } = snapshot;
-  const images = [...files].map(([name, { bytes: _bytes, text: _text, backingPath: _path, ...image }]) => [name, image]);
-  mkdirSync(dirname(path), { recursive: true });
-  atomicWrite(path, JSON.stringify({ ...metadata, files: images }));
-}
-function finishRepairEvidence(project: string, directory: string, state: StoreState, sorted: StageConfig[]): void {
+function finishRepairEvidence(directory: string, state: StoreState, sorted: StageConfig[], gateId: string): void {
   const coordinate = state.gateRetryRound;
   if (!coordinate) return;
-  const path = preimagePath(directory, coordinate.iteration, coordinate.round);
-  if (!existsSync(path)) return;
-  const saved = JSON.parse(readFileSync(path, 'utf8'));
-  const snapshot: RepairRoundSnapshot = { ...saved, files: new Map(saved.files), rollbackBaseline: ensureRollbackBaseline(project, directory).baseline };
-  const repairs = sorted.filter(stage => (Object.hasOwn(snapshot.declaredScopes, stage.id) || stage.retry_to?.some(id => Object.keys(snapshot.declaredScopes).some(source => sorted.find(stage => stage.id === source)?.retry_to?.includes(id))))
-    && Date.parse(state.stages[stage.id]?.attempts?.at(-1)?.startedAt ?? '0') >= Date.parse(snapshot.startedAt));
-  for (const repair of repairs) for (const path of state.stages[repair.id]?.attempts?.at(-1)?.writes ?? []) {
-    if (!path.startsWith('run:') && !snapshot.files.has(path)) snapshot.files.set(path, { exists: false, provenance: 'observed' });
-  }
-  writeRepairRoundDiffArtifact({ snapshot, projectDir: project, runDirPath: directory, ...coordinate, repairStages: repairs, statuses: state.stages });
+  const records = state.decisionGraph?.records ?? [];
+  const lastGate = [...records].reverse().find(record => record.stageId === gateId && record.iteration === coordinate.iteration);
+  const start = lastGate ? records.indexOf(lastGate) : 0;
+  const selected = new Set(records.slice(Math.max(0, start)).flatMap(record => record.successor ? [record.successor] : []));
+  const rejectedAt = state.stages[gateId]?.attempts?.at(-1)?.completedAt ?? state.stages[gateId]?.completedAt;
+  const repairs = sorted.filter(stage => !isReadOnlyStage(stage) && !stage.dynamic_dispatch
+    && (selected.has(stage.id) || stage.retry_to?.includes(gateId))
+    && state.stages[stage.id]?.attempts?.some(attempt => Date.parse(attempt.startedAt) >= Date.parse(rejectedAt ?? '')));
+  const statuses = Object.fromEntries(repairs.map(stage => [stage.id, { ...state.stages[stage.id],
+    attempts: state.stages[stage.id].attempts?.filter(attempt => Date.parse(attempt.startedAt) >= Date.parse(rejectedAt ?? '')) }]));
+  writeRepairRoundDiffArtifact({ runDirPath: directory, ...coordinate, repairStages: repairs, statuses });
 }

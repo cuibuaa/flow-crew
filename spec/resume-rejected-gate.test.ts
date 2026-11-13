@@ -68,7 +68,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
     updateRunState(project, created.runId, state => {
       state.maxIterations = 1;
       // Old admitted static plans may lack the repair route now required at admission.
-      if (!withRepair) recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Legacy static plan admitted before repair routes were required', true);
+      if (!withRepair) recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Legacy static plan admitted before repair routes were required');
     });
     const settled = await run(created.runId);
     expect(settled).toMatchObject({ status: 'incomplete', currentIteration: 1, maxIterations: 1 });

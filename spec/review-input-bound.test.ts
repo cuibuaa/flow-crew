@@ -78,7 +78,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'review-input-'));
   project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
-  git('init', '-q');
+  git('init', '-q', '--separate-git-dir', join(root, 'git'));
   commitFile('src/app.ts', 'export const greeting = "hello";\n');
 });
 afterEach(() => { gitOverride.impl = undefined; setFcGlobalDir(prior); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
@@ -285,7 +285,7 @@ process.stdin.on('end', () => {
       new Map([['fixture', { name: 'fixture', description: '' }]]), new Map());
     const observed = readStageStatus(project, run.runId, 'work');
     expect(existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : [], JSON.stringify(observed)).toHaveLength(1);
-    if (typed) expect(readRunState(project, run.runId)).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
+    if (typed) { const state = readRunState(project, run.runId); expect(state, JSON.stringify({ status: state.status, reasonCode: state.reasonCode, failureReason: state.failureReason, observed })).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' }); }
     const status = readStageStatus(project, run.runId, 'work');
     if (typed) expect(status).toMatchObject({ status: 'failed', retries: 0 });
     else expect(status.retries).toBe(1);

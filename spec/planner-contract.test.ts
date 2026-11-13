@@ -55,7 +55,7 @@ describe('planner dispatch contract', () => {
     expect(admit([parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true}),{...repair,scope:[]}]).pass).toBe(true);
   });
 
-  it('refuses a sole product-authoring gate, while retaining independent audits and repairs', () => {
+  it('uses typed read-only gates regardless of their work-division notes', () => {
     const root = mkdtempSync(join(tmpdir(), 'planner-independent-audit-'));
     const project = join(root, 'project'); mkdirSync(project);
     const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
@@ -66,15 +66,15 @@ describe('planner dispatch contract', () => {
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['audit'], retry_to: ['audit'] });
       const planner = parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true });
       const admit = (dispatched: typeof audit[]) => inspectDispatchAdmission({ dispatched, baseStages: [], dispatchStageId: 'plan', criteria });
-      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('product-writing gate requires an independent work stage');
+      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.some(error => error.code === 'criterion_coverage')).toBe(false);
       expect(admit([audit, { ...repair, scope: [] }]).pass).toBe(true);
       expect(admit([audit, repair]).pass).toBe(true);
-      expect(admit([{ ...audit, scope: ['docs/report.md'] }, repair]).pass).toBe(false);
+      expect(admit([{ ...audit, scope: ['', 'docs/report.md'] }, repair]).pass).toBe(true);
       const runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['audit', 'repair']).runId;
       const directory = runDir(project, runId);
       writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
       writeFileSync(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify(criteria));
-      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, audit, repair], directory, 'existing-work audit', true); state.dispatchedStages = [audit, repair]; });
+      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, audit, repair], directory, 'existing-work audit'); state.dispatchedStages = [audit, repair]; });
 
     } finally { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); }
   });

@@ -62,7 +62,7 @@ describe('published declaration inputs', () => {
         for (const loaded of [role, applyBasePrompt(raw, base), applyBasePrompt(role, base)]) {
           expect(loaded.prompt, file).toContain('Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory');
           expect(loaded.prompt, file).toContain('are read-only to stages; writing those records voids the stage result');
-          expect(loaded.prompt, file).toContain('output ownership never authorizes additional evidence files or engine-record writes');
+          expect(loaded.prompt, file).toContain('These grants never authorize engine-record writes');
           expect(loaded.prompt, file).toContain('Explicit brief authorization allows a bounded set as read-only evidence');
           expect(loaded.prompt, file).toContain('Pass only when all meet their acceptance lines');
           expect(loaded.prompt, file).toContain('never invent a threshold or waive a supplied one');

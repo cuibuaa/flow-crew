@@ -67,7 +67,7 @@ export async function runResearchLoop(project: string, run: string, directory: s
   save(runRecordPath(directory, 'dispatch_admission.json'), admission);
   if (!admission.pass) throw new Error(`Research construction is not dispatchable: ${admission.errors.map(e => e.message).join('; ')}`);
   if (!continuing) save(runRecordPath(directory, 'brief_criteria.json'), criteria);
-  recordAdmittedPlan(state, stages, directory, 'Versioned instrument declaration fixes author and optional project review', true, admission);
+  recordAdmittedPlan(state, stages, directory, 'Versioned instrument declaration fixes author and optional project review', admission);
   state.stages = Object.fromEntries(stages.map(stage => [stage.id, state.stages[stage.id] ?? { status: STAGE_STATUS.PENDING, retries: 0 }]));
   state.maxIterations = Math.max(state.maxIterations ?? 1, research.budget.max_rounds);
   writeRunState(project, run, state);

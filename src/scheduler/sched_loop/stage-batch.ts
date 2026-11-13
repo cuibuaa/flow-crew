@@ -11,7 +11,7 @@ import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
 import { selectRunnableBatch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
-import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
+import { createContentSettlementContext } from '../sched_scope/frozen-inputs.js';
 import { recordThrownStageAttempt, createStageSettlementBoundary, settleStageGroup } from '../sched_scope/stage-group.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection } from '../../worker.js';
@@ -81,10 +81,9 @@ export async function executeReadyBatch(
     writeRunState(projectDir, runId, state);
 
     const declaredCandidateById = new Map(runnableCandidates.map((stage) => [stage.id, stage]));
-    const ordinaryScopeContext = createScopeBatchContext(
+    const ordinaryScopeContext = createContentSettlementContext(
       projectDir,
       toRun.map((stage) => declaredCandidateById.get(stage.id) ?? stage),
-      undefined,
       runId,
     );
     const wave = await Promise.allSettled(toRun.map(async (initialStage) => {

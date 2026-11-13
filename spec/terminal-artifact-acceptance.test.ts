@@ -134,7 +134,7 @@ describe('declared terminal artifact acceptance', () => {
   it('refuses unauthorized reviewer writes through existing write enforcement', async () => {
     const { state } = await execute('review');
     expect(state.stages.review.attempts?.[0].constraintAudit?.violationCount).toBeGreaterThan(0);
-    expect(existsSync(join(project, fixture.terminalPath))).toBe(false);
+    expect(readFileSync(join(project, fixture.terminalPath), 'utf8')).toBe(fixture.content);
     expect(state.status).not.toBe('complete');
   });
 

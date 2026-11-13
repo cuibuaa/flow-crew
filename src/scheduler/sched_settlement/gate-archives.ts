@@ -258,7 +258,7 @@ export function buildGateDispatchPreamble(input: {
   })}\nCheck every assigned criterion against the current tree using your own experiments. Continue through every brief criterion after finding a defect and report all findings in one verdict. Include exactly one entry for every brief criterion, even on rejection. Consume configured validation from the ledger without rerunning it. A reported blocker needs independent reproduction; it does not establish irreparability. Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief.
 Prior criteria and findings are recorded in rejections; status "fail" means not met last round. Check each rejected finding against the repair diff. Consume the repair attempt's configured validation from the ledger without rerunning it.
 For a criterion met last round whose evidence files the repair did not touch, you may choose status "carried" with from: {iteration, round} naming that archived round. This is your judgment: re-examine any criterion you consider necessary and report every defect you find. The engine checks the value and referenced round's existence, not whether carrying is justified.
-The repairDiffPath names the complete, untruncated repair-round diff. repairChangedFiles comes from that engine tree diff; null means unavailable. With no structured rejection, run a complete initial evaluation.`;
+The repairDiffPath names the complete, untruncated repair-round diff. repairChangedFiles comes from attempt content identities; null means unavailable. With no structured rejection, run a complete initial evaluation.`;
 }
 
 function rejectionRecord(rejection: ArchivedGateRejection): object {
