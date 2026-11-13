@@ -28,7 +28,7 @@ beforeEach(() => {
   mkdirSync(project);
   mkdirSync(roles);
   writeFileSync(join(roles, 'coder.yaml'), 'name: coder\nprompt: Complete the fixture duties.\ntools: []\n');
-  setEngineDefaults({ default_timeout_ms: 60000, stage_technical_retries: 0 });
+  setEngineDefaults({ stage_technical_retries: 0 });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 

@@ -133,7 +133,7 @@ describe('independent engine-remediation verification', () => {
     const projectDir = join(root, 'project');
     const globalRoot = join(root, 'fc-home');
     mkdirSync(projectDir);
-    setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0 });
+    setEngineDefaults({ max_iterations: 1, gate_retry_loops: 0 });
     write(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
     const agentsDir = writeRole(projectDir, 'qa');
     setFcGlobalDir(globalRoot);
@@ -231,7 +231,7 @@ describe('independent engine-remediation verification', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
-    setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1 });
+    setEngineDefaults({ max_iterations: 1 });
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const outputPath = 'docs/report.md';

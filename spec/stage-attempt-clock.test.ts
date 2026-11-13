@@ -49,6 +49,19 @@ const completed = (): owner.RunResult => ({ exitCode: 0, duration_ms: 1,
   output: JSON.stringify({ status: 'delivered', summary: 'Finite work completed.', caveats: [], remaining_work: [] }) });
 
 describe('stage attempt clock facts', () => {
+  it.each([undefined, 20_000])('runtime clock witness keeps healthy work live until completion (allowance=%s)', async allowance => {
+    const f = fixture(allowance);
+    const run = vi.fn<owner.Adapter['run']>(async (_p, _r, opts) => {
+      f.time.advanceTo(allowance === undefined ? 21_600_000 : allowance - 1);
+      expect(opts.abortSignal?.aborted).toBe(false);
+      return completed();
+    });
+    const result = await runStage({ run }, f.options);
+    expect(run).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ exitCode: 0, endingCause: 'complete' });
+    expect(result.continuation).toBeUndefined();
+  });
+
   it('T02 a slow result before the declared allowance uses the same single invocation as a fast one', async () => {
     for (const elapsed of [1, 19_999]) {
       const f = fixture(20_000), run = vi.fn<owner.Adapter['run']>(async (_prompt, _role, opts) => {

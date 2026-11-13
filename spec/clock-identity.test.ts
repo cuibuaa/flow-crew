@@ -16,6 +16,7 @@ vi.mock('node:child_process', async original => {
 
 import { NodeSystemd } from '../src/orchestrator.js';
 import { claimLaunchIntent, readLaunchIntent, releaseLaunchIntent } from '../src/run-lock.js';
+import * as liveness from '../src/process-liveness.js';
 import { lockOwnerIdentity } from '../src/lock-publication.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
@@ -86,6 +87,24 @@ describe('pre-publication identities', () => {
     expect(readLaunchIntent(root)).toBeNull();
     expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: true });
     expect(readLaunchIntent(root)).toMatchObject({ ownerRunId: 'second', owner: lockOwnerIdentity() });
+  });
+
+  it('H07 adoption keeps the live adopter occupied after the first claimant dies', () => {
+    claimLaunchIntent(root, 'shared');
+    const firstPid = 123456789;
+    const intent = JSON.parse(readFileSync(intentPath(), 'utf8'));
+    intent.owner.pid = firstPid;
+    writeFileSync(intentPath(), JSON.stringify(intent));
+    let firstAlive = true;
+    const observe = liveness.processLiveness;
+    vi.spyOn(liveness, 'processLiveness').mockImplementation((pid, token) =>
+      pid === firstPid ? (firstAlive ? 'alive' : 'dead') : observe(pid, token));
+    expect(claimLaunchIntent(root, 'shared')).toEqual({ claimed: true });
+    firstAlive = false;
+    expect(claimLaunchIntent(root, 'other')).toEqual({ claimed: false,
+      blockingOwnerRunId: 'shared', blockingIntentPath: intentPath() });
+    expect(readLaunchIntent(root)).toMatchObject({ ownerRunId: 'shared', owner: lockOwnerIdentity(), claimedAt: intent.claimedAt });
+    releaseLaunchIntent(root, 'shared');
   });
 
   it('H07 retains an owner when the liveness observation is unavailable', () => {

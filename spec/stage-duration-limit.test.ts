@@ -40,7 +40,7 @@ let root: string, project: string, prior: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'stage-duration-')); project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, '.fc'));
-  setEngineDefaults({ default_timeout_ms: 40_000, stage_technical_retries: 5 });
+  setEngineDefaults({ stage_technical_retries: 5 });
 });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
 
@@ -99,7 +99,6 @@ describe('stage duration admission and recorded contract', () => {
         state.taskDescription = '---\nstage_duration_ms: retired-invalid-value\n---\nAdmitted';
         if (legacy) delete state.stageDurationLimitMs;
       });
-      setEngineDefaults({ default_timeout_ms: limit - 1 });
       const launch = prepareWorkflowLaunch(config, '', project, created.runId);
       try {
         expect(launch.kind).toBe('ready');

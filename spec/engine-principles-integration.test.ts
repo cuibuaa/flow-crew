@@ -35,7 +35,7 @@ function agent(name = 'coder'): AgentConfig { return { name, description: name, 
 function configuredAgents(): Map<string, AgentConfig> {
   const agents = new Map<string, AgentConfig>();
   for (const name of ['coder', 'planner', 'qa']) { const role = agent(name); agents.set(name, role); write(join(project, 'config', 'agents', `${name}.yaml`), yaml(role)); }
-  setEngineDefaults({ default_timeout_ms: 10000, max_iterations: 1, stage_technical_retries: 0, gate_retry_loops: 2 });
+  setEngineDefaults({ max_iterations: 1, stage_technical_retries: 0, gate_retry_loops: 2 });
   return agents;
 }
 beforeEach(() => {

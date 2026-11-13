@@ -3,12 +3,6 @@ import { fetchSettings } from "../api";
 import type { SettingsData } from "../types";
 import { showToast } from "./Toast";
 
-function fmtMs(ms?: number): string {
-  if (!ms) return "—";
-  if (ms < 60000) return `${ms / 1000}s`;
-  return `${Math.round(ms / 60000)}m`;
-}
-
 export default function SettingsView({ initialSettings }: { initialSettings?: SettingsData }) {
   const [settings, setSettings] = useState<SettingsData | null>(initialSettings ?? null);
   const [loading, setLoading] = useState(initialSettings === undefined);
@@ -43,7 +37,6 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
         <div className="sd-meta-row"><span className="k">port</span><span className="mono">{settings?.port ?? 3000}</span></div>
       </div></div>
       <div className="section"><h2>Defaults</h2><div className="kpi settings-panel">
-        <div className="sd-meta-row"><span className="k">timeout</span><span className="mono">{fmtMs(settings?.default_timeout_ms)}</span></div>
         <div className="sd-meta-row"><span className="k">max iter</span><span className="mono">{settings?.max_iterations ?? "—"}</span></div>
         <div className="sd-meta-row"><span className="k">gate retry</span><span className="mono">{settings?.gate_retry_loops ?? "—"}</span></div>
         <div className="sd-meta-row"><span className="k">stage retry</span><span className="mono">{settings?.stage_technical_retries ?? "—"}</span></div>

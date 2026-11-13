@@ -153,7 +153,10 @@ function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs
       if (!blocking) continue; // The matching owner released while we read.
       if (recoverStaleLock(blocking, () => inspectLaunchIntent(normalized), () => unlinkSync(path))) continue;
       if (blocking.owner && lockOwnerLiveness(blocking.owner) === 'alive'
-        && canonicalRunId(runsRoot(), blocking.intent.ownerRunId) === ownerRunId) return { claimed: true };
+        && canonicalRunId(runsRoot(), blocking.intent.ownerRunId) === ownerRunId) {
+        atomicWrite(path, JSON.stringify({ ...blocking.intent, owner: lockOwnerIdentity() }, null, 2) + '\n');
+        return { claimed: true };
+      }
       return { claimed: false, blockingOwnerRunId: blocking.intent.ownerRunId, blockingIntentPath: path };
     }
   }

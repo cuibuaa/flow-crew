@@ -45,7 +45,7 @@ beforeEach(() => {
   vi.stubEnv('CODEX_SKILLS_CACHE', join(root, 'skills'));
   vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
   vi.stubEnv('FC_AUTH_FIXTURE_CALLS', callsPath);
-  setEngineDefaults({ default_timeout_ms: 5_000, stage_technical_retries: 2 });
+  setEngineDefaults({ stage_technical_retries: 2 });
   for (const provider of providers) writeFileSync(join(bin, provider), `#!${process.execPath}\n` + String.raw`
 const fs = require('node:fs'), path = require('node:path');
 process.stdin.resume();

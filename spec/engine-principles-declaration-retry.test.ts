@@ -37,7 +37,7 @@ describe('typed declarations are repaired by complete independently admitted rep
     for(const name of ['planner','coder']){
       const role:AgentConfig={name,description:name,model:'default',reasoning_effort:'default',tools:[],prompt:'Fixture instructions.'};roles.set(name,role);writeFileSync(join(agentsDir,`${name}.yaml`),stringify(role));
     }
-    setEngineDefaults({default_timeout_ms:10000,max_iterations:1,stage_technical_retries:1,gate_retry_loops:1});
+    setEngineDefaults({max_iterations:1,stage_technical_retries:1,gate_retry_loops:1});
     const workflow=WorkflowConfigSchema.parse({name:'typed-repair',stages:[{id:'plan',role:'planner',scope:[],dynamic_dispatch:true,prompt_template:'Produce a declared plan.',artifact_contract:{version:1,produces:[],reads:[]}}],defaults:{max_iterations:1}});
     const calls:string[]=[],prompts:string[]=[];let plans=0;
     const adapter:Adapter={async run(prompt,_role,opts){calls.push(opts.stageId);const writes:string[]=[];

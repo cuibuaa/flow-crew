@@ -49,7 +49,7 @@ def main():
         else: shutil.copy2(source, target)
     # Fixture-only time scaling, identical on both sides; no production bytes change.
     defaults = engine / 'config/defaults.yaml'
-    settings = defaults.read_text().replace('default_timeout_ms: 10800000', 'default_timeout_ms: 180000')
+    settings = defaults.read_text()
     if args.fixture_load: settings = settings.replace('validation_load_ceiling_per_cpu: 1', 'validation_load_ceiling_per_cpu: 100').replace('validation_load_wait_seconds: 1', 'validation_load_wait_seconds: 0')
     defaults.write_text(settings)
     for file in ['node_modules', 'ui/node_modules']:
@@ -121,7 +121,7 @@ def main():
     facts = {'tree': args.tree, 'shape': args.shape, 'base': BASE, 'command': command, 'direct_harness_exit': completed.returncode,
         'elapsed_s': time.time() - started, 'harness_result': result, 'gate_invocations': gate,
         'author_status': author.get('status'), 'author_exit': author.get('exitCode'), 'validation': validation,
-        'scale': {'default_timeout_ms': 180000, 'observation_seconds': 120, 'eventual_command_ms': 240000, 'validation_load_ceiling_per_cpu': 100 if args.fixture_load else 1, 'validation_load_wait_seconds': 0 if args.fixture_load else 1},
+        'scale': {'observation_seconds': 120, 'eventual_command_ms': 240000, 'validation_load_ceiling_per_cpu': 100 if args.fixture_load else 1, 'validation_load_wait_seconds': 0 if args.fixture_load else 1},
         'expected_negative_wrapper': args.tree == 'base', 'capacity_fixture': args.fixture_capacity, 'project_declaration_fixture': declared}
     if args.tree == 'base':
         passed = completed.returncode != 0 and not gate and author.get('status') == 'complete' and 'Timed out terminal outcome' in result.get('error', '')

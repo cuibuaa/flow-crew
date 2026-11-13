@@ -1,7 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
-import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { installDiskGuardFixture } from './test-support/disk-guard-fixture.js';
 import { createHash } from 'node:crypto';
 import {
@@ -398,7 +397,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('reports worktree progress without a checkout deadline and rolls back a real Git error', async () => {
-    setEngineDefaults({ default_timeout_ms: 60000 });
     writeBrief(['# Goal', 'Create an isolated worktree.']);
     const stderr = new Capture();
     const calls: string[][] = [];

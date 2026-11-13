@@ -13,7 +13,6 @@ export interface SettingsData {
   workflows: string[];
   skills: string[];
   port: number;
-  default_timeout_ms?: number;
   max_iterations?: number;
   gate_retry_loops?: number;
   stage_technical_retries?: number;

@@ -13,8 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { withRunProcessOwnership } from '../src/adapters/base.js';
-import { CodexAdapter } from '../src/adapters/codex.js';
-import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { createRun } from './test-support/create-run.js';
@@ -30,6 +28,7 @@ import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdi
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import { prepareWorkflowLaunch, workflowContinuation } from '../src/scheduler/sched_loop/launch.js';
+import { admitStageDuration } from '../src/stage-duration.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -59,7 +58,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-stage-budget-'));
   project = join(root, 'project');
   mkdirSync(project);
-  setEngineDefaults({ default_timeout_ms: budget, stage_technical_retries: 1 });
+  setEngineDefaults({ stage_technical_retries: 1 });
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 function options(created: {
@@ -144,11 +143,11 @@ function workflowFixture(maxIterations = 2) {
   normalizeStageContracts(workflow.stages);
   return { roles, workflow };
 }
-/** Explicit authored completion; prose alone cannot settle a warned stage. */
+/** Explicit authored completion for the pre-expiry boundary cases. */
 function withRemaining(result: RunResult, remaining_work: string[]): RunResult {
   return { ...result, output: JSON.stringify({ ...JSON.parse(result.output), remaining_work }) };
 }
-async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: boolean, maxIterations = 2) {
+async function finishWorkflowBeforeExpiry(stageId: 'work' | 'review', maxIterations = 2) {
   const { roles, workflow } = workflowFixture(maxIterations);
   workflow.stages.find(stage => stage.id === 'work')!.artifact_contract = {
     ...fixtureArtifactContract('work'), produces: [{ id: 'units', root: 'project', path: 'work.txt' }],
@@ -157,9 +156,8 @@ async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: bool
   const calls: string[] = [];
   const adapter: Adapter = { async run(prompt, _role, opts) {
     calls.push(`${opts.stageId}:${opts.attemptIndex}`);
-    if (opts.stageId === stageId && !prompt.includes('# Stage budget wrap-up')) {
+    if (opts.stageId === stageId) {
       time.advanceTo((budget - 1));
-      if (duringWrap) return { exitCode: 137, duration_ms: 1, output: 'Closed at warning.' };
     }
     if (opts.stageId === 'work') writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
     if (opts.stageId === 'review') {
@@ -170,7 +168,7 @@ async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: bool
     return withRemaining(completed(opts, 'Both units and all assigned checks are complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
-    undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
   return { result, calls };
 }
 describe('authored completion at the budget boundary', () => {
@@ -620,4 +618,348 @@ it('SI gap path scope reports unknown blocked criterion ids to the gate', async 
   expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
   expect(result.stages.repair.attempts ?? []).toHaveLength(1);
   expect(result.status, result.failureReason).toBe('complete');
+});
+
+function allowanceBrief(brief = '# Complete the fixture work.') {
+  return brief.startsWith('---\n') ? brief.replace('---\n', `---\nstage_duration_ms: ${budget}\n`)
+    : `---\nstage_duration_ms: ${budget}\n---\n${brief}`;
+}
+function declaredRun(...args: Parameters<typeof createRun>) {
+  const created = createRun(...args);
+  updateRunState(project, created.runId, state => { state.stageDurationLimitMs = admitStageDuration(allowanceBrief()); });
+  return created;
+}
+function expire(time: ReturnType<typeof manualClock>, opts: RunOpts, output = ''): Promise<RunResult> {
+  return new Promise(resolve => {
+    opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output, duration_ms: budget }), { once: true });
+    time.advanceTo(budget);
+  });
+}
+describe('retained contracts under declared allowances', () => {
+  it('B07 retains technical backoff under the same hard stop and disposes every timer', async () => {
+    const time = manualClock();
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    let calls = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) { calls++; if (calls === 1) {
+        time.advanceTo(budget);
+        return { exitCode: 1, duration_ms: budget, output: 'capacity', providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 429, message: 'capacity' }) };
+      } return completed(opts); } };
+    const result = await runStage(adapter, { ...options(created, time), technicalRetry: { delaysMs: [1, 1] } });
+    expect(calls).toBe(1);
+    expect(result.continuation?.forced).toBe(true);
+    expect(time.timers.size).toBe(0);
+  });
+  it('B15 the idle watchdog still aborts before a declared allowance expires', async () => {
+    const time = manualClock();
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+        const stopped = new Promise<RunResult>(resolve => opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'idle', duration_ms: 1 }), { once: true }));
+        const watchdog = new StageWatchdog(project, created.runId, { idleThresholdMs: 1000 });
+        await watchdog.tick();
+        const initial = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'stage_watchdog.json'), 'utf8')).stageProgress.work.lastProgressAt;
+        const now = vi.spyOn(Date, 'now').mockReturnValue(initial + 1000);
+        try {
+          await watchdog.tick();
+        }
+        finally {
+          now.mockRestore();
+        }
+        return stopped;
+      } };
+    const result = await runStage(adapter, options(created, time));
+    expect(result.exitCode).toBe(137);
+    expect(result.continuation).toBeUndefined();
+    expect(readStageStatus(project, created.runId, 'work').attempts?.at(-1)?.terminationCause).toBe('stage_abort');
+    expect(readRunEvents(project, created.runId).some(event => event.type === 'stage_wrap_up_delivered')).toBe(false);
+  });
+  it('B09 retains non-empty partial output and files across declared expiry; the independent gate sees continuation evidence with its full allowance', async () => {
+    const { roles, workflow } = workflowFixture();
+    let time = manualClock();
+    const calls: string[] = [];
+    const prompts: string[] = [];
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+        calls.push(`${opts.stageId}:${opts.attemptIndex}`);
+        prompts.push(prompt);
+        if (opts.stageId === 'work' && opts.attemptIndex === 1) {
+          writeFileSync(join(project, 'work.txt'), 'unit 1\n');
+          return expire(time, opts, 'Authored partial output: unit 1; unit 2 remains.');
+        }
+        if (opts.stageId === 'work') {
+          expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
+          expect(prompt).toContain('Own-stage continuation evidence');
+          expect(readFileSync(runRecordPath(opts.runDir, 'stages/work/output_attempt_1.md'), 'utf8')).toBe('Authored partial output: unit 1; unit 2 remains.');
+          writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
+        }
+        if (opts.stageId === 'review') {
+          expect(opts.timeout_ms).toBeUndefined();
+          expect(readEvidence(opts.runDir)).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', endingCause: 'work_unfinished', continuation: true }));
+          expect(readFileSync(runRecordPath(opts.runDir, 'stages/work/output_attempt_1.md'), 'utf8')).toBe('Authored partial output: unit 1; unit 2 remains.');
+          expect(prompt).toContain('evidence-ledger.jsonl');
+          expect(readFileSync(join(project, 'work.txt'), 'utf8')).toContain('unit 2');
+        }
+        return completed(opts, 'Complete.');
+      } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(2);
+   expect(calls).toEqual(['done:1', 'work:1', 'work:2', 'review:1']);
+    expect(result.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['complete', 'complete']);
+    expect(result.stages.work.attempts?.[0].continuation).toMatchObject({ forced: true });
+    expect(result.stages.work.continuation).toBeUndefined();
+    expect(result.stages.review.timeout?.budgetMs).toBe(budget);
+    expect(prompts.at(-1)).toContain('Independent gates have their own stage budgets');
+  });
+  it('B10 repeated declared expiries exhaust iterations without growing budgets or reporting a stage failure', async () => {
+    const { roles, workflow } = workflowFixture(2);
+    let time = manualClock();
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+        if (opts.stageId !== 'work')
+          return completed(opts, 'Complete.');
+        expect(opts.timeout_ms).toBeUndefined();
+        return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
+      } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    expect(result.status).toBe('incomplete');
+    expect(result.failureReason).toContain('iteration budget');
+    expect(result.currentIteration).toBe(2);
+    expect(result.stages.work.attempts).toHaveLength(2);
+    expect(result.stages.work.attempts?.every(attempt => attempt.exitCode === 0)).toBe(true);
+    expect(result.stages.review.attempts).toBeUndefined();
+    expect(result.stages.work.attempts?.map(attempt => attempt.timeout?.budgetMs)).toEqual([budget, budget]);
+    expect(() => workflowContinuation(result, project, result.runId, workflow)).toThrow('iteration budget exhausted');
+  });
+  it('B16 a repair declared expiry retains the rejected gate and spends no technical retry or larger budget', async () => {
+    const { roles, workflow } = workflowFixture(2);
+    const time = manualClock();
+    const created = declaredRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
+    const rejected = JSON.stringify({ pass: false, reason: 'Retained defect' });
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), rejected);
+    const stage = workflow.stages.find(stage => stage.id === 'repair')!;
+    let calls = 0;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+        calls++;
+        writeFileSync(join(project, 'work.txt'), 'partial repair');
+        return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'partial repair', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
+      } };
+    const result = await executeSingleStage(stage, project, created.runId, created.runDirPath, workflow, adapter, new Map(), roles, readRunState(project, created.runId), workflow.stages, undefined, undefined, 0, undefined, undefined, undefined, () => time.clock);
+    expect(result?.continuation, result?.friendlyError ?? result?.output).toMatchObject({ forced: true });
+    expect(calls).toBe(1);
+    const status = readStageStatus(project, created.runId, 'repair');
+    expect(status.attempts).toHaveLength(1);
+    expect(status.timeout?.budgetMs).toBe(budget);
+    expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('partial repair');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), 'utf8')).toBe(rejected);
+  });
+  it('B20 a planner declared expiry cannot resurrect a retired dynamic DAG from immutable history', async () => {
+    const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 4 }, stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true }] });
+    normalizeStageContracts(workflow.stages);
+    const retired = WorkflowConfigSchema.parse({ name: 'old', stages: [{ id: 'retired_work', role: 'coder', scope: [] }] });
+    normalizeStageContracts(retired.stages);
+    const created = declaredRun(project, workflow.name, stringify(workflow), ['plan']);
+    const time = manualClock();
+    const expired = await runStage({ run(_p, _r, opts) { return expire(time, opts, 'Partial plan.'); } }, { ...options(created, time), stageId: 'plan', dynamicDispatch: true });
+    expect(expired.continuation).toMatchObject({ reason: 'stage_budget', forced: true });
+    updateRunState(project, created.runId, state => { recordAdmittedPlan(state, [...workflow.stages, ...retired.stages], created.runDirPath, 'Prior completed iteration'); state.currentIteration = 2; state.dispatchedStages = undefined; });
+    const prepared = await prepareWorkflowIteration(3, 1, false, project, created.runId, created.runDirPath, { async run() { throw new Error('No execution expected'); } }, workflow.stages, stringify(workflow));
+    expect(prepared.kind).toBe('ready');
+    if (prepared.kind !== 'ready')
+      return;
+    expect(prepared.sorted.map(stage => stage.id)).toEqual(['plan']);
+    expect(prepared.state.stages.retired_work).toBeUndefined();
+    expect(prepared.state.stages.plan.status).toBe('pending');
+    expect(prepared.state.planControl?.stages.map(stage => stage.id)).toEqual(['plan', 'retired_work']);
+  });
+  it('B21 a dynamic budget continuation retains its admitted dispatch without invoking the planner again', async () => {
+    const roles = join(root, 'roles');
+    mkdirSync(roles);
+    for (const name of ['planner', 'coder', 'qa'])
+      writeFileSync(join(roles, `${name}.yaml`), `name: ${name}\nprompt: Fixture.\ntools: []\n`);
+    const workflow = WorkflowConfigSchema.parse({ name: 'direct', defaults: { max_iterations: 2, max_retries: 0 }, stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true }], dispatch: [
+        { id: 'work', role: 'coder', scope: ['work.txt'] }, { id: 'review', role: 'qa', is_gate: true, scope: [], depends_on: ['work'] }, { id: 'repair', role: 'coder', scope: ['work.txt'], depends_on: ['review'], retry_to: ['review'] },
+      ] });
+    let time = manualClock();
+    const calls: string[] = [];
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+        calls.push(`${opts.stageId}:${opts.attemptIndex}`);
+        if (opts.stageId === 'work' && opts.attemptIndex === 1) {
+          writeFileSync(join(project, 'work.txt'), 'retained dynamic work');
+          return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
+        }
+        if (opts.stageId === 'work' && opts.attemptIndex === 2)
+          expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('retained dynamic work');
+        return completed(opts, 'Complete.');
+      } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(2);
+   expect(calls).toEqual(['work:1', 'work:2', 'review:1']);
+    expect(result.queryState?.planHistory).toHaveLength(1);
+    expect(result.dispatchedStages?.map((stage: unknown) => (stage as {
+      id: string;
+    }).id)).toEqual(['work', 'review', 'repair']);
+  });
+  it('B25 repair declared expiry defers gate re-evaluation until its retained files are finished in the next iteration', async () => {
+    const { roles, workflow } = workflowFixture(2);
+    let time = manualClock();
+    let reviews = 0;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+        if (opts.stageId === 'work')
+          writeFileSync(join(project, 'work.txt'), 'original');
+        if (opts.stageId === 'review') {
+          if (++reviews === 1)
+            return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'Repair required', criteria: {}, audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'repairable', evidence: 'fixture defect' } }) };
+          expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('repair finished');
+        }
+        if (opts.stageId === 'repair') {
+          if (opts.attemptIndex === 1) {
+            writeFileSync(join(project, 'work.txt'), 'partial repair');
+            return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'partial repair', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
+          }
+          if (opts.attemptIndex === 2) {
+            expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('partial repair');
+            writeFileSync(join(project, 'work.txt'), 'repair finished');
+          }
+        }
+        return completed(opts, 'Complete.');
+      } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(2);
+    expect(reviews).toBe(2);
+    expect(result.stages.repair.attempts).toHaveLength(2);
+    expect(result.stages.repair.attempts?.[0].continuation).toMatchObject({ forced: true });
+    expect(result.stages.review.attempts?.map(attempt => attempt.timeout?.budgetMs)).toEqual([budget, budget]);
+  });
+  it('B27 a retained continuation cannot spend post-author validation time or bind its receipt as a completed review', async () => {
+    const created = declaredRun(project, 'fixture', 'name: fixture', ['work']);
+    const time = manualClock();
+    const expired = await runStage({ run(_p, _r, opts) { return expire(time, opts); } }, options(created, time));
+    expect(expired.continuation).toMatchObject({ reason: 'stage_budget', forced: true });
+    atomicWrite(runRecordPath(created.runDirPath, RUN_VALIDATION_BASELINE_FILE), JSON.stringify({ version: 1,
+      capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline: { version: 1,
+        projectDir: project, discovery: { state: 'not_configured', commands: [], missingRoles: ['build', 'test', 'lint'] }, results: [] } }));
+    expect(settledGateValidationExecution(project, created.runId, 'work')).toBeUndefined();
+    expect(await recordGateValidationDelta(project, created.runId, 'work')).toBeUndefined();
+    expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_work.json'))).toBe(false);
+  });
+  it('B44 explicit completion before expiry still enforces the author artifact contract', async () => {
+    const time = manualClock();
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    let calls = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls++;
+      time.advanceTo(budget - 1);
+      return withRemaining(completed(opts, 'All work complete.'), []);
+    } };
+    const result = await runStage(adapter, { ...options(created, time), artifactContract: {
+      ...fixtureArtifactContract('work'), produces: [{ id: 'units', root: 'project', path: 'work.txt' }],
+    } });
+    expect(result.exitCode).toBe(1);
+    expect(result.friendlyError).toContain('Stage settlement refused:');
+    expect(result.continuation).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+  it('B46 a blocked author with an empty completion list still retains its handoff', async () => {
+    const time = manualClock();
+    const created = declaredRun(project, 'fixture', 'name: fixture', ['work']);
+    const adapter: Adapter = { async run() {
+      time.advanceTo(budget);
+      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'blocked', summary: 'Blocked on a declared duty.',
+        checks: [], caveats: [], remaining_work: [] }) };
+    } };
+    const result = await runStage(adapter, { ...options(created, time), gateReviewed: true });
+    expect(result.exitCode, result.friendlyError).toBe(0);
+    expect(result.continuation).toMatchObject({ reason: 'stage_budget', forced: true });
+    expect(parseStageRecord(readFileSync(runRecordPath(created.runDirPath, result.continuation!.handoff), 'utf8'), RECORDED_HANDOFF_SCHEMA)).toMatchObject({ status: 'blocked', remaining_work: [] });
+  });
+  it.each([true, false])('SI environment gap reaches an independent gate once (accept=%s)', async accept => {
+    const { roles, workflow } = workflowFixture(5);
+    workflow.defaults.max_retries = 3;
+    let time = manualClock();
+    const calls: string[] = [];
+    const gap = { reason: 'The fixture has no renderer; rendering evidence remains unmeasured.' };
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'work') {
+        time.advanceTo(budget - 1);
+        return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'environment_gap', summary: gap.reason,
+          caveats: [], remaining_work: ['Obtain rendering evidence in a capable environment.'] }) };
+      }
+      if (opts.stageId === 'review') {
+        expect(prompt).toContain(gap.reason);
+        expect(prompt).toContain('environment_gap');
+        expect(workflow.stages.find(stage => stage.id === 'review')!.scope).toEqual([]);
+        if (!accept) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'The required evidence is absent.', criteria: {},
+          audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'irreparable', evidence: gap.reason } }) };
+      }
+      return withRemaining(completed(opts, 'Complete.'), []);
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+   expect(calls).toEqual(['done', 'work', 'review']);
+    expect(result.status, result.failureReason).toBe(accept ? 'complete' : 'escalated');
+    expect(result.stages.work.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts![0].endingCause).toBe('environment_gap');
+    expect(result.stages.work.continuation).toBeUndefined();
+    expect(readEvidence(runDir(project, result.runId))).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', endingCause: 'environment_gap', environmentGap: { ...gap, blocks: null } }));
+  });
+  it.each([0, 1, 4, undefined])('SI unfinished work obeys the declared continuation or iteration ceiling (%s)', async declared => {
+    const { roles, workflow } = workflowFixture(3);
+    let time = manualClock();
+    const calls: string[] = [];
+    const brief = declared === undefined ? '# Finish the research.' : `---\nmax_continuations: ${declared}\n---\n# Finish the research.`;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'work') {
+        time.advanceTo(budget);
+        return withRemaining(completed(opts), ['Research the remaining cases, even with no product diff.']);
+      }
+      return withRemaining(completed(opts, 'Complete.'), []);
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, allowanceBrief(brief), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const attempts = declared === undefined ? 3 : declared + 1;
+    expect(result.status).toBe('incomplete');
+    expect(result.currentIteration).toBe(declared === undefined ? attempts : 1);
+    expect(result.stages.work.attempts).toHaveLength(attempts);
+    expect(result.stages.done.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts!.every(attempt => attempt.endingCause === 'work_unfinished')).toBe(true);
+    expect(calls.filter(id => id === 'review')).toHaveLength(0);
+    expect(readFileSync(runRecordPath(runDir(project, result.runId), result.stages.work.continuation!.handoff), 'utf8')).toContain('Research the remaining cases');
+    expect(result.failureReason).toContain(declared === undefined ? 'iteration budget' : 'declared continuation budget');
+    expect(() => workflowContinuation(result, project, result.runId, workflow)).toThrow('budget exhausted');
+  });
+  it('SI declared continuations retain the work failure ceiling for their iteration', async () => {
+    const { roles, workflow } = workflowFixture(3);
+    workflow.defaults.max_retries = 1;
+    let time = manualClock();
+    const workAttempts = new Set<number>();
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId !== 'work') return withRemaining(completed(opts, 'Complete.'), []);
+      workAttempts.add(opts.attemptIndex ?? 0);
+      if (opts.attemptIndex === 2) {
+        time.advanceTo(budget);
+        return withRemaining(completed(opts), ['Finish the retained work.']);
+      }
+      return { exitCode: 1, duration_ms: 1, output: 'Controlled work failure.' };
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, allowanceBrief('---\nmax_continuations: 1\n---\n# Finish retained work.'), false, undefined, false, undefined,
+      () => { time = manualClock(); return time.clock; });
+    expect([...workAttempts]).toEqual([1, 2, 3]);
+    expect(result.stages.work.retries).toBe(1);
+    expect(result.stages.work.attempts?.map(attempt => attempt.endingCause)).toEqual(['work_failed', 'work_unfinished', 'work_failed']);
+    expect(result.currentIteration).toBe(1);
+    expect(result.stages.done.attempts).toHaveLength(1);
+    expect(result.status).toBe('incomplete');
+  });
+  it.each(['work', 'review'] as const)('B40 B41 B43 %s completes before expiry in one invocation even at max_iterations 1', async stageId => {
+    const { result, calls } = await finishWorkflowBeforeExpiry(stageId, 1);
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(1);
+    expect(calls).toEqual(['done:1', 'work:1', 'review:1']);
+    expect(result.stages[stageId].attempts).toHaveLength(1);
+    expect(result.stages[stageId].continuation).toBeUndefined();
+    expect(readGateEvaluation(project, 'review', result.runId)).toMatchObject({ pass: true });
+  });
 });

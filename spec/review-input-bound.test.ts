@@ -275,7 +275,7 @@ process.stdin.on('end', () => {
     vi.stubEnv('FC_FIXTURE_CALLS', calls);
     vi.stubEnv('FC_FIXTURE_STREAM', stream);
     vi.stubEnv('FC_FIXTURE_MESSAGE', diagnostic);
-    setEngineDefaults({ default_timeout_ms: 30_000, stage_technical_retries: 2 });
+    setEngineDefaults({ stage_technical_retries: 2 });
     const workflow = WorkflowConfigSchema.parse({ name: 'size-fixture', defaults: { max_iterations: 1, max_retries: 2 },
       stages: [{ id: 'work', role: 'fixture', scope: ['calls.txt'], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
     const run = createRun(project, workflow.name, stringify(workflow), ['work']);

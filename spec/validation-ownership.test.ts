@@ -301,7 +301,7 @@ describe('scheduler owns validation after author settlement', () => {
     writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: Object.fromEntries(['build', 'test', 'lint'].map(role =>
       [role, { command: process.execPath, args: ['check.cjs'] }])) }));
     const budget = 30_000; let elapsed = 0;
-    setEngineDefaults({ default_timeout_ms: budget, validation_attempts: 1 });
+    setEngineDefaults({ validation_attempts: 1 });
     const clock = { monotonicNow: () => elapsed, wallNow: () => Date.now() + elapsed,
       setTimer: () => ({} as ReturnType<typeof setTimeout>), clearTimer: () => {} };
     vi.spyOn(validationOwner, 'runValidationCommand').mockImplementation(async command => {

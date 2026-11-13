@@ -58,7 +58,7 @@ function seedProject(label: string, ...roles: string[]): { projectDir: string; a
   const projectDir = join(temporaryRoot(label), 'project');
   const agentsDir = join(projectDir, 'config', 'agents');
   mkdirSync(agentsDir, { recursive: true });
-  setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 1, stage_technical_retries: 0 });
+  setEngineDefaults({ max_iterations: 1, gate_retry_loops: 1, stage_technical_retries: 0 });
   for (const role of roles) {
     writeFileSync(join(agentsDir, `${role}.yaml`), [
       `name: ${role}`,
@@ -190,7 +190,7 @@ afterEach(() => {
 describe('engine generalization runtime bindings', () => {
   it.each(['regression', 'authored-rejection', 'peer-regression', 'peer-green'])('settles static completion after %s against current validation', async (failure) => {
     const { projectDir, agentsDir } = seedProject('static-gate-acceptance', 'qa', 'coder');
-    setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0, stage_technical_retries: 0 });
+    setEngineDefaults({ max_iterations: 1, gate_retry_loops: 0, stage_technical_retries: 0 });
     const gate = stage({ id: 'qa', role: 'qa', is_gate: true });
     const workflow: WorkflowConfig = { name: 'static-gate-acceptance', defaults: { max_iterations: 1, max_retries: 0 }, stages: failure.startsWith('peer-') ? [gate, stage({ id: 'peer', role: 'coder', scope: ['validation.cjs'] }), stage({ id: 'peer_review', role: 'qa', is_gate: true, depends_on: ['peer'] })] : [gate] };
     workflow.stages.push(...workflow.stages.filter(item => item.is_gate).map(item => stage({

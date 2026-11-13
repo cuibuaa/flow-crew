@@ -10,8 +10,6 @@ export interface AttemptDeadlineSnapshot {
   attemptStartedAt: string;
   deadlineAt?: string;
   budgetDeadlineAt?: string;
-  wrapUpAt?: string;
-  finishingMs?: number;
   elapsedMs: number;
   remainingMs?: number;
   deadlineReachedAt?: string;
