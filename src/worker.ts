@@ -20,7 +20,7 @@ import { legacyWriteGrant, withStageWriteGrant, WriteGrantError } from './write-
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
-import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
+import { renderPlanInterface } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
@@ -499,7 +499,7 @@ export async function runStage(
     } catch { /* non-critical */ }
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '', opts.runDir);
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
-    if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
+    if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}`;
 
   }
 

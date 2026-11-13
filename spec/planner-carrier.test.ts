@@ -29,7 +29,7 @@ beforeEach(() => {
   previousStore = fcGlobalDir(); setFcGlobalDir(store); });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
-async function launch(tamper = false) {
+async function launch(tamper = false, mode: 'check' | 'plain' | 'invalid' | 'retry' = 'check') {
   const roles = new Map<string, AgentConfig>();
   for (const name of ['planner', 'qa', 'coder']) {
     const role = { name, description: 'Fixture role', model: 'default', reasoning_effort: 'low', tools: [],
@@ -42,16 +42,19 @@ async function launch(tamper = false) {
   const { config, raw } = loadWorkflow(workflowPath);
   const created = prepareFixtureRun(project, config, raw);
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Goal\nReview existing work.\n');
-  const calls: string[] = [], checks: number[] = [];
+  const calls: string[] = [], checks: number[] = [], prompts: string[] = [], systems: string[] = [];
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') {
+      prompts.push(_prompt); systems.push(_role.prompt);
+      const candidate = mode === 'invalid' || mode === 'retry' && prompts.length === 1
+        ? { stages: [proposal.stages[0]] } : proposal;
       // A real child writes twice around the real read-only CLI. No fixture
       // publication can advance the parent's expected carrier snapshot.
       const child = await execWithStdin(process.execPath, ['-e', `
         const fs = require('node:fs'), cp = require('node:child_process');
         const file = ${JSON.stringify(stageWorkPath(created.runDirPath, 'dispatch.yaml'))};
-        const proposal = ${JSON.stringify(proposal)};
+        const proposal = ${JSON.stringify(candidate)};
         fs.writeFileSync(file, JSON.stringify(proposal));
         function check() {
           const result = cp.spawnSync(process.execPath, ['--import', ${JSON.stringify(tsx)},
@@ -60,10 +63,10 @@ async function launch(tamper = false) {
           if (result.status !== 0) throw new Error(result.stdout + result.stderr);
           if (!JSON.parse(result.stdout).pass) throw new Error('Plan check did not pass');
         }
-        check();
+        if (${JSON.stringify(mode === 'check')}) check();
         proposal.stages[0].prompt_template = 'Independently review existing work.';
         fs.writeFileSync(file, JSON.stringify(proposal));
-        check();
+        if (${JSON.stringify(mode === 'check')}) check();
         process.stdout.write(${JSON.stringify(delivered)});
       `], '', { cwd: project, timeout_ms: 15000, env: { ...process.env, FC_HOME: store } });
       checks.push(child.exitCode);
@@ -76,7 +79,7 @@ async function launch(tamper = false) {
     return { output: 'Fixture summary.', exitCode: 0, duration_ms: 1 };
   } };
   const state = await runWorkflow(config, raw, project, adapter, roles, undefined, undefined, created.runId);
-  return { state, calls, checks, directory: created.runDirPath, plan: readStageStatus(project, created.runId, 'plan') };
+  return { state, calls, checks, directory: created.runDirPath, prompts, systems, plan: readStageStatus(project, created.runId, 'plan') };
 }
 
 it('accepts the planner writing and rewriting dispatch.yaml with passing plan-check CLI calls', async () => {
@@ -97,4 +100,31 @@ it('still voids a non-plan stage changing the admitted dispatch carrier', async 
   expect(review.error).toContain('ENGINE_STATE_TAMPERED');
   expect(state.status).toBe('failed');
   expect(readRunEvents(project, state.runId).filter(event => event.type === 'attempt_failed' && event.stageId === 'review')).toHaveLength(1);
+});
+
+
+it('admits a valid planner result without a plan-check call', async () => {
+  const { state, calls, checks, plan, systems } = await launch(false, 'plain');
+  expect(systems[0]).toContain('# dispatch.yaml interface');
+  expect(systems[0]).toContain('plan-check is an optional proposal diagnostic');
+  expect(checks).toEqual([0]);
+  expect(plan.status, plan.error).toBe('complete');
+  expect(state.status, state.failureReason).toBe('complete');
+  expect(calls).toContain('review');
+});
+
+it('refuses an invalid planner result without a plan-check call', async () => {
+  const { state, calls, directory } = await launch(false, 'invalid');
+  expect(state.status).toBe('failed');
+  expect(calls).not.toContain('review');
+  const report = JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8'));
+  expect(report.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review' }));
+});
+
+it('delivers the scheduler typed refusal to the next planner attempt without a self-check', async () => {
+  const { state, prompts } = await launch(false, 'retry');
+  expect(state.status, state.failureReason).toBe('complete');
+  expect(prompts).toHaveLength(2);
+  const facts = JSON.parse(prompts[1].split('# Plan retry facts\n')[1].split('\n')[0]);
+  expect(facts.unsatisfied).toContainEqual(expect.objectContaining({ id: 'stage_retry_to:review:retry_to', source: 'admission', detail: expect.stringContaining('missing repair route') }));
 });

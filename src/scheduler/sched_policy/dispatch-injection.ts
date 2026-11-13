@@ -22,17 +22,29 @@ export interface DispatchInjectionServices {
   inspectDispatchAdmission: ReturnType<typeof import('../sched_admission/dispatch.js').createDispatchAdmission>;
 }
 
+/** Recorded state selects the proposal context for both scheduler and diagnostic. */
+export function selectDispatchProposalContext(sorted: StageConfig[], state: StoreState, dispatchStageId?: string) {
+  const planners = sorted.filter(stage => stage.dynamic_dispatch);
+  dispatchStageId ??= state.decisionGraph?.replan?.stageId ?? planners.find(stage => state.stages[stage.id]?.status === STAGE_STATUS.RUNNING)?.id;
+  if (!dispatchStageId && planners.length !== 1) throw new Error('Proposal context has no unique dispatch stage');
+  dispatchStageId ??= planners[0].id;
+  const revising = state.decisionGraph?.replan?.stageId === dispatchStageId && Boolean(state.planControl);
+  return { dispatchStageId, revising, sorted: revising ? sorted.filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape') : sorted };
+}
+
 /** The same read-only proposal inspection serves scheduler injection and planner self-checks. */
 export function inspectDispatchProposal(
   services: Pick<DispatchInjectionServices, 'inspectDispatchAdmission'>,
-  input: { rawDispatchText: string; dispatchStageId: string; roleRegistry: Map<string, { name: string; description: string }>;
+  input: { rawDispatchText: string; dispatchStageId?: string; roleRegistry: Map<string, { name: string; description: string }>;
     sorted: StageConfig[]; state: StoreState; projectDir: string; runDirPath: string },
-): { report: DispatchAdmissionReport; dispatched: StageConfig[]; items: unknown } {
+): { report: DispatchAdmissionReport; dispatched: StageConfig[]; items: unknown; context: ReturnType<typeof selectDispatchProposalContext> } {
   const { inspectDispatchAdmission } = services;
-  const { rawDispatchText, dispatchStageId, roleRegistry, sorted, state, projectDir, runDirPath } = input;
+  const { rawDispatchText, roleRegistry, state, projectDir, runDirPath } = input;
+  const context = selectDispatchProposalContext(input.sorted, state, input.dispatchStageId);
+  const { dispatchStageId, sorted } = context;
   const finish = (report: DispatchAdmissionReport, dispatched: StageConfig[], items: unknown) => {
     report.pass = report.errors.length === 0;
-    return { report, dispatched, items };
+    return { report, dispatched, items, context };
   };
   const proposalDigest = createHash('sha256').update(rawDispatchText, 'utf8').digest('hex');
   let items: unknown;
@@ -192,10 +204,8 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     } catch {
       return [];
     }
-    const revising = state.decisionGraph?.replan?.stageId === dispatchStageId && Boolean(state.planControl);
-    const bootstrap = revising ? sorted.filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape') : sorted;
-    const { report: admission, dispatched, items } = inspectDispatchProposal(services, {
-      rawDispatchText, dispatchStageId, roleRegistry, sorted: bootstrap, state, projectDir, runDirPath,
+    const { report: admission, dispatched, items, context: { revising, sorted: bootstrap } } = inspectDispatchProposal(services, {
+      rawDispatchText, dispatchStageId, roleRegistry, sorted, state, projectDir, runDirPath,
     });
     if (!publishAdmission(admission)) {
       log.warn({ errors: admission.errors }, 'Dynamic dispatch refused before any proposed stage was injected');

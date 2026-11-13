@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cmdPlanCheck, renderPlanInterface } from '../src/plan-interface.js';
-import * as planInterface from '../src/plan-interface.js';
 import * as admission from '../src/scheduler/sched_admission/dispatch.js';
 import * as realityReads from '../src/scheduler/sched_admission/reality-reads.js';
 import { createDispatchInjector } from '../src/scheduler/sched_policy/dispatch-injection.js';
@@ -53,16 +52,16 @@ async function check(ctx: ReturnType<typeof setup>) {
   return { exitCode, report: JSON.parse(chunks.join('')) };
 }
 
-function inject(ctx: ReturnType<typeof setup>) {
+function inject(ctx: ReturnType<typeof setup>, dispatchStageId = 'plan') {
   writeFileSync(stageWorkPath(ctx.directory, 'dispatch.yaml'), readFileSync(ctx.draft));
   const roles = admission.buildRoleRegistry(join(ctx.project, 'config/agents'));
   const sorted = admission.loadWorkflow(runRecordPath(ctx.directory, 'workflow.yaml')).config.stages;
   const { injectDispatchedStages } = createDispatchInjector({ inspectDispatchAdmission: admission.createDispatchAdmission(), resolveImmutableEvidenceBindings });
-  injectDispatchedStages('plan', roles, sorted, readRunState(ctx.project, ctx.runId), ctx.project, ctx.runId, true);
+  injectDispatchedStages(dispatchStageId, roles, sorted, readRunState(ctx.project, ctx.runId), ctx.project, ctx.runId, true);
   return JSON.parse(readFileSync(runRecordPath(ctx.directory, 'dispatch_admission.json'), 'utf8'));
 }
 
-describe('planner checks real admission before its first result', () => {
+describe('optional planner proposal diagnostics', () => {
   it('exposes every dispatch admission error code through the same validators used by injection', async () => {
     // No copied rule catalog: derive the transport probes from the owners themselves.
     // Schema/parser errors are tested below; uncoded topology errors use the real reproduction.
@@ -98,16 +97,6 @@ describe('planner checks real admission before its first result', () => {
     expect(validator).toHaveBeenCalledTimes(2);
     expect(reachability).toHaveBeenCalledTimes(2);
     expect(parser).toHaveBeenCalledTimes(4);
-    // Exposing the current engine command is what makes every current and future
-    // validator refusal learnable in the SAME planner attempt.
-    const render = (planInterface as unknown as { renderPlannerAdmissionCheck: (project: string, directory: string) => string }).renderPlannerAdmissionCheck;
-    expect(render(ctx.project, ctx.directory)).toContain(`--run '${ctx.directory}'`);
-    expect(render(ctx.project, ctx.directory)).toContain('within this planner attempt');
-    expect(render(ctx.project, ctx.directory)).toContain(`'${stageWorkPath(ctx.directory, 'dispatch.yaml')}'`);
-    expect(render(ctx.project, ctx.directory)).not.toContain('$TMPDIR/dispatch.json');
-    const worker = readFileSync(join(root, 'src/worker.ts'), 'utf8');
-    expect(worker).toContain('renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)');
-    expect(worker).toContain('if (opts.dynamicDispatch)');
     expect(renderPlanInterface()).toContain('dispatch.yaml');
   });
 
@@ -179,4 +168,50 @@ describe('planner checks real admission before its first result', () => {
     for (const issue of invalid.error.issues) expect(message).toContain(`${issue.path.join('.')}:`);
     expect(message).not.toContain('more)');
   });
+});
+
+
+it.each(['initial', 'archived-final', 'active-replan', 'alternate-replan', 'active-planner'] as const)(
+  'uses the real scheduler context for retained stage ids: %s', async mode => {
+    const candidate = structuredClone(rejected);
+    candidate.stages.push({ id: 'repair', role: 'coder', scope: ['results/report.md'], depends_on: ['review'], retry_to: ['review'] });
+    const ctx = setup(candidate);
+    const plannerId = mode === 'alternate-replan' || mode === 'active-planner' ? 'revise' : 'plan';
+    const bootstrap = admission.loadWorkflow(runRecordPath(ctx.directory, 'workflow.yaml')).config.stages;
+    if (plannerId !== 'plan') bootstrap.push(StageConfigSchema.parse({ id: plannerId, role: 'planner', dynamic_dispatch: true, depends_on: ['plan'] }));
+    const retained = candidate.stages.map(stage => StageConfigSchema.parse(stage));
+    const recorded = mode === 'initial' || mode === 'active-planner' ? bootstrap : [...bootstrap, ...retained];
+    writeFileSync(runRecordPath(ctx.directory, 'workflow.yaml'), JSON.stringify({ name: 'fixture', stages: recorded }));
+    updateRunState(ctx.project, ctx.runId, state => {
+      state.stages.implement = { status: 'complete', retries: 0 };
+      if (mode !== 'initial') state.planControl = { version: 1, stages: recorded, capabilities: [] };
+      if (mode === 'active-planner') state.stages[plannerId] = { status: 'running', retries: 0 };
+      if (mode.includes('replan')) state.decisionGraph = { records: [], visits: {}, replan: { stageId: plannerId, reason: 'Revise retained work.' } };
+    });
+    const actual = admission.createDispatchAdmission();
+    const validator = vi.fn(actual);
+    vi.spyOn(admission, 'createDispatchAdmission').mockReturnValue(validator);
+    const cli = await check(ctx);
+    const scheduler = inject(ctx, plannerId);
+    expect(cli.report.diagnostic).toContain('does not certify revision commit eligibility');
+    const stable = ({ checkedAt: _clock, diagnostic: _diagnostic, ...report }: typeof scheduler) => report;
+    expect(stable(cli.report)).toEqual(stable(scheduler));
+    expect(cli.exitCode).toBe(mode === 'archived-final' ? 1 : 0);
+    expect(cli.report.proposalDigest).toBe(scheduler.proposalDigest);
+    const selected = validator.mock.calls.map(([input]) => ({ ids: input.baseStages.map(stage => stage.id), planner: input.dispatchStageId }));
+    expect(selected).toEqual(Array(2).fill({ ids: (mode.includes('replan') ? bootstrap : recorded).map(stage => stage.id), planner: plannerId }));
+    if (mode === 'archived-final') expect(cli.report.errors).toContainEqual(expect.objectContaining({ code: 'stage_id_duplicate', stageId: 'implement' }));
+    expect(readRunState(ctx.project, ctx.runId).stages.implement.status).toBe('complete');
+  },
+);
+
+
+it('reports an ambiguous diagnostic planner identity instead of guessing', async () => {
+  const ctx = setup();
+  const workflow = admission.loadWorkflow(runRecordPath(ctx.directory, 'workflow.yaml')).config;
+  workflow.stages.push(StageConfigSchema.parse({ id: 'another', role: 'planner', dynamic_dispatch: true }));
+  writeFileSync(runRecordPath(ctx.directory, 'workflow.yaml'), JSON.stringify(workflow));
+  const cli = await check(ctx);
+  expect(cli.exitCode).toBe(1);
+  expect(cli.report.errors).toContainEqual(expect.objectContaining({ code: 'plan_check_failed', message: 'Proposal context has no unique dispatch stage' }));
 });

@@ -53,7 +53,7 @@ Source: [dispatch/bootstrap](../src/cli.ts), [early ledger](../src/cli-fc-tasks.
 | `doctor` | Diagnostics; exit 1 for failures, 0 also permits warnings. `--repair-registry` or `--compact-registry` select dry-run maintenance; `--apply` performs it. Conflicting maintenance selection refuses. |
 | `ship-preflight` | `--json`, `--project`, `--target`, `--campaign`, `--brief`; value options accept separate or equals syntax. Exit 0 for completed fact collection, 1 for argument/read/collection failure. No validation execution. |
 | `rehearse <brief>` | `--static-only`, `--keep`, `--project`, `--target` (paths also accept equals). Exit 0 for ready even with warnings, 1 for contract/environment failure. `--json` is not a parsed output mode. |
-| `plan-check <dispatch-file>` | Exactly one of `--brief <file>` or `--run <run-directory>`; `--project <path>` defaults to cwd. Reads draft and returns JSON admission facts, 0 pass / 1 refusal. Run selector here is a directory, unlike `state`. |
+| `plan-check <dispatch-file>` | Exactly one of `--brief <file>` or `--run <run-directory>`; `--project <path>` defaults to cwd. Optional proposal diagnostic using scheduler context selection; 0 pass / 1 refusal does not certify revision commit eligibility. Run selector here is a directory, unlike `state`. |
 | `ship-setup` | Required `--brief`, `--target`, `--base`, `--branch`; optional `--project`, `--json`. Value options accept equals, duplicates refuse. Exit 0 only for ready record publication, 1 refusal. |
 
 Doctor can inspect authentication state and the dashboard listener. Preflight may inspect

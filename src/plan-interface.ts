@@ -1,7 +1,6 @@
 import { engineDirectory, runRecordPath, stageWorkPath } from './run-layout.js';
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
 import { parseCommandArgs, commandUsage } from './cli-args.js';
-import { fileURLToPath } from 'node:url';
 import { type Schema } from './reality-gate/checks/json-schema-match.js';
 import { REALITY_CHECK_TYPES } from './reality-gate/types.js';
 
@@ -43,21 +42,9 @@ export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
     + 'Write the complete plan to work/dispatch.yaml below the run envelope as a JSON object {stages: [...], reality_checks?: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
-    + 'Use PLAN_SCHEMA above for the plan shape and plan-check below for admission errors. '
+    + 'Use PLAN_SCHEMA above for the plan shape; plan-check is an optional proposal diagnostic. '
     + 'Declare optional deterministic checks in reality_checks; omission inherits admitted checks, while [] clears them. '
     + 'A sibling fenced-YAML reality_checks.md remains a read alias for one release.';
-}
-
-/** Point the planner at the installed engine and the exact current admission context. */
-export function renderPlannerAdmissionCheck(projectDir: string, runDir: string): string {
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
-  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-  return '# Check draft admission before finishing\n'
-    + 'Write your complete candidate to work/dispatch.yaml below the run envelope. Before finishing, run:\n'
-    + `${quote(process.execPath)} ${quote(cli)} plan-check --project ${quote(projectDir)} --run ${quote(runDir)} ${quote(stageWorkPath(runDir, 'dispatch.yaml'))}\n`
-    + 'This read-only command runs the same admission code as the scheduler, using this run’s workflow, brief, criteria, prior discharges, inputs and reality_checks (or the historical reality_checks.md alias). '
-    + 'It prints every diagnosable error together. Repair the candidate and check again within this planner attempt until pass is true (exit 0), then return your ordinary stage report. '
-    + 'Do not write project deliverables while planning.';
 }
 
 /** Read-only CLI route: no scheduler launch, reconciliation, adapter or service-manager calls. */
@@ -111,14 +98,13 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       inspectDispatchAdmission: createDispatchAdmission(),
     }, {
       rawDispatchText: readFileSync(resolve(files[0]), 'utf8'),
-      dispatchStageId: baseStages.find(stage => stage.dynamic_dispatch)?.id ?? 'plan',
       roleRegistry: roles, sorted: baseStages, state, projectDir, runDirPath,
     });
     errors.push(...report.errors);
-    process.stdout.write(`${JSON.stringify({ ...report, errors, pass: errors.length === 0 }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...report, errors, pass: errors.length === 0, diagnostic: 'Proposal admission only; does not certify revision commit eligibility.' }, null, 2)}\n`);
     return errors.length ? 1 : 0;
   } catch (error) {
-    process.stdout.write(`${JSON.stringify({ pass: false, errors: [{ code: 'plan_check_failed', message: error instanceof Error ? error.message : String(error), field: 'dispatch.yaml' }] })}\n`);
+    process.stdout.write(`${JSON.stringify({ pass: false, diagnostic: 'Proposal admission only; does not certify revision commit eligibility.', errors: [{ code: 'plan_check_failed', message: error instanceof Error ? error.message : String(error), field: 'dispatch.yaml' }] })}\n`);
     return 1;
   } finally { if (scratch) rmSync(scratch, { recursive: true, force: true }); }
 }
