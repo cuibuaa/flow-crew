@@ -21,7 +21,7 @@ export function supportsClaudeWakeVersion(version: string): boolean {
 }
 export function claudeWakeCapability(): { supported: boolean; detail: string } {
   try {
-    const version = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const version = execFileSync('claude', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     const supported = supportsClaudeWakeVersion(version);
     return { supported, detail: `Claude ${version || '(unknown)'}; wake requires >= ${CLAUDE_WAKE_MIN_VERSION}${supported ? '' : '. Upgrade: claude update'}` };
   } catch { return { supported: false, detail: `Claude version unavailable; wake requires >= ${CLAUDE_WAKE_MIN_VERSION}. Install/upgrade Claude Code: claude update` }; }

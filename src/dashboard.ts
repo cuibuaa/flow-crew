@@ -966,15 +966,14 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   // are necessary to bind explicit addresses without a wildcard socket.
   let createListener: () => Server;
   const extraListeners: Server[] = [];
-  const app = Fastify({ logger: false, serverFactory: (handler, options) => {
-    // A serverFactory bypasses Fastify's HTTP defaults; keep those settings on
-    // every explicit listener rather than reverting to Node's different ones.
+  const app = Fastify({ logger: false,
+    connectionTimeout: 0, requestTimeout: 0, pluginTimeout: 0,
+    serverFactory: (handler) => {
+    // Fastify replaces keepAliveTimeout=0 with its default. Configure Node
+    // directly so every explicit listener has the same unbounded protocol wait.
     createListener = () => {
-      const server = createServer(options.http ?? {}, handler);
-      if (typeof options.keepAliveTimeout === 'number') server.keepAliveTimeout = options.keepAliveTimeout;
-      if (typeof options.requestTimeout === 'number') server.requestTimeout = options.requestTimeout;
-      if (typeof options.connectionTimeout === 'number') server.setTimeout(options.connectionTimeout);
-      if (typeof options.maxRequestsPerSocket === 'number' && options.maxRequestsPerSocket > 0) server.maxRequestsPerSocket = options.maxRequestsPerSocket;
+      const server = createServer({ headersTimeout: 0, requestTimeout: 0, keepAliveTimeout: 0 }, handler);
+      server.setTimeout(0);
       return server;
     };
     return createListener();

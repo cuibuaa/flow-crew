@@ -33,7 +33,7 @@ export function detectSupervisorBackend(
 ): SupervisorBackendReport {
   const findCommand = options.findCommand ?? findExecutableOnPath;
   const runCommand = options.runCommand ?? ((command, args) => {
-    execFileSync(command, args, { stdio: 'ignore', timeout: 2_000 });
+    execFileSync(command, args, { stdio: 'ignore' });
   });
   const systemctl = findCommand('systemctl');
   const systemdRun = findCommand('systemd-run');
@@ -50,6 +50,15 @@ export function detectSupervisorBackend(
     kind: 'portable-shim',
     message: 'portable Node shim (systemd user session unavailable; no systemd dependency)',
   };
+}
+
+export function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
+  try {
+    execFileSync(commandName, commandArgs, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface DoctorMaintenanceOptions {

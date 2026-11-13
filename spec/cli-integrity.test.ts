@@ -149,7 +149,7 @@ describe('doctor tells port occupancy apart from your own dashboard', () => {
   const source = readFileSync(join(repositoryRoot, 'src', 'cli.ts'), 'utf-8');
 
   it('rejects a non-2xx response instead of counting it as a running server', () => {
-    expect(source).toContain('res.statusCode < 200 || res.statusCode >= 300');
+    expect(source).toContain('if (!response.ok) throw new Error(`status ${response.status}`)');
   });
 
   it('requires a FlowCrew-shaped payload before claiming a dashboard answered', () => {

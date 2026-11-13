@@ -166,7 +166,8 @@ describe('dashboard listener authority', () => {
     const app = await startDashboard(root, 0);
     const address = app.server.address();
     expect(address).toMatchObject({ address: '127.0.0.1' });
-    expect(app.server.keepAliveTimeout).toBe(app.initialConfig.keepAliveTimeout);
+    expect(app.server.keepAliveTimeout).toBe(0);
+    expect(app.server.headersTimeout).toBe(0);
     expect(app.server.requestTimeout).toBe(app.initialConfig.requestTimeout);
     expect(app.server.timeout).toBe(app.initialConfig.connectionTimeout);
     expect(app.server.listeners('clientError')).toHaveLength(1);

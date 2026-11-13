@@ -105,7 +105,7 @@ const {
   statSync,
 } = fsModule;
 const { basename, dirname, join, relative, resolve } = pathModule;
-const { execFileSync, execSync } = childProcessModule;
+const { execSync } = childProcessModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
 const { projectRunStageHistory } = runStateViewModule;
 const {
@@ -133,7 +133,7 @@ const {
   RECOMMENDED,
   resolveAdapterChoice,
 } = adapterAvailabilityModule;
-const { detectSupervisorBackend } = cliDoctorModule;
+const { commandSucceeds, detectSupervisorBackend } = cliDoctorModule;
 const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
 const {
   formatHumanDuration,
@@ -483,15 +483,6 @@ function addDoctorSkillCheck(
     });
 }
 
-function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
-  try {
-    execFileSync(commandName, commandArgs, { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function cmdAdapter(): void {
   // Flags are not adapter names.
   const positional = parseCommandArgs('adapter', args).positionals;
@@ -699,22 +690,10 @@ async function cmdDoctor() {
   const port = parseInt(process.env.PORT || '3000', 10);
   const packageRootForPort = resolve(import.meta.dirname ?? '.', '..');
   try {
-    const http = await import('node:http');
-    const body = await new Promise<string>((resolve_, reject) => {
-      const req = http.get(`http://localhost:${port}/api/dashboard/status`, (res) => {
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          res.resume();
-          reject(new Error(`status ${res.statusCode}`));
-          return;
-        }
-        let text = '';
-        res.setEncoding('utf-8');
-        res.on('data', (chunk: string) => { text += chunk; });
-        res.on('end', () => resolve_(text));
-      });
-      req.on('error', reject);
-      req.setTimeout(2000, () => { req.destroy(); reject(new Error('timeout')); });
-    });
+    const { requestDashboardStatus } = await import('./cli-dashboard.js');
+    const response = await requestDashboardStatus(`http://localhost:${port}/api/dashboard/status`);
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    const body = await response.text();
     let identity: { pid?: number; loadedBuild?: { algorithm?: string } } | undefined;
     try { identity = JSON.parse(body) as typeof identity; } catch { /* not JSON */ }
     if (!identity?.loadedBuild?.algorithm) {

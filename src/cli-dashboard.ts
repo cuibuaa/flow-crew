@@ -1,3 +1,5 @@
+import { get } from 'node:http';
+import { EXIT_CODE } from './exit-code.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import type { DashboardStatusResponse } from './dashboard.js';
 
@@ -10,6 +12,27 @@ export interface DashboardCommandOptions {
   stderr?: TextWriter;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
+}
+
+/** Wait for the complete local response; elapsed time cannot establish absence. */
+export function requestDashboardStatus(url: string, options?: Pick<RequestInit, 'signal'>): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const req = get(url, { agent: false, signal: options?.signal ?? undefined, headers: { Accept: 'application/json' } }, res => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => { text += chunk; });
+      res.on('error', reject);
+      res.on('end', () => {
+        try { resolve(new Response([204, 205, 304].includes(res.statusCode ?? 0) ? null : text, { status: res.statusCode })); }
+        catch (error) { reject(error); }
+      });
+      res.on('close', () => {
+        if (!res.complete) reject(new Error('Dashboard response closed before completion'));
+      });
+    });
+    req.on('error', reject);
+    req.on('close', () => reject(new Error('Dashboard connection closed before completion')));
+  });
 }
 
 function usage(writer: TextWriter): void {
@@ -51,18 +74,21 @@ export async function cmdDashboard(args: string[], options: DashboardCommandOpti
     return 1;
   }
   const baseUrl = `http://127.0.0.1:${port}`;
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = options.fetch ?? requestDashboardStatus;
 
+  const controller = new AbortController();
+  const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), options.timeoutMs);
   let response: Response;
   try {
-    response = await fetchImpl(`${baseUrl}/api/dashboard/status`, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
-    });
+    response = await fetchImpl(`${baseUrl}/api/dashboard/status`, { signal: controller.signal });
   } catch (error) {
+    if (controller.signal.aborted) {
+      stdout.write(`UNFINISHED: declared dashboard observation allowance exhausted at ${baseUrl}.\n`);
+      return EXIT_CODE.inProgress;
+    }
     stdout.write(`UNREACHABLE: dashboard did not answer at ${baseUrl} (${error instanceof Error ? error.message : String(error)}).\n`);
     return 1;
-  }
+  } finally { clearTimeout(timer); }
   if (!response.ok) {
     stdout.write(`UNVERIFIED: dashboard status endpoint returned HTTP ${response.status}.\n`);
     return 2;
