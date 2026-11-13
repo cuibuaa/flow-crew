@@ -1,7 +1,7 @@
-/** Owned child engine. Stdout checkpoints + stdin acknowledgments synchronize
+/** Native child against the fresh build (enforced by Vitest global setup).
+ * Owned child engine. Stdout checkpoints + stdin acknowledgments synchronize
  * crashes with writes; no sleep, polling deadline, daemon or real adapter. */
 import fs from 'node:fs';
-import type { RunStatus } from '../../src/store.js';
 import { syncBuiltinESMExports } from 'node:module';
 import { basename, join, resolve } from 'node:path';
 
@@ -14,19 +14,19 @@ Object.assign(process.env, { HOME: join(root, 'home'), FC_HOME: join(root, 'fc')
 const NativeDate = Date;
 const instant = '2035-02-03T04:05:06.000Z';
 globalThis.Date = class extends NativeDate {
-  constructor(value?: string | number) { super(value ?? instant); }
+  constructor(value) { super(value ?? instant); }
   static now() { return NativeDate.parse(instant); }
-} as DateConstructor;
+};
 
-const store = await import('../../src/store.js');
-const { observeEnginePublications } = await import('../../src/engine-fs.js');
-const { runRecordPath } = await import('../../src/run-layout.js');
-const { prepareWorkflowLaunch } = await import('../../src/scheduler/sched_loop/launch.js');
-const { WorkflowConfigSchema } = await import('../../src/scheduler/sched_admission/configuration.js');
-const { concludeRun, cancelRunStateAtPath } = await import('../../src/scheduler/sched_policy/run-completion.js');
-const { reconcileHostInterruptedRun } = await import('../../src/restart-recovery.js');
-const { requestDeploymentHold, parkAtDeploymentBoundary } = await import('../../src/deployment-hold.js');
-const { parkProviderQuota } = await import('../../src/scheduler/sched_settlement/stage-execution.js');
+const store = await import('../../dist/store.js');
+const { observeEnginePublications } = await import('../../dist/engine-fs.js');
+const { runRecordPath } = await import('../../dist/run-layout.js');
+const { prepareWorkflowLaunch } = await import('../../dist/scheduler/sched_loop/launch.js');
+const { WorkflowConfigSchema } = await import('../../dist/scheduler/sched_admission/configuration.js');
+const { concludeRun, cancelRunStateAtPath } = await import('../../dist/scheduler/sched_policy/run-completion.js');
+const { reconcileHostInterruptedRun } = await import('../../dist/restart-recovery.js');
+const { requestDeploymentHold, parkAtDeploymentBoundary } = await import('../../dist/deployment-hold.js');
+const { parkProviderQuota } = await import('../../dist/scheduler/sched_settlement/stage-execution.js');
 store.setFcGlobalDir(join(root, 'fc'));
 const project = join(root, 'project');
 fs.mkdirSync(project, { recursive: true });
@@ -53,8 +53,8 @@ if (mode === 'recovery-park' || mode === 'recovery-active') store.updateRunState
 });
 
 if (mode === 'validation-unfinished') {
-  const { appendEvidence, captureProjectTree, VALIDATION_FACT_VERSION } = await import('../../src/evidence-ledger.js');
-  store.updateRunState(project, runId, state => { state.planControl = { version: 1, stages: workflow.stages } as never; });
+  const { appendEvidence, captureProjectTree, VALIDATION_FACT_VERSION } = await import('../../dist/evidence-ledger.js');
+  store.updateRunState(project, runId, state => { state.planControl = { version: 1, stages: workflow.stages }; });
   store.writeStageStatus(project, runId, 'work', { status: 'complete', retries: 0, attempts: [
     { index: 1, status: 'complete', startedAt: instant, completedAt: instant, exitCode: 0 },
   ] });
@@ -77,29 +77,29 @@ if (mode === 'validation-unfinished') {
 
 // Patch only sync notifications; writes still use native storage. The existing
 // engine publication observer supplies mutation boundaries including temp bytes.
-const descriptors = new Map<number, string>();
+const descriptors = new Map();
 const nativeOpen = fs.openSync, nativeClose = fs.closeSync, nativeSync = fs.fsyncSync, nativeWrite = fs.writeSync;
-const relevant = (path: string) => path.startsWith(directory + '/')
+const relevant = (path) => path.startsWith(directory + '/')
   && (/^(?:events\.jsonl|run\.json|run_event_status\.json|summary\.md|\.run-reservation\.json)(?:\.tmp\..*)?$/.test(basename(path))
     || path.includes('/engine/stages/') && /^status\.json(?:\.tmp\..*)?$/.test(basename(path)));
 let armed = true, index = 0;
-const checkpoint = (kind: string, path: string) => {
+const checkpoint = (kind, path) => {
   if (!armed || !relevant(path)) return;
   fs.writeSync(1, JSON.stringify({ checkpoint: ++index, kind, path, runId, directory, project }) + '\n');
   const ack = Buffer.alloc(1);
   if (fs.readSync(0, ack, 0, 1, null) !== 1) throw new Error('checkpoint controller disconnected');
 };
-fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+fs.openSync = ((...args) => {
   const descriptor = nativeOpen(...args); descriptors.set(descriptor, String(args[0])); return descriptor;
-}) as typeof fs.openSync;
-fs.closeSync = ((descriptor: number) => { descriptors.delete(descriptor); return nativeClose(descriptor); }) as typeof fs.closeSync;
-fs.fsyncSync = ((descriptor: number) => {
+});
+fs.closeSync = ((descriptor) => { descriptors.delete(descriptor); return nativeClose(descriptor); });
+fs.fsyncSync = ((descriptor) => {
   nativeSync(descriptor);
   const path = descriptors.get(descriptor);
   if (path && (relevant(path) || path === directory)) checkpoint(path === directory ? 'fsync-directory' : 'fsync-file', path === directory ? join(directory, 'events.jsonl') : path);
-}) as typeof fs.fsyncSync;
+});
 let split = false;
-fs.writeSync = ((fd: number, data: string | Uint8Array, offset?: number, length?: number, position?: number | null) => {
+fs.writeSync = ((fd, data, offset, length, position) => {
   if (typeof data === 'string') return nativeWrite(fd, data, offset);
   let count = length ?? data.byteLength;
   if (armed && !split && ['terminal-short', 'import-short'].includes(mode) && descriptors.get(fd) === join(directory, 'events.jsonl')) {
@@ -107,7 +107,7 @@ fs.writeSync = ((fd: number, data: string | Uint8Array, offset?: number, length?
     if (end > (offset ?? 0)) { count = end - (offset ?? 0); split = true; }
   }
   return nativeWrite(fd, data, offset ?? 0, count, position);
-}) as typeof fs.writeSync;
+});
 syncBuiltinESMExports();
 observeEnginePublications((paths, _tree, publication) => () => {
   const path = publication?.transfer?.[1] ?? paths[0];
@@ -118,18 +118,18 @@ fs.writeSync(1, JSON.stringify({ ready: true, runId, directory, project }) + '\n
 if (mode === 'initialize') store.initializeReservedRun(project, runId, workflow.name, yaml, ['work']);
 else if (mode === 'terminal-short') await concludeRun(store.readRunState(project, runId), { status: 'failed', reasonCode: 'workflow_complete' });
 else if (mode.startsWith('terminal:')) await concludeRun(store.readRunState(project, runId), {
-  status: mode.slice('terminal:'.length) as RunStatus, reasonCode: 'workflow_complete',
+  status: mode.slice('terminal:'.length), reasonCode: 'workflow_complete',
 });
 else if (mode === 'pause') parkAtDeploymentBoundary(project, runId);
 else if (mode === 'park') store.updateRunState(project, runId, state => { state.status = 'parked'; });
 else if (mode === 'quota') parkProviderQuota(store.readRunState(project, runId), project, runId, 'work', {
   output: '', exitCode: 1, duration_ms: 0, endingCause: 'provider_quota',
   providerFailure: { kind: 'quota', provider: 'stub', source: 'native_stdout', resetAt: '2035-02-04T00:00:00.000Z' },
-} as never);
+});
 else if (mode === 'resume' || ['import-resume', 'import-short'].includes(mode)) prepareWorkflowLaunch(workflow, yaml, project, runId);
 else if (mode === 'validation-unfinished') {
-  await (await import('../../src/scheduler/sched_settlement/gate-validation.js')).validateSettledTree(project, runId);
-  const facts = (await import('../../src/evidence-ledger.js')).readEvidence(directory);
+  await (await import('../../dist/scheduler/sched_settlement/gate-validation.js')).validateSettledTree(project, runId);
+  const facts = (await import('../../dist/evidence-ledger.js')).readEvidence(directory);
   if (!facts.some(fact => fact.kind === 'validation' && fact.resourceState === 'unfinished')) throw new Error('missing unfinished validation fact');
 }
 else if (mode === 'cancel' || mode === 'cancel-active') cancelRunStateAtPath(directory, instant);

@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { foldRunLifecycle } from '../src/run-lifecycle-fold.js';
@@ -23,16 +23,19 @@ vi.mock('fastify', async original => {
 });
 
 const repository = resolve(import.meta.dirname, '..');
-const loader = import.meta.resolve('tsx');
 const previous = fcGlobalDir();
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
+let cliChild: ChildProcess | undefined;
+async function kill(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
+  child.kill('SIGKILL'); await closed;
+}
+afterAll(async () => { if (cliChild) await kill(cliChild); });
 afterEach(async () => {
   for (const child of children) {
-    if (child.exitCode === null && child.signalCode === null) {
-      const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
-      child.kill('SIGKILL'); await closed;
-    }
+    await kill(child);
   }
   children.clear();
   setFcGlobalDir(previous);
@@ -52,7 +55,51 @@ function environment(root: string): NodeJS.ProcessEnv {
 }
 interface Identity { runId: string; directory: string; project: string }
 interface Checkpoint extends Identity { checkpoint: number; kind: string; path: string }
-interface Execution { root: string; identity: Identity; checkpoints: Checkpoint[]; signal: string | null; status?: string }
+interface Fixture { root: string; identity: Identity }
+interface Snapshot extends Fixture { checkpoint: Checkpoint }
+interface Execution extends Fixture { checkpoints: Checkpoint[]; snapshots: Snapshot[]; status?: string }
+interface CliResult { status: number; stdout: string; stderr: string }
+let pendingCli: { resolve: (result: CliResult) => void; reject: (error: Error) => void } | undefined;
+function cli(fixture: Fixture, args: string[]): Promise<CliResult> {
+  if (!cliChild) {
+    const root = temporaryRoot();
+    cliChild = spawn(process.execPath, [join(repository, 'spec/test-support/lifecycle-cli.mjs')],
+      { cwd: repository, env: environment(root), stdio: ['pipe', 'pipe', 'pipe'] });
+    let buffer = '', errors = '';
+    cliChild.stderr!.on('data', chunk => { errors += chunk; });
+    cliChild.stdout!.on('data', chunk => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      const result = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
+      const pending = pendingCli; pendingCli = undefined; pending!.resolve(result);
+    });
+    cliChild.once('error', error => pendingCli?.reject(error));
+    cliChild.once('close', () => pendingCli?.reject(new Error(`CLI exited: ${errors}`)));
+  }
+  if (cliChild.exitCode !== null || cliChild.signalCode !== null) return Promise.reject(new Error('CLI is closed'));
+  return new Promise((resolve, reject) => {
+    pendingCli = { resolve, reject };
+    cliChild!.stdin!.write(JSON.stringify({ root: fixture.root, project: fixture.identity.project, args }) + '\n');
+  });
+}
+// Copy native bytes while the engine is blocked on its checkpoint ack. Keep
+// record contents (including original project identity), temp files and locks.
+// Each copy has a fresh FC_HOME so readers cannot reuse another gap's caches.
+function snapshot(root: string, checkpoint: Checkpoint): Snapshot {
+  const copy = temporaryRoot();
+  cpSync(root, copy, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+  return { root: copy, identity: { ...checkpoint, directory: join(copy, checkpoint.directory.slice(root.length)) }, checkpoint };
+}
+// Compare every directory, symlink target and file byte, including engine temp
+// files and the index, without normalizing paths, IDs, PIDs or record contents.
+function diskBytes(root: string): unknown[] {
+  return readdirSync(root).sort().map(name => {
+    const path = join(root, name), stat = lstatSync(path);
+    return [name, stat.mode, stat.isSymbolicLink() ? readlinkSync(path)
+      : stat.isDirectory() ? diskBytes(path) : readFileSync(path)];
+  });
+}
 function text(path: string): string { try { return readFileSync(path, 'utf8'); } catch { return ''; } }
 // Independent oracle deliberately does not call the production fold.
 function oracle(bytes: string) {
@@ -67,14 +114,15 @@ function oracle(bytes: string) {
   }
   return status === undefined ? undefined : { version: 2, sequence, status, observedAt };
 }
-async function execute(mode: string, killAt?: number): Promise<Execution> {
+async function execute(mode: string, killKind?: string): Promise<Execution> {
   const root = temporaryRoot();
-  const child = spawn(process.execPath, ['--import', loader, join(repository, 'spec/test-support/lifecycle-engine.ts'), root, mode],
-    { cwd: repository, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 90_000 });
+  const child = spawn(process.execPath, [join(repository, 'spec/test-support/lifecycle-engine.mjs'), root, mode],
+    { cwd: repository, env: environment(root), stdio: ['pipe', 'pipe', 'pipe'] });
   children.add(child);
   let buffer = '', errors = '', identity: Identity | undefined, final: { status: string } | undefined;
   const checkpoints: Checkpoint[] = [];
-  let failure: unknown;
+  const snapshots: Snapshot[] = [];
+  let failure: unknown, killedAt: number | undefined;
   let fileFlushed = true, directoryFlushed = true;
   child.stderr!.on('data', chunk => { errors += chunk; });
   child.stdout!.on('data', chunk => {
@@ -108,7 +156,11 @@ async function execute(mode: string, killAt?: number): Promise<Execution> {
           }
         }
       } catch (error) { failure = error; child.kill('SIGKILL'); continue; }
-      if (message.checkpoint === killAt) child.kill('SIGKILL');
+      const shouldKill = message.kind === killKind;
+      try {
+        if (killKind === undefined || shouldKill) snapshots.push(snapshot(root, message));
+      } catch (error) { failure = error; child.kill('SIGKILL'); continue; }
+      if (shouldKill) { killedAt = message.checkpoint; child.kill('SIGKILL'); }
       else child.stdin!.write('x');
     }
   });
@@ -118,9 +170,13 @@ async function execute(mode: string, killAt?: number): Promise<Execution> {
   children.delete(child);
   if (failure) throw failure;
   expect(identity, errors).toBeDefined();
-  if (killAt === undefined) expect(code, errors).toBe(0);
-  else { expect(signal, errors).toBe('SIGKILL'); expect(checkpoints.at(-1)?.checkpoint).toBe(killAt); }
-  return { root, identity: identity!, checkpoints, signal, status: final?.status };
+  if (killKind === undefined) expect(code, errors).toBe(0);
+  else {
+    expect(killedAt, `missing checkpoint kind: ${killKind}`).toBeDefined();
+    expect(signal, errors).toBe('SIGKILL');
+    expect(checkpoints.at(-1)?.checkpoint).toBe(killedAt);
+  }
+  return { root, identity: identity!, checkpoints, snapshots, status: final?.status };
 }
 function lifecycleBytes(directory: string) {
   return ['run.json', 'events.jsonl', 'run_event_status.json'].map(name => {
@@ -128,7 +184,7 @@ function lifecycleBytes(directory: string) {
     return [path, createHash('sha256').update(text(path)).digest('hex'), existsSync(path) ? String(statSync(path, { bigint: true }).mtimeNs) : undefined];
   });
 }
-async function checkReads(execution: Execution): Promise<void> {
+async function checkReads(execution: Fixture, app: Awaited<ReturnType<typeof startDashboard>>): Promise<void> {
   const { root, identity: { directory, runId, project } } = execution;
   setFcGlobalDir(join(root, 'fc'));
   const before = lifecycleBytes(directory);
@@ -139,18 +195,15 @@ async function checkReads(execution: Execution): Promise<void> {
   try { record = readRunSnapshot(directory); } catch { /* no admission declaration yet */ }
   const declared = record && hasLifecycleAuthority(record);
   const expected = declared ? folded?.status : record?.status;
-  const cli = (command: string, args: string[]) => spawnSync(process.execPath,
-    ['--import', loader, join(repository, 'src/cli.ts'), command, ...args],
-    { cwd: project, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, encoding: 'utf8', timeout: 90_000 });
   if (expected !== undefined) {
     expect(readRunState(project, runId).status).toBe(expected);
     expect(readArchivedRunState(project, runId).state.status).toBe(expected);
     expect(readOperationalRunState(project, runId).status).toBe(expected);
     expect(readRunStateView(project, runId, { observedAt: '2035-02-03T04:06:00.000Z' }).run.status).toBe(expected);
-    const status = cli('status', ['--all']);
+    const status = await cli(execution, ['status', '--all']);
     expect(status.status, status.stderr).toBe(0);
     expect(status.stdout).toContain(`Status: ${expected}`);
-    const listing = cli('list', ['--limit', '5']);
+    const listing = await cli(execution, ['list', '--limit', '5']);
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain(runId);
     expect(listing.stdout).toContain(String(expected));
@@ -164,10 +217,7 @@ async function checkReads(execution: Execution): Promise<void> {
         : path.endsWith('scheduler.pid') ? '1' : readFileSync(path, 'utf8'),
     });
     expect(watch.alerts.find(alert => alert.kind === 'terminal_status_mismatch')).toMatchObject({ lifecycleStatus: expected });
-    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const app = await startDashboard(project, 0, { distDir: join(root, 'empty-dist') });
-    output.mockRestore();
-    try {
+    {
       const detail = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
       expect(detail.statusCode, detail.body).toBe(200);
       expect(detail.json().status).toBe(expected);
@@ -177,10 +227,10 @@ async function checkReads(execution: Execution): Promise<void> {
       // Index candidate discovery may lag; selected details still fold now.
       if (existsSync(join(directory, 'run.json'))) expect(row).toBeDefined();
       if (row) expect(row.outcome).toBe(declared ? expected : expected === 'complete' ? 'shipped' : expected);
-    } finally { await app.close(); }
+    }
   } else {
     expect(() => readRunState(project, runId)).toThrow();
-    expect(cli('status', ['--all']).stdout).not.toMatch(/Status: (?:running|parked|complete)/);
+    expect((await cli(execution, ['status', '--all'])).stdout).not.toMatch(/Status: (?:running|parked|complete)/);
   }
   expect(lifecycleBytes(directory)).toEqual(before);
   // Opening for writing, even with an early return, repairs BOTH caches and
@@ -209,42 +259,63 @@ const cases = [
   ['pause', 'parked'], ['park', 'parked'], ['quota', 'parked'], ['validation-unfinished', 'running'], ['resume', 'running'],
   ['cancel', 'cancelled'], ['cancel-active', 'cancelled'], ['recovery-active', 'parked'], ['recovery-park', 'parked'], ['recovery-block', 'failed'], ['import-resume', 'running'], ['terminal-short', 'failed'], ['import-short', 'running'],
 ];
+async function dashboard(fixture: Fixture) {
+  setFcGlobalDir(join(fixture.root, 'fc'));
+  const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+  try { return await startDashboard(fixture.identity.project, 0, { distDir: join(fixture.root, 'empty-dist') }); }
+  finally { output.mockRestore(); }
+}
 describe('lifecycle crash then replay', () => {
-  it.each(cases)('covers EVERY consecutive write gap for %s', { timeout: 900_000 }, async (mode, status) => {
+  it.each(cases)('covers EVERY consecutive write gap for %s', async (mode, status) => {
     const baseline = await execute(mode);
     expect(baseline.status).toBe(status);
     expect(baseline.checkpoints.length).toBeGreaterThan(1);
-    // Kill at every observed boundary except the final one: every consecutive
-    // pair has its own owned engine process and all required read assertions.
-    for (const checkpoint of baseline.checkpoints.slice(0, -1)) {
-      const crashed = await execute(mode, checkpoint.checkpoint);
-      expect(crashed.checkpoints.map(row => [row.kind, row.path.replace(crashed.identity.directory, '').replace(/\.tmp\.[a-f0-9]+$/, '.tmp')]))
-        .toEqual(baseline.checkpoints.slice(0, checkpoint.checkpoint).map(row => [row.kind, row.path.replace(baseline.identity.directory, '').replace(/\.tmp\.[a-f0-9]+$/, '.tmp')]));
-      await checkReads(crashed);
-      if (mode.startsWith('import-')) {
-        setFcGlobalDir(join(crashed.root, 'fc'));
-        importRunLifecycleForResume(crashed.identity.project, crashed.identity.runId);
-        importRunLifecycleForResume(crashed.identity.project, crashed.identity.runId);
-        const events = text(join(crashed.identity.directory, 'events.jsonl')).trim().split('\n').map(row => JSON.parse(row));
-        expect(events.filter(row => row.type === 'run_status_imported')).toHaveLength(1);
-        expect(events.find(row => row.type === 'run_status_imported')).toMatchObject({ snapshotSource: 'run.json' });
+    expect(baseline.snapshots).toHaveLength(baseline.checkpoints.length);
+    const app = await dashboard(baseline);
+    try {
+      // One engine execution captures every boundary except the final one:
+      // each consecutive pair still gets an independent, disposable disk image
+      // and all read assertions. No writer resumes inside any checked image.
+      for (const crashed of baseline.snapshots.slice(0, -1)) {
+        await checkReads(crashed, app);
+        if (mode.startsWith('import-')) {
+          setFcGlobalDir(join(crashed.root, 'fc'));
+          importRunLifecycleForResume(crashed.identity.project, crashed.identity.runId);
+          importRunLifecycleForResume(crashed.identity.project, crashed.identity.runId);
+          const events = text(join(crashed.identity.directory, 'events.jsonl')).trim().split('\n').map(row => JSON.parse(row));
+          expect(events.filter(row => row.type === 'run_status_imported')).toHaveLength(1);
+          expect(events.find(row => row.type === 'run_status_imported')).toMatchObject({ snapshotSource: 'run.json' });
+        }
+        rmSync(crashed.root, { recursive: true, force: true });
       }
-      // Retire each completed fixture promptly; no owned process survives.
-      rmSync(crashed.root, { recursive: true, force: true });
-    }
+    } finally { await app.close(); }
     process.stdout.write(`LIFECYCLE_GAPS ${mode} ${baseline.checkpoints.length - 1}\n`);
+  });
+
+  it.each([
+    ['initialize', 'open'], ['terminal-short', 'write'], ['import-short', 'fsync-file'],
+    ['recovery-active', 'rename'], ['park', 'fsync-directory'],
+  ])('cross-checks snapshot bytes against SIGKILL for %s at %s', async (mode, kind) => {
+    const killed = await execute(mode, kind);
+    expect(killed.snapshots).toHaveLength(1);
+    expect(diskBytes(killed.snapshots[0].root)).toEqual(diskBytes(killed.root));
+    const app = await dashboard(killed);
+    try { await checkReads(killed, app); } finally { await app.close(); }
   });
 });
 
-it('keeps identical event bytes read-only while legacy snapshot displays differ on every surface', { timeout: 120_000 }, async () => {
+it('keeps identical event bytes read-only while legacy snapshot displays differ on every surface', async () => {
   const execution = await execute('terminal:failed');
   const { directory } = execution.identity;
   const record = JSON.parse(text(join(directory, 'run.json')));
   delete record.lifecycleAuthority; delete record.lifecycleCursor;
   const log = text(join(directory, 'events.jsonl'));
-  for (const status of ['parked', 'complete']) {
-    writeFileSync(join(directory, 'run.json'), JSON.stringify({ ...record, status }));
-    await checkReads(execution);
-    expect(text(join(directory, 'events.jsonl'))).toBe(log);
-  }
+  const app = await dashboard(execution);
+  try {
+    for (const status of ['parked', 'complete']) {
+      writeFileSync(join(directory, 'run.json'), JSON.stringify({ ...record, status }));
+      await checkReads(execution, app);
+      expect(text(join(directory, 'events.jsonl'))).toBe(log);
+    }
+  } finally { await app.close(); }
 });
