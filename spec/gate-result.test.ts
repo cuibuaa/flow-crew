@@ -371,7 +371,7 @@ describe('stage group settlement boundaries', () => {
 });
 
 describe('validation at the review boundary', () => {
-  it.each(['repaired', 'exhausted', 'launch_error'] as const)('rejects nonzero exits, validates changed repair trees, and parks unfinished resources: %s', async outcome => {
+  it.each(['repaired', 'exhausted', 'launch_error'] as const)('rejects nonzero exits, validates changed repair trees, and hands unfinished facts to review: %s', async outcome => {
     for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
@@ -412,13 +412,20 @@ describe('validation at the review boundary', () => {
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
     const confirmed = outcome !== 'launch_error';
-    expect(final.status, final.failureReason).toBe(outcome === 'launch_error' ? 'parked' : outcome === 'repaired' ? 'complete' : 'incomplete');
+    expect(final.status, final.failureReason).toBe(outcome === 'repaired' ? 'complete' : 'incomplete');
     const ledger = readEvidence(runDir(projectDir, final.runId));
     if (!confirmed) {
-      expect(adapter.calls.filter(call => call.stageId === gateId)).toHaveLength(0);
+      expect(adapter.calls.map(call => call.stageId)).toEqual(['work', gateId]);
       expect(repairs).toHaveLength(0);
       expect(commands).toHaveBeenCalledTimes(3);
-      expect(ledger.filter(fact => fact.kind === 'validation').at(-1)).toMatchObject({ resourceState: 'unfinished', executions: expect.any(Array) });
+      const fact = ledger.filter(fact => fact.kind === 'validation').at(-1)!;
+      expect(fact).toMatchObject({ resourceState: 'unfinished', executions: expect.any(Array) });
+      expect(fact.executions).toHaveLength(3);
+      expect(fact.executions.map(execution => execution.commands.map(command => command.exitCode))).toEqual([[null], [null], [null]]);
+      expect(adapter.calls.find(call => call.stageId === gateId)!.prompt).toContain(JSON.stringify(fact));
+      expect(final.reasonCode).toBe('validation_unresolved');
+      expect(final.stages[gateId]).toMatchObject({ status: 'complete', gate: { pass: true, kind: 'pass' } });
+      expect(readRunEvents(projectDir, final.runId).filter(event => event.type === 'stage_complete').map(event => event.stageId)).toEqual(['work', gateId]);
       expect(final.stages.work.attempts).toHaveLength(1);
     } else {
       expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,

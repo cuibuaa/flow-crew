@@ -319,6 +319,8 @@ describe('one projection across historic receipts and every reader', () => {
     expect(summary.match(/passed \(verified\)/g)).toHaveLength(3);
     expect(summary).toContain('recorded state not_measured');
     const display = evidenceContext(root, base);
+    const handedOver = JSON.parse(display.split('Ledger facts:\n')[1].split('\n')[0]);
+    expect(handedOver.facts.find((entry: { kind: string }) => entry.kind === 'validation')).toEqual(projectValidationFact(fact));
     for (const field of ['"storedState":"not_measured"', '"measurement":"verified"', '"state":"passed"']) expect(display).toContain(field);
     expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
     writeFileSync(runRecordPath(base, 'validation_delta_legacy.json'), JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));

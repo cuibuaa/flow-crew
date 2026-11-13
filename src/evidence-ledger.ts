@@ -259,7 +259,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
       const attempt = entries.find(fact => fact.kind === 'attempt' && fact.stageId === entry.stageId && fact.attemptIndex === entry.attemptIndex && fact.attemptStartedAt === entry.attemptStartedAt);
       if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
         || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
-      return [entry];
+      return [entry.validationVersion === VALIDATION_FACT_VERSION ? entry : projectValidationFact(entry)];
     }
     if (entry.kind === 'attempt') {
       const { finalRecord: _finalRecord, guidanceIds: _guidanceIds, remainingWork: _remainingWork, ...fact } = entry;

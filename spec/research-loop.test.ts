@@ -38,6 +38,7 @@ import { TaskRegistry } from '../src/task-registry.js';
 import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, readRunLockWaits, LAUNCH_INTENT_TTL_MS } from '../src/run-lock.js';
 import { readEvidence, captureProjectTree, validationForTree } from '../src/evidence-ledger.js';
 import * as validationOwner from '../src/project-validation.js';
+import * as validationBoundary from '../src/scheduler/sched_settlement/gate-validation.js';
 
 const agents = join(import.meta.dirname, '../config/agents');
 const delivered = JSON.stringify({ status: 'delivered', summary: 'Advisory author note: keep -999999; claimed measurement 1.', caveats: [], remaining_work: [], blocks: null });
@@ -78,6 +79,20 @@ async function run(text: string, adapter: ScriptedAdapter) {
   return { state, directory: runDir(project, state.runId) };
 }
 
+/** Recreate the old engine's durable boundary; new runs hand facts to review. */
+function historicValidationPause() {
+  const validate = validationBoundary.validateSettledTree;
+  return vi.spyOn(validationBoundary, 'validateSettledTree').mockImplementation(async (project, runId) => {
+    const ready = await validate(project, runId);
+    if (!readEvidence(runDir(project, runId)).some(entry => entry.kind === 'validation')) return ready;
+    const state = readRunState(project, runId);
+    state.status = 'parked';
+    state.recovery = { kind: 'resumable', cause: 'unknown', at: new Date().toISOString(), interruptedStages: [], reason: 'Validation unfinished' };
+    writeRunState(project, runId, state);
+    return false;
+  });
+}
+
 describe('versioned declaration-owned research loop', () => {
   it('engine-runs-it: research report publication cannot inherit validation from an earlier tree', async () => {
     const text = brief(config => { config.budget.invocation_seconds = 30; config.publication = 'report.md'; });
@@ -108,7 +123,7 @@ describe('versioned declaration-owned research loop', () => {
     expect(records[1].treeHash).toBe(captureProjectTree(project, text, directory).hash);
   });
 
-  it('unfinished-is-resource-state: expired research resume settles validation before stopping without another author or review', async () => {
+  it('unfinished-is-resource-state: expired historic research resume settles validation before stopping without another author or review', async () => {
     const text = brief(config => { config.budget.invocation_seconds = 30; config.budget.wall_seconds = 300;
       config.review = { role: 'qa', criteria: ['Check candidate value'] }; delete config.publication; });
     mkdirSync(join(project, 'config'));
@@ -117,8 +132,11 @@ describe('versioned declaration-owned research loop', () => {
     setEngineDefaults({ validation_attempts: 1 });
     const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: null, unfinished: true });
     const adapter = proposal(80);
+    const pause = historicValidationPause();
     const { state: parked } = await run(text, adapter);
+    pause.mockRestore();
     expect(parked.status).toBe('parked');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['produce']);
     setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
     time.advanceTo(600_000);
     const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
@@ -129,9 +147,10 @@ describe('versioned declaration-owned research loop', () => {
     const records = readEvidence(runDir(project, resumed.runId)).filter(entry => entry.kind === 'validation');
     expect(records.map(record => record.resourceState)).toEqual(['unfinished', 'complete']);
     expect(records.at(-1)?.executions.map(execution => execution.commands[0].exitCode)).toEqual([null, 0]);
+    expect(readRunEvents(project, resumed.runId).filter(event => event.type === 'stage_complete').map(event => event.stageId)).toEqual(['produce']);
   });
 
-  it('unfinished-is-resource-state: resumes a completed author validation before invoking research review', async () => {
+  it.each([false, true])('unfinished-is-resource-state: research review consumes recorded author validation (historic pause=%s)', async historic => {
     const text = brief(config => { config.budget.invocation_seconds = 30; config.review = { role: 'qa', criteria: ['Check candidate value'] }; });
     mkdirSync(join(project, 'config'));
     writeFileSync(join(project, 'check.cjs'), 'process.exit(0);');
@@ -139,28 +158,36 @@ describe('versioned declaration-owned research loop', () => {
     setEngineDefaults({ validation_attempts: 1 });
     const runner = vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: null, unfinished: true });
     const calls: string[] = [];
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
+    const adapter: Adapter = { async run(prompt, _role, opts) {
       calls.push(opts.stageId);
       if (opts.stageId === 'produce') {
         writeFileSync(join(project, 'candidate.json'), '{"value":80}');
         return { output: delivered, exitCode: 0, duration_ms: 1, writes: ['candidate.json'], writeAttribution: 'structured' };
       }
       const fact = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
-      expect(fact.resourceState).toBe('complete'); expect(fact.treeHash).toBe(captureProjectTree(project, text, opts.runDir).hash);
-      expect(fact.executions.at(-1)?.commands.map(command => command.exitCode)).toEqual([0]);
+      expect(fact.resourceState).toBe(historic ? 'complete' : 'unfinished');
+      expect(fact.treeHash).toBe(captureProjectTree(project, text, opts.runDir).hash);
+      expect(fact.executions.map(execution => execution.commands.map(command => command.exitCode))).toEqual(historic ? [[null], [0]] : [[null]]);
+      expect(prompt).toContain(JSON.stringify(fact));
       return { output: verdict(parseBriefFrontmatter(text).research!), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } };
     const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const execute = (existing?: string) => runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, existing, text, true);
-    const parked = await execute();
-    expect(parked.status).toBe('parked'); expect(calls).toEqual(['produce']);
-    setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
-    const resumed = await execute(parked.runId);
+    const pause = historic ? historicValidationPause() : undefined;
+    let resumed = await execute();
+    pause?.mockRestore();
+    if (historic) {
+      expect(resumed.status).toBe('parked'); expect(calls).toEqual(['produce']);
+      setEngineDefaults({ validation_attempts: 2 }); runner.mockImplementation(validationOwner.runProjectCommand);
+      resumed = await execute(resumed.runId);
+    }
     expect(resumed.status).toBe('incomplete'); expect(resumed.reasonCode).toBe('validation_unresolved');
     expect(resumed.validation?.map(command => command.exitCode)).toEqual([null]); expect(calls).toEqual(['produce', 'review']);
     expect(resumed.stages.produce.attempts).toHaveLength(1); expect(resumed.stages.review.attempts).toHaveLength(1);
     const fact = readEvidence(runDir(project, resumed.runId)).filter(entry => entry.kind === 'validation').at(-1)!;
-    expect(fact.executions).toHaveLength(2);
+    expect(fact.executions).toHaveLength(historic ? 2 : 1);
+    expect(runner).toHaveBeenCalledTimes(historic ? 2 : 1);
+    expect(readRunEvents(project, resumed.runId).filter(event => event.type === 'stage_complete').map(event => event.stageId)).toEqual(['produce', 'review']);
   });
   it('runs initialize → keep → reject with stop → finalize, publishes the project report and restores best', async () => {
     const text = brief(config => { config.budget.max_rounds = 5; config.budget.wall_seconds = 300; });
