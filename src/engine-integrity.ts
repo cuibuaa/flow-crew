@@ -5,10 +5,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { engineDirectory, stageWorkPath, requestPath, controlPath, assertSeparatedRunLayout, runRecordPath } from './run-layout.js';
 import { observeEnginePublications, publishEngineFiles, type EngineWrite } from './engine-fs.js';
 export { publishEngineFiles } from './engine-fs.js';
-import { chmodSync, constants, copyFileSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fcGlobalDir } from './store.js';
+import { fcGlobalDir, withRunStateLock } from './store.js';
+import { projectRunLifecycle } from './run-lifecycle.js';
+import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
+import { flushTextRecords } from './append-boundary.js';
 import { engineOwnedDatabasePaths, prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { externalOutputDirectory, readAdmittedBriefContract } from './ship-inputs.js';
@@ -444,9 +447,15 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       } catch { /* unresolved namespace changes still void the result */ }
       // Restore ordinary run records for honest failure settlement. Never
       // follow a stage-installed parent link when restoring a carrier.
-      records.sort(([a], [b]) => Number(a === join(run!, 'run.json')) - Number(b === join(run!, 'run.json')));
+      // Restore and flush the log before restoring any lifecycle cache. The
+      // snapshot preimage supplies metadata, but its status is still a fold.
+      const restoreOrder = (path: string): number => path === join(run!, 'events.jsonl') ? -1 : path === join(run!, 'run.json') ? 1 : 0;
+      records.sort(([a], [b]) => restoreOrder(a) - restoreOrder(b));
+      let logRestoreFailed = false;
       for (const [path, value] of records) {
         if (!run || !inside(run, path) || prospectivePhysicalPath(dirname(path)) !== dirname(path) || same(value, entry(path))) continue;
+        if (path === runRecordPath(run, 'run_event_status.json')) continue; // reconciled from log under lock below
+        if (path === join(run, 'run.json') && logRestoreFailed) continue;
         try {
           if (value.backing) {
             const temporary = engine && !inside(engine, path) ? join(engine, `${basename(path)}.integrity-restore`) : `${path}.integrity-restore`;
@@ -456,6 +465,14 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
             // sparse preimages while retaining the same exact-content check.
             copyFileSync(value.backing, temporary, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
             if (hashRollbackFileSync(temporary).sha256 !== value.hash!.copy().digest('hex')) { rmSync(temporary); continue; }
+            if (path === join(run, 'run.json')) {
+              const restored = JSON.parse(readFileSync(temporary, 'utf8'));
+              if (hasLifecycleAuthority(restored)) {
+                // A preceding parent append may have failed its own flush.
+                flushTextRecords(join(run, 'events.jsonl'));
+                writeFileSync(temporary, JSON.stringify(projectRunLifecycle(run, restored)) + '\n', { flush: true });
+              }
+            }
             if (entry(path)?.stat.startsWith('directory:')) rmSync(path, { recursive: true, force: true });
             renameSync(temporary, path);
             if (value.mode !== undefined) chmodSync(path, value.mode);
@@ -467,8 +484,13 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
               try { ftruncateSync(descriptor, value.length!); } finally { closeSync(descriptor); }
             }
           } else if (value.link !== undefined) { rmSync(path, { recursive: true, force: true }); symlinkSync(value.link, path); }
-        } catch { /* namespace damage cannot turn a voided result into success */ }
+          if (path === join(run, 'events.jsonl')) flushTextRecords(path);
+        } catch {
+          if (path === join(run, 'events.jsonl')) logRestoreFailed = true;
+          /* namespace damage cannot turn a voided result into success */
+        }
       }
+      if (run && !logRestoreFailed) try { withRunStateLock(run, () => {}); } catch { /* retain unrecoverable damage */ }
       // Restoration is a parent publication too. Other active attempts retain
       // their own latched errors, but must not re-accuse the repaired namespace.
       for (const other of guards) {

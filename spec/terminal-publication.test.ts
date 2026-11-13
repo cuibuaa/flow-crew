@@ -45,7 +45,7 @@ const readers = ['write', 'update'] as const;
 
 describe('terminal publication', () => {
   it.each(TERMINAL_STATUSES.flatMap(status => readers.map(writer => ({ status, writer }))))(
-    'publishes the candidate artifacts before $status via $writer becomes observable',
+    'records $status before artifacts and cache publication via $writer',
     ({ status, writer }) => {
       fs.writeFileSync(runRecordPath(directory, 'summary.md'), 'stale summary');
       const state = readRunState(project, id);
@@ -61,6 +61,8 @@ describe('terminal publication', () => {
       vi.mocked(fs.renameSync).mockImplementation((from, to) => {
         if (String(to) === runRecordPath(directory, 'run.json')) {
           expect(JSON.parse(fs.readFileSync(String(to), 'utf8')).status).toBe('running');
+          expect(readRunState(project, id).status).toBe(status);
+          expect(readRunEvents(project, id).filter(event => event.type === 'run_status_changed' && event.runStatus === status)).toHaveLength(1);
           const content = fs.readFileSync(runRecordPath(directory, 'summary.md'), 'utf8');
           expect(content).toContain(`Status: **${status}**`);
           expect(content).toContain('Final outcome evidence');
@@ -77,19 +79,21 @@ describe('terminal publication', () => {
     },
   );
 
-  it('keeps status and completion events unpublished when summary publication fails', async () => {
+  it('retains the recorded lifecycle decision when summary publication fails and retries without duplicating it', async () => {
     const state = readRunState(project, id);
     state.status = 'complete';
     state.completedAt = new Date().toISOString();
     // A directory at the artifact destination deterministically rejects rename.
     fs.mkdirSync(runRecordPath(directory, 'summary.md'));
     await expect(concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' })).rejects.toThrow();
-    expect(readRunState(project, id).status).toBe('running');
+    expect(readRunState(project, id).status).toBe('complete');
+    expect(JSON.parse(fs.readFileSync(join(directory, 'run.json'), 'utf8')).status).toBe('running');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(false);
     fs.rmSync(runRecordPath(directory, 'summary.md'), { recursive: true });
     await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     expect(readRunState(project, id).status).toBe('complete');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(true);
+    expect(readRunEvents(project, id).filter(event => event.type === 'run_status_changed' && event.runStatus === 'complete')).toHaveLength(1);
   });
 
   it('publishes a budget-exhaustion summary without unrecorded research quantities', () => {

@@ -69,11 +69,13 @@ try {
 } finally {fs.renameSync=rename;syncBuiltinESMExports();if(child&&child.exitCode===null)child.kill('SIGKILL')}
 `;
 
+// Lifecycle status is now read from event bytes. Race the same initial status
+// read, rather than a snapshot cache read that no longer selects that status.
 const startupChild = `
 import fs from 'node:fs';import path from 'node:path';import {spawnSync} from 'node:child_process';import {pathToFileURL} from 'node:url';import {syncBuiltinESMExports} from 'node:module';
 const [runtime,fc,project,id]=process.argv.slice(1);const dir=path.join(fc,'runs',id),ack=path.join(fc,'ack.json'),queued=path.join(fc,'queued');const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);
 const store=await load('store');store.setFcGlobalDir(fc);const scheduler=await load('scheduler');const read=fs.readFileSync;let hit=false,executions=0;
-fs.readFileSync=function(file,...args){const bytes=read(file,...args);const stack=new Error().stack;if(!hit&&String(file)===path.join(dir,'run.json')&&stack.includes('readArchivedRunState')&&stack.includes('runWorkflow')){hit=true;const c=spawnSync(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,id,id,ack,queued],{encoding:'utf8',timeout:8000});if(c.status!==0)throw new Error(c.stderr)}return bytes};syncBuiltinESMExports();
+fs.readFileSync=function(file,...args){const bytes=read(file,...args);const stack=new Error().stack;if(!hit&&String(file)===path.join(dir,'events.jsonl')&&stack.includes('projectRunLifecycle')&&stack.includes('runWorkflow')){hit=true;const c=spawnSync(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,id,id,ack,queued],{encoding:'utf8',timeout:8000});if(c.status!==0)throw new Error(c.stderr)}return bytes};syncBuiltinESMExports();
 try {
  const workflow=scheduler.WorkflowConfigSchema.parse({name:'fixture',defaults:{max_iterations:1},stages:[{id:'work',role:'coder',scope:[],depends_on:[],dependency_reasons:{},prompt_template:'Owned deterministic control.',artifact_contract:{version:1,produces:[],reads:[]}}]});
  const result=await scheduler.runWorkflow(workflow,'name: fixture',project,{run:async()=>{executions++;return {exitCode:0,output:'Owned control.',duration_ms:1,writes:[]}}},new Map(),undefined,undefined,id);
@@ -146,6 +148,7 @@ describe('canonical cancellation and committed publication fences', () => {
   it('preserves an old stopped projection byte for byte on a no-op update', () => {
     const legacy = { ...readRunState(project, runId), status: 'stopped' as const };
     delete legacy.stateFormat;
+    delete legacy.lifecycleAuthority; delete legacy.lifecycleCursor;
     const acknowledged = JSON.stringify(legacy, null, 2) + '\n';
     writeFileSync(runRecordPath(directory, 'run.json'), acknowledged);
     expect(updateRunState(project, runId, () => {}).status).toBe('cancelled');
@@ -157,6 +160,7 @@ describe('canonical cancellation and committed publication fences', () => {
     const privateDirectory = join(root, 'legacy-runs', runId); mkdirSync(privateDirectory, { recursive: true });
     const privateState = { ...readRunState(project, runId), projectDir: privateProject };
     delete privateState.storageLayout; delete privateState.stateFormat;
+    delete privateState.lifecycleAuthority; delete privateState.lifecycleCursor;
     writeFileSync(join(privateDirectory, 'run.json'), JSON.stringify(privateState));
     const registry = new TaskRegistry({ baseDir: join(root, 'task-registry') });
     const task = registry.create({ kind: 'quick', name: 'Private binding', projectDir: privateProject, brief_text: 'Owned control.' });

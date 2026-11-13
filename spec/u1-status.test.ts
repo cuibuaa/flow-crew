@@ -63,6 +63,8 @@ it('reads stopped as cancelled without changing archived bytes or inferring succ
   const run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
   const path = runRecordPath(run.runDirPath, 'run.json');
   const archived = JSON.parse(readFileSync(path, 'utf8'));
+  delete archived.lifecycleAuthority;
+  delete archived.lifecycleCursor;
   archived.status = 'stopped';
   archived.failureReason = 'Historical operator cancellation';
   writeFileSync(path, JSON.stringify(archived));

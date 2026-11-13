@@ -23,7 +23,7 @@ export function resolveRunIdentity(directory: string, expectedRoot?: string): Ca
     throw new Error('RUN_IDENTITY_OUTSIDE_ROOT: run control requires a directory in the selected run store');
   }
   let record: { runId?: unknown; projectDir?: unknown } | undefined;
-  for (const name of ['run.json', '.run-reservation.json']) {
+  for (const name of ['run.json', join('engine', '.run-reservation.json'), '.run-reservation.json']) {
     const file = join(physical, name);
     try {
       const info = lstatSync(file);

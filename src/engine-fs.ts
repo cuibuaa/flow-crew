@@ -129,6 +129,11 @@ export const closeSync: typeof fs.closeSync = fd => {
   try { fs.closeSync(fd); } finally { descriptors.delete(fd); }
 };
 
+export function syncDirectory(directory: string): void {
+  const descriptor = openSync(directory, 'r');
+  try { fs.fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
 /** Publish complete bytes. Durable records sync the file and its directory;
  * replace-only progress records need atomic visibility, not crash persistence.
  * Callers protecting recovery state remain durable by default. */
@@ -152,13 +157,7 @@ export function atomicWrite(filePath: string, data: string | Buffer, {
     if (durability === 'durable') {
       // A visible record is not durable until its directory entry is synced.
       // Failure here must reach the caller even though publication succeeded.
-      let parent: number | undefined;
-      try {
-        parent = openSync(dirname(filePath), 'r');
-        fs.fsyncSync(parent);
-      } finally {
-        try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
-      }
+      syncDirectory(dirname(filePath));
     }
     return true;
   } catch (err) {

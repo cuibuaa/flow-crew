@@ -1,11 +1,13 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { admitWriteGrant, legacyWriteGrant, WriteGrantContractSchema, type WriteGrantContract } from './write-grant.js';
-import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
+import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout, assertSeparatedRunLayout } from './run-layout.js';
 import { withProcessLock, readLockWaits } from './lock-publication.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
-import { observeRunStatusChange } from './run-events.js';
+import { LIFECYCLE_AUTHORITY, hasLifecycleAuthority } from './run-lifecycle-authority.js';
+import { projectRunLifecycle, readRunSnapshot, reconcileRunLifecycle, recordRunLifecycle, writeRunLifecycleCursor, importLegacyRunLifecycle } from './run-lifecycle.js';
+import type { LifecycleCursor } from './run-lifecycle-fold.js';
 import { latestInvocationInput } from './run-state-view.js';
-import { atomicWrite, writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { atomicWrite, writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, rmdirSync, unlinkSync, writeSync, syncDirectory } from './engine-fs.js';
 import { retireRunScratch } from './invocation-scratch.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync } from 'node:fs';
@@ -386,6 +388,10 @@ export interface RunStateFormat {
 export interface StoreState {
   /** Frozen at new-run admission; legacy continuations explicitly stay ungranted. */
   writeGrant?: WriteGrantContract;
+  /** Recorded at admission, or by one provenance-bearing legacy resume import. */
+  lifecycleAuthority?: typeof LIFECYCLE_AUTHORITY;
+  /** Cache of the bytes-only fold; never an event source. */
+  lifecycleCursor?: LifecycleCursor;
   /** Current-tree raw command coverage, independent of run acceptance. */
   validation?: GateVerdict['validation'];
   /** Immutable storage topology; absent only on legacy runs. */
@@ -830,7 +836,12 @@ export function extractTaskTitle(desc?: string): string {
 }
 
 export function ensureGlobalRunsDir(): void {
-  mkdirSync(runsRoot(), { recursive: true });
+  const created = mkdirSync(runsRoot(), { recursive: true });
+  // Persist newly created ancestor links, not just the log's own directory.
+  if (created) for (let directory = runsRoot(); ; directory = dirname(directory)) {
+    syncDirectory(dirname(directory));
+    if (directory === created) break;
+  }
 }
 
 export function runDir(projectDir: string, runId: string): string {
@@ -851,6 +862,9 @@ export const RUN_RESERVATION_FILE = '.run-reservation.json';
 export const RUN_RESERVATION_TTL_MS = 15 * 60_000;
 
 export interface RunReservation {
+  lifecycleAuthority?: typeof LIFECYCLE_AUTHORITY;
+  workflowName?: string;
+  startedAt?: string;
   version: 1;
   storageLayout?: 2;
   runId: string;
@@ -968,9 +982,11 @@ export function initializeReservedRun(
   if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
   const dir = runDir(normalizedProjectDir, runId);
   if (existsSync(runRecordPath(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
+  syncDirectory(dirname(dir));
   const reservationPath = runRecordPath(dir, RUN_RESERVATION_FILE);
   mkdirSync(engineDirectory(dir), { recursive: true });
-  atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify({ ...reservation, storageLayout: 2 }) + '\n');
+  atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify({ ...reservation, storageLayout: 2,
+    lifecycleAuthority: LIFECYCLE_AUTHORITY, workflowName, startedAt: new Date().toISOString() }) + '\n');
   mkdirSync(stageWorkPath(dir), { recursive: true });
   mkdirSync(requestPath(dir), { recursive: true });
   mkdirSync(controlPath(dir), { recursive: true });
@@ -979,6 +995,7 @@ export function initializeReservedRun(
   const state: StoreState = {
     writeGrant: admitWriteGrant(normalizedProjectDir),
     storageLayout: 2,
+    lifecycleAuthority: LIFECYCLE_AUTHORITY,
     runId,
     workflowName,
     projectDir: normalizedProjectDir,
@@ -1147,8 +1164,7 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
 
 function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): ArchivedStoreState {
   if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
-  const status = resolveRunStatus(parsed.status);
-  if (status.kind === 'known') parsed.status = status.status;
+  projectRunLifecycle(runPath, parsed);
   for (const status of Object.values(parsed.stages ?? {})) projectAttemptCauses(status);
   // Old in-flight runs predate the persisted gate coordinate. Project once at
   // read time; the next ordinary state write retains it without rescanning.
@@ -1170,7 +1186,10 @@ function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): Arch
 }
 
 export function withRunStateLock<T>(directory: string, fn: () => T): T {
-  return withProcessLock(runRecordPath(directory, RUN_STATE_LOCK_FILE), 'run-state', fn);
+  return withProcessLock(runRecordPath(directory, RUN_STATE_LOCK_FILE), 'run-state', () => {
+    reconcileRunLifecycle(directory);
+    return fn();
+  });
 }
 
 function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | undefined): T[] {
@@ -1297,6 +1316,9 @@ function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, re
 }
 
 function copyPersistedHistoryState(target: StoreState, source: StoreState): void {
+  target.lifecycleAuthority = source.lifecycleAuthority;
+  target.lifecycleCursor = source.lifecycleCursor;
+  target.status = source.status;
   target.stateFormat = source.stateFormat;
   target.retiredStageUsage = source.retiredStageUsage;
   target.stageEvidence = source.stageEvidence;
@@ -1325,24 +1347,33 @@ function persistRunStateUnlocked(
       parsed = JSON.parse(currentRaw) as ArchivedStoreState;
     } catch { /* malformed legacy state may be replaced */ }
     if (parsed) {
-      const currentStatus = resolveRunStatus(parsed.status);
+      const hydrated = hydrateRunProjection(runPath, structuredClone(parsed));
+      const currentStatus = resolveRunStatus(hydrated.status);
       if (currentStatus.kind === 'unknown') {
         throw new UnknownRunStatusError(
-          parsed.status,
+          hydrated.status,
           `overwrite archived run ${runId}; update the tool or migrate the archive explicitly`,
         );
       }
       currentProjection = parsed;
-      currentState = hydrateRunProjection(runPath, structuredClone(parsed)) as StoreState;
+      currentState = hydrated as StoreState;
     }
   }
   if (expectation && currentRaw !== expectation.raw) {
     throw new RunStateProjectionConflictError(`Run state changed before mutation commit for ${runId}`);
   }
+  if (currentProjection && hasLifecycleAuthority(currentProjection)) {
+    state.lifecycleAuthority = LIFECYCLE_AUTHORITY;
+    // Whole-snapshot callers can carry an older lifecycle cache. Only a fresh
+    // locked mutation, or a snapshot based on the current fold, decides a change.
+    if (!expectation && state.lifecycleCursor?.sequence !== currentState?.lifecycleCursor?.sequence) state.status = currentState!.status;
+    state.lifecycleCursor = currentState?.lifecycleCursor;
+  } else if (currentProjection && hasLifecycleAuthority(state)) {
+    throw new Error('Legacy lifecycle authority requires an accepted resume import');
+  }
   if (currentState?.status === RUN_STATUS.CANCELLED) {
-    if (isJsonPersistedEqual(currentState, state)) {
+    if (isJsonPersistedEqual({ ...currentState, ...historiesFromState(currentState) }, { ...state, ...historiesFromState(state) })) {
       copyPersistedHistoryState(state, currentState);
-      observeRunStatusChange(runPath, runId, state.status);
       return;
     }
     // A fresh locked transition can continue admitted work. Compatibility
@@ -1408,7 +1439,6 @@ function persistRunStateUnlocked(
   if (currentProjection && isJsonPersistedEqual(currentProjection, comparable)) {
     assertProjectionUnchanged();
     copyPersistedHistoryState(state, { ...merged, stateFormat: comparable.stateFormat });
-    observeRunStatusChange(runPath, runId, comparable.status);
     if (publishesToSelectedStore) {
       try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
       emitCampaignEnvelopeEvents(projectDir, runId, merged);
@@ -1442,8 +1472,9 @@ function persistRunStateUnlocked(
 /** Both history and operational writers share the terminal commit boundary. */
 function publishRunProjection(projectDir: string, runPath: string, projection: StoreState, summaryState: StoreState, assertProjectionUnchanged: () => void, _previous?: StoreState): void {
   assertProjectionUnchanged();
-  // Terminal status is the commit record for the final reader artifacts.
-  // A failed artifact write leaves the previous status observable.
+  recordRunLifecycle(runPath, projection, _previous);
+  summaryState.lifecycleCursor = projection.lifecycleCursor;
+  // Final reader artifacts follow the durable lifecycle decision.
   if (isTerminalRunStatus(projection.status)) {
     const summary = renderRunSummary(projectDir, runPath, summaryState);
     atomicWrite(runRecordPath(runPath, 'summary.md'), summary);
@@ -1455,7 +1486,7 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     atomicWrite(runRecordPath(runPath, 'run.json'), JSON.stringify(projection) + '\n', { stagingDirectory: hasSeparatedRunLayout(runPath) ? engineDirectory(runPath) : undefined });
   };
   publish();
-  observeRunStatusChange(runPath, projection.runId, projection.status);
+  writeRunLifecycleCursor(runPath, projection);
   if (isTerminalRunStatus(projection.status)) {
     retireRunScratch(runPath);
   }
@@ -1471,9 +1502,7 @@ export function readArchivedRunState(projectDir: string, runId: string): Archive
 
 /** Read the exact run context without selecting or changing a global store. */
 export function readArchivedRunStateFromDirectory(path: string): ArchivedRunStateRead {
-  const parsed = hydrateRunProjection(path, JSON.parse(
-    readFileSync(join(path, 'run.json'), 'utf-8'),
-  ) as ArchivedStoreState);
+  const parsed = hydrateRunProjection(path, readRunSnapshot(path) as unknown as ArchivedStoreState);
   return { state: parsed, status: resolveRunStatus(parsed?.status) };
 }
 
@@ -1486,8 +1515,9 @@ export function readArchivedRunStateFromDirectory(path: string): ArchivedRunStat
  */
 export function readOperationalRunState(projectDir: string, runId: string): StoreState {
   const path = runDir(projectDir, runId);
-  const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as ArchivedStoreState;
+  const parsed = readRunSnapshot(path) as unknown as ArchivedStoreState;
   if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
+  projectRunLifecycle(path, parsed);
   parsed.status = requireKnownRunStatus(parsed.status, `read operational run state ${runId}`);
   if (parsed.runId !== runId) {
     throw new Error(`Run state id ${String(parsed.runId)} does not match target ${runId}`);
@@ -1510,6 +1540,13 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
   withRunStateLock(identity.directory, () => persistRunStateUnlocked(projectDir, identity.runId, state, undefined, identity.directory));
 }
 
+/** Accept a legacy continuation only after its existing admission checks pass. */
+export function importRunLifecycleForResume(projectDir: string, runId: string): void {
+  const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
+  assertSeparatedRunLayout(identity.directory);
+  withRunStateLock(identity.directory, () => importLegacyRunLifecycle(identity.directory));
+}
+
 export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState, persist: () => void) => void): StoreState {
   const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
   return updateRunStateInDirectory(projectDir, identity.runId, identity.directory, mutator, afterCommit);
@@ -1529,7 +1566,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
   return withRunStateLock(identity.directory, () => {
     const path = runRecordPath(identity.directory, 'run.json');
     const raw = readFileSync(path, 'utf8');
-    const previous = JSON.parse(raw) as StoreState;
+    const previous = projectRunLifecycle(identity.directory, JSON.parse(raw) as StoreState);
     const status = resolveRunStatus(previous.status);
     if (status.kind === 'known') previous.status = status.status;
     const state = structuredClone(previous);
@@ -1562,8 +1599,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
       }, JSON.parse(expected) as StoreState);
       expected = readFileSync(path, 'utf8');
     };
-    if (unchanged) observeRunStatusChange(identity.directory, identity.runId, state.status);
-    else persist();
+    if (!unchanged) persist();
     afterCommit?.(state, persist);
     return state;
   });

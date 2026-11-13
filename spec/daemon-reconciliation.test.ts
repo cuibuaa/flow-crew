@@ -181,7 +181,8 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     it.each(['binding', 'corruption', 'unknown-status', 'unreadable-binding', 'lock-replaced'])(
       `vetoes %s at recovery publication ${publication}`, kind => {
         const id = orphan();
-        const events = JSON.stringify({ type: 'stage_started', runId: id, stageId: 'work' }) + '\n';
+        const events = readFileSync(join(runsRoot(), id, 'events.jsonl'), 'utf8')
+          + JSON.stringify({ type: 'stage_started', runId: id, stageId: 'work' }) + '\n';
         writeFileSync(join(runsRoot(), id, 'events.jsonl'), events);
         const task = registry.create({ projectDir: project, brief_text: 'task', status: 'done' });
         const guarded = registry.withUnboundRun.bind(registry);

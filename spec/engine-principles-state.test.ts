@@ -1,7 +1,7 @@
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -266,7 +266,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     });
     const envelope: GuidanceEnvelope = { version: 1, id: 'guide_1', target: 'writer', source: 'supervisor', createdAt: observedAt, body: 'Repair the declared line.' };
     writeFileSync(runRecordPath(directory, 'supervisor_guidance.md'), renderGuidanceEnvelope(envelope));
-    writeFileSync(runRecordPath(directory, 'events.jsonl'), `${JSON.stringify({ runId, type: 'guidance_delivery_checked', stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, guidanceIds: ['guide_1'], delivered: true })}\n`);
+    appendFileSync(runRecordPath(directory, 'events.jsonl'), `${JSON.stringify({ runId, type: 'guidance_delivery_checked', stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, guidanceIds: ['guide_1'], delivered: true })}\n`);
     writeFileSync(runRecordPath(directory, 'verdict_audit.json'), JSON.stringify({ verdict: 'reject', findings: ['report line'] }));
 
     const consumers = ['planner', 'stage', 'supervisor', 'operator'].map(() => view());
@@ -326,6 +326,8 @@ describe('versioned run state and immutable invocation inputs', () => {
     writeFileSync(runRecordPath(directory, 'supervisor_guidance.md'), [queued, delivered, quarantined].map(renderGuidanceEnvelope).join('\n\n'));
     writeFileSync(runRecordPath(directory, 'events.jsonl'), `torn\u0000row\n${JSON.stringify({ runId, type: 'guidance_delivery_checked', guidanceIds: ['delivered'], delivered: true })}\n{"incomplete":`);
     const raw = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
+    // Unknown lifecycle text belongs to an undeclared historical snapshot.
+    delete raw.lifecycleAuthority; delete raw.lifecycleCursor;
     raw.status = 'archived-unrecognised-status';
     writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(raw));
     const snapshot = view();
@@ -382,7 +384,8 @@ describe('versioned run state and immutable invocation inputs', () => {
   });
 
   it.each([3, 11])('refuses a changing projection after %i caller-bounded retries', (maximumReadAttempts) => {
-    writeFileSync(runRecordPath(directory, 'events.jsonl'), '');
+    // Retain the admission fact; race the fenced binary read, independently
+    // of the extra text read used to fold lifecycle status.
     const source = `
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
@@ -393,7 +396,7 @@ describe('versioned run state and immutable invocation inputs', () => {
       let mutations = 0;
       fs.readFileSync = function(path, ...args) {
         const result = original.call(fs, path, ...args);
-        if (String(path) === ${JSON.stringify(runRecordPath(directory, 'events.jsonl'))}) {
+        if (String(path) === ${JSON.stringify(runRecordPath(directory, 'events.jsonl'))} && args.length === 0) {
           const statePath = ${JSON.stringify(runRecordPath(directory, 'run.json'))};
           const state = JSON.parse(original.call(fs, statePath, 'utf8'));
           state.currentIteration = ++mutations;

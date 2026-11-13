@@ -1,5 +1,6 @@
-import { closeSync, openSync, writeSync } from './engine-fs.js';
+import { closeSync, openSync, writeSync, fsyncSync, syncDirectory } from './engine-fs.js';
 import { fstatSync, readSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 /**
  * Append one complete text record without joining it to bytes left by a torn
@@ -8,6 +9,22 @@ import { fstatSync, readSync } from 'node:fs';
  * emitted together through the append descriptor.
  */
 export function appendTextRecord(path: string, record: string): void {
+  append(path, record, false);
+}
+
+/** Lifecycle transitions alone pay for stable file bytes and directory entries.
+ * Sync the directory on retries too: an earlier first-create sync may have failed. */
+export function appendDurableTextRecord(path: string, record: string): void {
+  append(path, record, true);
+}
+
+export function flushTextRecords(path: string): void {
+  const descriptor = openSync(path, 'r');
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  syncDirectory(dirname(path));
+}
+
+function append(path: string, record: string, durable: boolean): void {
   const descriptor = openSync(path, 'a+');
   try {
     const size = fstatSync(descriptor).size;
@@ -25,7 +42,11 @@ export function appendTextRecord(path: string, record: string): void {
       if (count <= 0) throw new Error(`Append made no progress for ${path}`);
       written += count;
     }
+    if (durable) fsyncSync(descriptor);
   } finally {
     closeSync(descriptor);
+  }
+  if (durable) {
+    syncDirectory(dirname(path));
   }
 }

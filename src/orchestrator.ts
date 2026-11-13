@@ -1,4 +1,5 @@
 import { gitAsync, rethrowGitNotAnswered } from './git-facts.js';
+import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { runRecordPath } from './run-layout.js';
 import { mkdirSync } from './engine-fs.js';
@@ -812,7 +813,7 @@ export class Orchestrator {
     try {
       const identity = resolveRunIdentity(this.boundRunPath(task.run_id), isAbsolute(task.run_id) ? undefined : runsRoot());
       const path = identity.directory;
-      const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as {
+      const parsed = projectRunLifecycle(path, readRunSnapshot(path)) as {
         runId?: unknown;
         status?: unknown;
         failureReason?: unknown;

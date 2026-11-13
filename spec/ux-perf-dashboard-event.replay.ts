@@ -1,7 +1,7 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
@@ -49,7 +49,7 @@ describe('reality-gate run-detail evidence replay', () => {
       attempts: [{ index: 2, status: 'running', startedAt: '2026-09-03T10:01:00.000Z' }],
     };
     writeRunState(projectDir, created.runId, state);
-    writeFileSync(runRecordPath(join(fcGlobalDir(), 'runs', created.runId), 'events.jsonl'), `${JSON.stringify({
+    appendFileSync(runRecordPath(join(fcGlobalDir(), 'runs', created.runId), 'events.jsonl'), `${JSON.stringify({
       type: 'admission_rejected',
       runId: created.runId,
       timestamp: '2026-09-03T10:01:30.000Z',
@@ -64,14 +64,14 @@ describe('reality-gate run-detail evidence replay', () => {
     const response = await app.inject({ method: 'GET', url: `/api/runs/${created.runId}` });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      events: [{
+      events: expect.arrayContaining([expect.objectContaining({
         type: 'admission_rejected',
         stageId: 'implement',
         attemptIndex: 2,
         requestId: 'proposal-17',
         decision: 'rejected',
         detail: 'request path digest did not match the active execution',
-      }],
+      })]),
       operational: {
         runStatus: 'running',
         activeStages: [expect.objectContaining({ id: 'implement', execution: 2 })],

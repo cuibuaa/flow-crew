@@ -20,7 +20,7 @@ import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/id
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, isTerminalRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, isTerminalRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState, withRunStateLock, importRunLifecycleForResume } from '../../store.js';
 import { atomicWrite, mkdirSync, rmSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { deploymentHeld } from '../../deployment-hold.js';
@@ -60,6 +60,7 @@ export function prepareWorkflowLaunch(
     const archived = readRunState(projectDir, existingRunId);
     requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
     assertSeparatedRunLayout(runDir(projectDir, existingRunId));
+    withRunStateLock(runDir(projectDir, existingRunId), () => {});
     launchState = archived;
     const directory = runDir(projectDir, existingRunId);
     briefWasAdmitted = Boolean(archived.taskDescription || archived.briefAdmission
@@ -140,6 +141,7 @@ export function prepareWorkflowLaunch(
       if (archived.status === RUN_STATUS.RUNNING && dispatched) {
         const owner = inspectRunScheduler(runId, runDirPath);
         if (owner.kind !== 'dead' && owner.kind !== 'missing' && owner.kind !== 'reused') throw new Error(`RECOVERY_FATE_UNKNOWN: scheduler identity is ${owner.kind}; exclude a live or unverifiable owner before reconciliation`);
+        importRunLifecycleForResume(projectDir, runId);
         archived = reconcileHostInterruptedRun(projectDir, runId);
         if (isPausedRunStatus(archived.status)) launchState = archived;
       }
@@ -169,6 +171,7 @@ export function prepareWorkflowLaunch(
       return { kind: 'settled', state: blocked };
     }
     launchIntentOwned = true;
+    if (hasRunState) importRunLifecycleForResume(projectDir, runId);
     if (reservation) {
       initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
       const state = readRunState(projectDir, runId);

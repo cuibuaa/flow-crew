@@ -1,3 +1,6 @@
+import { projectRunLifecycle } from './run-lifecycle.js';
+import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
+import { resolveRunStatus } from './lifecycle-status.js';
 import type { LockWait } from './lock-publication.js';
 import { readRunLockWaits } from './run-lock.js';
 import { projectValidationResult } from './project-validation.js';
@@ -427,7 +430,13 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     const runDirectory = realpathSync(runDir(projectDir, runId));
     const path = (value: string) => recordCarrierPath(runDirectory, value);
     const raw = fence.read(path('run.json'));
-    if (raw === undefined) throw new RunStateViewError('STATE_RUN_ABSENT', `run ${runId} has no run.json`);
+    if (raw === undefined) {
+      // A declared admission may have a durable first event before run.json.
+      const admission = fence.read(path('.run-reservation.json'));
+      if (!admission || !hasLifecycleAuthority(JSON.parse(admission))) {
+        throw new RunStateViewError('STATE_RUN_ABSENT', `run ${runId} has no run.json`);
+      }
+    }
     const archived = readArchivedRunState(projectDir, runId);
     const state = archived.state as QueryableStoreState;
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new RunStateViewError('STATE_RUN_BINDING', 'run identity/project differs from the requested view');
@@ -441,6 +450,8 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     ];
     for (const declaration of declarations) artifacts.push({ declaration, existence: fence.watchValue(() => observeArtifact(projectDir, runDirectory, declaration)) });
     const eventRaw = fence.read(path('events.jsonl'));
+    projectRunLifecycle(runDirectory, state, () => eventRaw ?? '');
+    archived.status = resolveRunStatus(state.status);
     const rows: Array<Record<string, unknown>> = [];
     const parsedEvents = parseJsonlWithDiagnostics<unknown>(eventRaw ?? '');
     let malformedRecords = parsedEvents.unreadableRecords;
@@ -536,7 +547,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     const view: RunStateView = {
       version: 1, observedAt,
       lockWaits: readRunLockWaits(projectDir, runDirectory),
-      snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
+      snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw ?? ''), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
       run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason, writeGrant: state.writeGrant ?? legacyWriteGrant() },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },
       ...(state.validation ? { validation: state.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) } : {}),

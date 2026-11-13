@@ -1,4 +1,5 @@
 import { rethrowGitNotAnswered } from './git-facts.js';
+import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { readProtocolResearchRecord } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { normalizeNativeEvent } from './adapters/native-events.js';
@@ -331,8 +332,9 @@ function editableCampaignRuns(projectDir: string, campaignId: string): { runId: 
   return runs;
 }
 
-function summarizeRunOutcome(status?: string): string {
-  return status === undefined ? 'unknown' : dashboardRunPresentation(status).campaignOutcome;
+function summarizeRunOutcome(state: StoreState): string {
+  if (hasLifecycleAuthority(state)) return state.status;
+  return state.status === undefined ? 'unknown' : dashboardRunPresentation(state.status).campaignOutcome;
 }
 
 /** True when the run has a generated summary.md the dashboard can display. */
@@ -341,7 +343,7 @@ function runHasSummary(runId: string): boolean {
 }
 
 function runSummaryFromState(state: StoreState): CampaignRunSummary {
-  return { id: state.runId, outcome: summarizeRunOutcome(state.status) };
+  return { id: state.runId, outcome: summarizeRunOutcome(state) };
 }
 
 type CampaignRunSummary = { id: string; outcome: string };
@@ -418,7 +420,7 @@ function readStandaloneRuns(projectDir: string): { runs: StandaloneRunSummary[];
         projectDir: state.projectDir.split(/[\\/]/).filter(Boolean).at(-1) ?? state.projectDir,
         summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 80),
         duration: formatDuration(state.startedAt, state.completedAt),
-        outcome: summarizeRunOutcome(state.status),
+        outcome: summarizeRunOutcome(state),
         hasSummary: runHasSummary(state.runId),
       });
     }
@@ -1325,8 +1327,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     return result.runs;
   });
 
-  // ===================== Agent endpoints =====================
-
+  // ===================== Agent endpoints ==============
   // 8. GET /api/agents
   app.get("/api/agents", async () => {
     try {

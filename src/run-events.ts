@@ -1,12 +1,10 @@
 import { runRecordPath } from './run-layout.js';
-import { atomicWrite } from './engine-fs.js';
-import { existsSync, readFileSync } from 'node:fs';
 import { appendTextRecord } from './append-boundary.js';
-import { readJsonlFile, readOptionalJsonlFile, type JsonlReadCursor } from './jsonl.js';
+import { readJsonlFile, type JsonlReadCursor } from './jsonl.js';
 import type { AttemptDisposition, StageAttempt, StageStatus, StoreState } from './store.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
-import { isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
+import { isSettledStageStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
   | 'decision_chosen' | 'decision_defaulted' | 'decision_refused'
@@ -31,6 +29,7 @@ export type RunEventType =
   | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
+  | 'run_status_imported'
   | 'operator_wrap_up_required'
   | 'stage_complete'
   | 'stage_failed'
@@ -98,7 +97,11 @@ export interface RunEvent {
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';
   runStatus?: StoreState['status'];
   gate?: StageStatus['gate'];
-  /** Stable identity for retrying one cursor transition without duplicate events. */
+  lifecycleVersion?: 1;
+  wrapUpRequired?: true;
+  snapshotSource?: 'run.json';
+  snapshotStatus?: unknown;
+  /** Identity shared by a lifecycle decision and its wrap-up notice. */
   observationId?: string;
 }
 
@@ -124,6 +127,7 @@ function eventsPath(projectDir: string, runId: string): string {
 
 export function appendRunEvent(projectDir: string, runId: string, event: RunEvent): void {
   requireRunArtifactDirectory(projectDir, runId);
+  requireNonLifecycleEvent(event);
   appendTextRecord(eventsPath(projectDir, runId), JSON.stringify(event));
 }
 
@@ -132,64 +136,20 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
  * project root from an arbitrary run path. */
 export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): void {
   requireExistingRunArtifactDirectory(runDirectory);
+  requireNonLifecycleEvent(event);
   appendTextRecord(runRecordPath(runDirectory, 'events.jsonl'), JSON.stringify(event));
+}
+
+function requireNonLifecycleEvent(event: RunEvent): void {
+  if (event.type === 'run_status_changed' || event.type === 'run_status_imported') {
+    throw new Error('Lifecycle events require the locked durable publication boundary');
+  }
 }
 
 export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlReadCursor): RunEvent[] {
   try {
     return readJsonlFile<RunEvent>(eventsPath(projectDir, runId), cursor);
   } catch { /* no events file yet */
-    return [];
-  }
-}
-
-export function observeRunStatusChange(directory: string, runId: string, status: StoreState['status']): RunEvent[] {
-  const cursorPath = runRecordPath(directory, 'run_event_status.json');
-  let committing = false;
-  try {
-    const cursor = existsSync(cursorPath)
-      ? JSON.parse(readFileSync(cursorPath, 'utf-8')) as {
-        status?: StoreState['status'];
-        observedAt?: string;
-      }
-      : undefined;
-    const prior = cursor?.status;
-    if (prior === status) return [];
-    const observationId = `${cursor?.observedAt ?? 'initial'}:${String(prior ?? 'unobserved')}->${String(status)}`;
-    const recorded = readOptionalJsonlFile<RunEvent>(runRecordPath(directory, 'events.jsonl'));
-    const timestamp = recorded.find((event) => event.observationId === observationId)?.timestamp
-      ?? new Date().toISOString();
-    const events: RunEvent[] = [{
-      type: 'run_status_changed', runId, timestamp, runStatus: status,
-      detail: `run status ${prior === undefined ? 'initialized' : `changed from ${prior}`} to ${status}`,
-      source: 'scheduler',
-      observationId,
-    }];
-    if (isTerminalRunStatus(status) && !isTerminalRunStatus(prior)) {
-      events.push({
-        type: 'operator_wrap_up_required',
-        runId,
-        timestamp,
-        runStatus: status,
-        detail: `run reached terminal status ${status}; any linked open fc_tasks entry requires human wrap-up and explicit completion; terminal state is not acceptance`,
-        level: 'warning',
-        source: 'scheduler',
-        observationId,
-      });
-    }
-    const recordedTypes = new Set(recorded
-      .filter((event) => event.observationId === observationId)
-      .map((event) => event.type));
-    committing = true;
-    for (const event of events) {
-      if (!recordedTypes.has(event.type)) appendRunEventAtRunDir(directory, event);
-    }
-    // The cursor is a commit record for the complete event set. It advances
-    // only after every obligation it represents is durably appended.
-    atomicWrite(cursorPath, `${JSON.stringify({ version: 1, status, observedAt: timestamp }, null, 2)}\n`);
-    return events;
-  } catch (error) {
-    if (committing) throw error;
     return [];
   }
 }

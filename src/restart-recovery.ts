@@ -9,7 +9,7 @@ import { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { processLiveness, processStartToken, type ProcessStartToken } from './process-liveness.js';
 
-import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
+import { RUN_STATUS, STAGE_STATUS, withRunStateLock, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { concludeRun, reconcileResearchConclusion } from './scheduler/sched_policy/run-completion.js';
 import { planDigest } from './plan-revisions.js';
@@ -105,6 +105,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
+  withRunStateLock(join(runsRoot(projectDir), runId), () => {});
   let state = readRunState(projectDir, runId);
   if (state.status !== RUN_STATUS.RUNNING) return state.research?.protocol === RESEARCH_PROTOCOL ? reconcileResearchConclusion(projectDir, runId) : state;
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: state is not bound to this run/project');

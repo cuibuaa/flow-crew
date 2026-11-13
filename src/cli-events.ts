@@ -1,8 +1,9 @@
+import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { runRecordPath } from './run-layout.js';
 import { parseJsonl } from './jsonl.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { closeSync, openSync } from './engine-fs.js';
-import { existsSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { listOperationalRunIdsFromIndex } from './run-index.js';
 import { isRunningRunStatus } from './lifecycle-status.js';
@@ -364,8 +365,9 @@ export function readOperationalProjection(
 ): OperationalProjection {
   let state = options.state;
   if (!state) {
-    try { state = JSON.parse(readFileSync(runRecordPath(runDirectory, 'run.json'), 'utf-8')) as OperationalRunState; } catch { /* reported below */ }
+    try { state = readRunSnapshot(runDirectory) as OperationalRunState; } catch { /* reported below */ }
   }
+  if (state) state = projectRunLifecycle(runDirectory, { ...state });
   let events: EventLike[] = [];
   let eventsCoverage: OperationalProjection['sourceCoverage']['events'] = 'missing';
   try {
@@ -451,7 +453,8 @@ export function eventsUsage(): string {
 
 function readRunStateForSelection(runRoot: string, runId: string): OperationalRunState | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runRoot, runId, 'run.json'), 'utf-8')) as unknown;
+    const directory = join(runRoot, runId);
+    const parsed = projectRunLifecycle(directory, readRunSnapshot(directory));
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as OperationalRunState : undefined;
   } catch {
     return undefined;

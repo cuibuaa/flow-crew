@@ -56,12 +56,12 @@ vi.mock('../src/append-boundary.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/append-boundary.js')>();
   return {
     ...actual,
-    appendTextRecord(path: string, record: string) {
+    appendDurableTextRecord(path: string, record: string) {
       if (path === appendFault.eventPath && appendFault.remaining > 0 && record.includes(appendFault.needle)) {
         appendFault.remaining -= 1;
         throw new Error('injected obligation append failure');
       }
-      return actual.appendTextRecord(path, record);
+      return actual.appendDurableTextRecord(path, record);
     },
   };
 });
@@ -497,57 +497,44 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it.each(['snapshot', 'stopped snapshot', 'operational'] as const)('9 — commits the cursor after retryably appending every obligation exactly once (%s)', async kind => {
+  it.each(['snapshot', 'stopped snapshot', 'operational'] as const)('9 — durably records the complete lifecycle batch before either cache (%s)', async kind => {
     const root = temporaryRoot('item-9');
     const projectDir = join(root, 'project');
     const stateRoot = join(root, 'state');
     mkdirSync(projectDir, { recursive: true });
     setFcGlobalDir(stateRoot);
     const created = createRun(projectDir, 'cursor-fixture', 'name: cursor-fixture', []);
-    let state = readRunState(projectDir, created.runId);
+    const state = readRunState(projectDir, created.runId);
     state.status = kind === 'stopped snapshot' ? RUN_STATUS.CANCELLED : RUN_STATUS.COMPLETE;
     state.completedAt = new Date().toISOString();
-    writeRunState(projectDir, created.runId, state);
-    state = readRunState(projectDir, created.runId);
-    // Isolate the interrupted observation from createRun/publication history.
-    write(runRecordPath(created.runDirPath, 'events.jsonl'), '');
     const cursorPath = runRecordPath(created.runDirPath, 'run_event_status.json');
-    write(cursorPath, `${JSON.stringify({
-      version: 1, status: RUN_STATUS.RUNNING, observedAt: new Date(0).toISOString(),
-    })}\n`);
-
+    const logBefore = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8');
+    const snapshotBefore = readFileSync(join(created.runDirPath, 'run.json'), 'utf8');
     vi.resetModules();
     const isolatedStore = await import('../src/store.js');
     isolatedStore.setFcGlobalDir(stateRoot);
     const isolatedEvents = await import('../src/run-events.js');
-    appendFault.eventPath = runRecordPath(created.runDirPath, 'events.jsonl');
+    appendFault.eventPath = join(created.runDirPath, 'events.jsonl');
     appendFault.needle = '"type":"operator_wrap_up_required"';
     appendFault.remaining = 1;
     const publish = () => kind === 'operational'
-      ? isolatedStore.updateOperationalRunStateAtPath(created.runDirPath, () => {})
+      ? isolatedStore.updateOperationalRunStateAtPath(created.runDirPath, current => { current.status = state.status; current.completedAt = state.completedAt; })
       : isolatedStore.writeRunState(projectDir, created.runId, state);
-    expect(publish)
-      .toThrow('injected obligation append failure');
-    const cursorAfterFailure = JSON.parse(readFileSync(cursorPath, 'utf-8')) as { status: string };
-    const failureEvents = isolatedEvents.readRunEvents(projectDir, created.runId);
+    expect(publish).toThrow('injected obligation append failure');
+    expect(readFileSync(join(created.runDirPath, 'run.json'), 'utf8')).toBe(snapshotBefore);
+    expect(readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8')).toBe(logBefore);
+    const cursorAfterFailure = JSON.parse(readFileSync(cursorPath, 'utf8'));
     expect(cursorAfterFailure.status).toBe(RUN_STATUS.RUNNING);
-    expect(failureEvents.map(({ type }) => type)).toEqual(['run_status_changed']);
-    const interruptedObservationId = failureEvents[0].observationId;
-    expect(interruptedObservationId).toBe(`${new Date(0).toISOString()}:running->${state.status}`);
-
     appendFault.remaining = 0;
-    publish();
-    publish();
-    const retryEvents = isolatedEvents.readRunEvents(projectDir, created.runId);
+    publish(); publish();
+    const retryEvents = isolatedEvents.readRunEvents(projectDir, created.runId).filter(event => event.runStatus === state.status);
     expect(retryEvents.filter(({ type }) => type === 'run_status_changed')).toHaveLength(1);
     expect(retryEvents.filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(1);
-    expect(retryEvents.every(({ observationId }) => observationId === interruptedObservationId)).toBe(true);
+    expect(new Set(retryEvents.map(({ observationId }) => observationId)).size).toBe(1);
     expect(new Set(retryEvents.map(({ timestamp }) => timestamp)).size).toBe(1);
-    expect(JSON.parse(readFileSync(cursorPath, 'utf-8'))).toMatchObject({ status: state.status });
-    recordAfter(9, 'append the status event, inject the wrap-up obligation failure, retry, then observe the unchanged status again', {
+    expect(JSON.parse(readFileSync(cursorPath, 'utf8'))).toMatchObject({ status: state.status });
+    recordAfter(9, 'fail a lifecycle batch before append, retry it, then repeat the unchanged writer', {
       cursorAfterFailure,
-      eventTypesAfterFailure: failureEvents.map(({ type }) => type),
-      cursorAfterRetry: JSON.parse(readFileSync(cursorPath, 'utf-8')),
       eventTypesAfterRetryAndRepeat: retryEvents.map(({ type }) => type),
       statusEventCount: retryEvents.filter(({ type }) => type === 'run_status_changed').length,
       obligationCount: retryEvents.filter(({ type }) => type === 'operator_wrap_up_required').length,

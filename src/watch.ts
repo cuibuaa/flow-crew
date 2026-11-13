@@ -1,3 +1,4 @@
+import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { runRecordPath } from './run-layout.js';
 import { projectValidationResult } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
@@ -745,7 +746,8 @@ export function pollWatch(
     const runDir = join(deps.runsRoot, runId);
     let state: JsonObject | undefined;
     try {
-      state = parseObject(deps.readText(runRecordPath(runDir, 'run.json')));
+      state = readRunSnapshot(runDir, deps.readText);
+      if (state) projectRunLifecycle(runDir, state, deps.readText);
     } catch {
       state = undefined;
     }

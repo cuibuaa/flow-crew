@@ -32,9 +32,9 @@ import {
 import { RUN_STATUS, TASK_STATUS, isTerminalRunStatus } from '../src/lifecycle-status.js';
 import {
   readRunEvents,
-  observeRunStatusChange,
 } from '../src/run-events.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { recordRunLifecycle } from '../src/run-lifecycle.js';
+import { withRunStateLock, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 class Capture {
   output = '';
@@ -458,13 +458,15 @@ describe('durable wrap-up obligation', () => {
             observedAt: '2030-01-01T00:00:00.000Z',
           })}\n`, 'utf-8');
         }
-        observeRunStatusChange(runDirectory, runId, next);
-        observeRunStatusChange(runDirectory, runId, next);
+        withRunStateLock(runDirectory, () => {
+          recordRunLifecycle(runDirectory, { runId, status: next }, prior === undefined ? undefined : { runId, status: prior });
+          recordRunLifecycle(runDirectory, { runId, status: next }, { runId, status: next });
+        });
         const events = readRunEvents(root, runId);
         const transitions = events.filter(({ type }) => type === 'run_status_changed');
         expect(transitions).toHaveLength(prior === next ? 0 : 1);
         if (prior !== next) {
-          expect(transitions[0].observationId).toBe(`${prior === undefined ? 'initial' : '2030-01-01T00:00:00.000Z'}:${prior ?? 'unobserved'}->${next}`);
+          expect(transitions[0].observationId).toBe('lifecycle:1');
           expect(events.every(({ observationId }) => observationId === transitions[0].observationId)).toBe(true);
         }
         const obligations = events.filter(({ type }) => type === 'operator_wrap_up_required');
@@ -496,7 +498,8 @@ describe('durable wrap-up obligation', () => {
     });
 
     const positiveRunId = basename(positiveRunDirectory);
-    observeRunStatusChange(positiveRunDirectory, positiveRunId, RUN_STATUS.COMPLETE);
+    withRunStateLock(positiveRunDirectory, () => recordRunLifecycle(positiveRunDirectory,
+      { runId: positiveRunId, status: RUN_STATUS.COMPLETE }, { runId: positiveRunId, status: RUN_STATUS.COMPLETE }));
     expect(readRunEvents(root, positiveRunId)
       .filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(1);
   });
@@ -510,7 +513,8 @@ describe('explicit successful wrap-up closes one exact entry', () => {
       status: RUN_STATUS.RUNNING,
       observedAt: '2030-01-01T00:00:00.000Z',
     })}\n`, 'utf-8');
-    observeRunStatusChange(join(fixture.engineRoot, 'runs', fixture.runId), fixture.runId, RUN_STATUS.COMPLETE);
+    withRunStateLock(fixture.runDirectory, () => recordRunLifecycle(fixture.runDirectory,
+      { runId: fixture.runId, status: RUN_STATUS.COMPLETE }, { runId: fixture.runId, status: RUN_STATUS.RUNNING }));
 
     expect(ledgerEntry(fixture).status).toBe('in_progress');
 

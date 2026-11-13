@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { readRunLockWaits } from './run-lock.js';
 import { GitNotAnswered, gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { readResearchHistory, readProtocolResearchRecord } from './research-history.js';
@@ -1422,7 +1423,13 @@ async function cmdQuick(preview = false) {
 function runIdsByRecency(root: string): string[] {
   return readdirSync(root)
     .map((id) => {
-      try { return { id, mtime: statSync(join(root, id, 'run.json')).mtimeMs }; }
+      try {
+        const directory = join(root, id);
+        readRunSnapshot(directory);
+        const mtime = existsSync(join(directory, 'run.json')) ? statSync(join(directory, 'run.json')).mtimeMs
+          : statSync(join(directory, 'engine', '.run-reservation.json')).mtimeMs;
+        return { id, mtime };
+      }
       catch { return null; }
     })
     .filter((x): x is { id: string; mtime: number } => x !== null)
@@ -1477,6 +1484,7 @@ interface StatusRun {
   historyError?: string;
   state: {
     writeGrant?: import('./write-grant.js').WriteGrantContract;
+    workflowName?: string;
     projectDir?: string;
     taskDescription?: string;
     status?: string;
@@ -1518,7 +1526,7 @@ function latestStatusRun(root: string, runIds: string[], selection: StatusSelect
   for (const id of runIds) {
     const directory = join(root, id);
     try {
-      const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StatusRun['state'];
+      const state = projectRunLifecycle(directory, readRunSnapshot(directory) as StatusRun['state']);
       const matchesProject = typeof state.projectDir === 'string'
         && canonicalProjectPath(state.projectDir) === selection.projectDir;
       if (selection.all || matchesProject) {
@@ -1606,14 +1614,14 @@ function cmdList() {
   console.log('  ' + '─'.repeat(75));
   for (const runId of runs) {
     try {
-      const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8'));
+      const state = projectRunLifecycle(join(root, runId), readRunSnapshot(join(root, runId))) as StatusRun['state'];
       const mismatch = terminalArtifactStatusMismatch(state, { runDir: join(root, runId) });
       const statusResolution = resolveRunStatus(state.status);
       const lifecycle = statusResolution.kind === 'unknown'
         ? `? unrecognized ${statusResolution.display}`
         : CLI_RUN_STATUS_PRESENTATION[statusResolution.status].listLabel;
       const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
-      const startMs = new Date(state.startedAt).getTime();
+      const startMs = new Date(state.startedAt ?? '').getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
       const duration = formatHumanDuration(endMs - startMs).padEnd(8);
       const taskDesc = (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 40);
