@@ -482,7 +482,7 @@ export class RunCancellationCoordinator {
     const launchIntent = latestRun
       ? null
       : target.task
-        ? readLaunchIntent(target.task.projectDir, undefined, this.clockMs())
+        ? readLaunchIntent(target.task.projectDir)
         : null;
     let activeCommandPids: number[] = [];
     let commandFateKnown = false;

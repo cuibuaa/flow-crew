@@ -993,13 +993,13 @@ describe('Orchestrator', () => {
 
     const bound = registry.get(1);
     expect(bound?.run_id).toBeTruthy();
-    expect(readRunReservation(tempDir, bound!.run_id!, clock)).toMatchObject({ runId: bound!.run_id });
+    expect(readRunReservation(tempDir, bound!.run_id!)).toMatchObject({ runId: bound!.run_id });
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${bound!.run_id}'`);
     expect(systemd.runs[0].command).not.toContain('caller-must-not-win');
 
     initializeReservedRun(tempDir, bound!.run_id!, 'test', 'name: test', []);
     expect(readRunState(tempDir, bound!.run_id!).status).toBe('running');
-    expect(readRunReservation(tempDir, bound!.run_id!, clock)).toBeUndefined();
+    expect(readRunReservation(tempDir, bound!.run_id!)).toBeUndefined();
     release();
     await registering;
   });
@@ -1011,7 +1011,7 @@ describe('Orchestrator', () => {
     });
 
     expect(task.run_id).toBeTruthy();
-    expect(readRunReservation(tempDir, task.run_id!, clock)).toMatchObject({ runId: task.run_id });
+    expect(readRunReservation(tempDir, task.run_id!)).toMatchObject({ runId: task.run_id });
     expect(systemd.runs).toHaveLength(1);
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${task.run_id}'`);
 
@@ -1150,7 +1150,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(systemd.runs).toHaveLength(0);
   });
 
-  it('honors a cross-instance launch intent before run.json exists, then releases it after TTL', async () => {
+  it('honors a cross-instance launch intent until its owner explicitly releases it', async () => {
     expect(claimLaunchIntent(tempDir, 'other-path-run', clock).claimed).toBe(true);
     const secondInstance = new Orchestrator({
       registry, systemd, git, cliPath: '/tmp/flowcrew-cli.js',
@@ -1165,7 +1165,11 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(systemd.runs).toHaveLength(0);
 
     advance(61_000);
-    const afterTtl = await secondInstance.register({ ...admittedBrief('after ttl'), projectDir: tempDir });
+    const stillBlocked = await secondInstance.register({ ...admittedBrief('slow launcher'), projectDir: tempDir });
+    expect(stillBlocked.status).toBe('deferred');
+    expect(systemd.runs).toHaveLength(0);
+    releaseLaunchIntent(tempDir, 'other-path-run');
+    const afterTtl = await secondInstance.register({ ...admittedBrief('after release'), projectDir: tempDir });
     expect(afterTtl.status).toBe('running');
     expect(systemd.runs).toHaveLength(1);
     releaseLaunchIntent(tempDir, afterTtl.run_id!);

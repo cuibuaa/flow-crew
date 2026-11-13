@@ -25,7 +25,7 @@ describe('acceptance re-evaluation: latest phase completion arbitration', () => 
       phaseEntry({ seq: 30, phase: 'phase-three', phaseComplete: true }),
       phaseEntry({ seq: 10, phase: 'phase-one', phaseComplete: true, nextPhase: 'phase-two' }),
       phaseEntry({ seq: 20, phase: 'phase-two', phaseComplete: true, nextPhase: 'phase-three' }),
-    ], NOW);
+    ]);
 
     expect(selection.recommendedPhase).toBeUndefined();
     expect(formatCampaignContextBlock({ campaignLabel: 'unordered-chain', selection })).toBe('');
@@ -49,7 +49,7 @@ describe('acceptance re-evaluation: latest phase completion arbitration', () => 
         phaseComplete: true,
         nextPhase: '   ',
       }),
-    ], NOW);
+    ]);
 
     expect(selection.recommendedPhase).toBeUndefined();
     expect(formatCampaignContextBlock({ campaignLabel: 'timestamp-tie', selection })).toBe('');
@@ -60,7 +60,7 @@ describe('acceptance re-evaluation: latest phase completion arbitration', () => 
       phaseEntry({ seq: 1, phase: 'phase-one', phaseComplete: true, nextPhase: 'phase-two' }),
       phaseEntry({ seq: 2, phase: 'phase-two', phaseComplete: true }),
       phaseEntry({ seq: 3, phase: 'phase-three', phaseComplete: false }),
-    ], NOW);
+    ]);
     const context = formatCampaignContextBlock({ campaignLabel: 'reopened-chain', selection });
 
     expect(selection.recommendedPhase).toBe('phase-three');

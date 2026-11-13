@@ -27,14 +27,13 @@ export { processIsAlive, processStartToken, processStartTokensMatch, type Proces
  * Its resume process becomes visible as soon as it claims scheduler.pid, before
  * the durable status flips back to running, so the hand-off remains guarded.
  */
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fcGlobalDir, runsRoot, updateRunState, withRunStateLock, readGlobalLockWaits, RUN_STATE_LOCK_FILE } from './store.js';
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 import { canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
-export const LAUNCH_INTENT_TTL_MS = 60_000;
 
 export interface LaunchIntent {
   version: 1;
@@ -66,60 +65,30 @@ export function readRunLockWaits(projectDir: string | undefined, directory: stri
     ...(projectDir ? readLockWaits(runRecordPath(projectOwnershipDirectory(projectDir), RUN_STATE_LOCK_FILE)) : [])];
 }
 
-/**
- * Read an unexpired cross-process launch claim. A fresh malformed claim is
- * treated as busy (fail closed); once its file age exceeds the TTL it is
- * discarded like any other abandoned launch.
- */
+/** A durable admission claim remains occupied until its matching owner releases
+ * it. Neither launcher death nor missing scheduler publication proves that a
+ * child was never launched. Unknown legacy publications retain ownership. */
 export function readLaunchIntent(
   projectDir: string,
   selfOwnerRunId?: string,
-  nowMs = Date.now(),
 ): LaunchIntent | null {
   if (selfOwnerRunId) selfOwnerRunId = canonicalRunId(runsRoot(), selfOwnerRunId);
   const path = launchIntentPath(projectDir);
-  let raw: unknown;
+  let parsed: Partial<LaunchIntent>;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf-8'));
-  } catch {
-    try {
-      if (nowMs - statSync(path).mtimeMs >= LAUNCH_INTENT_TTL_MS) unlinkSync(path);
-      else return {
-        version: 1,
-        projectDir: normalizedProjectDir(projectDir),
-        ownerRunId: 'unreadable-launch-intent',
-        claimedAt: new Date(statSync(path).mtimeMs).toISOString(),
-      };
-    } catch { /* missing or concurrently removed */ }
-    return null;
+    const raw: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    parsed = raw && typeof raw === 'object' ? raw as Partial<LaunchIntent> : {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    parsed = {};
   }
-  const parsed = raw && typeof raw === 'object' ? raw as Partial<LaunchIntent> : {};
-  const claimedAt = typeof parsed.claimedAt === 'string' ? Date.parse(parsed.claimedAt) : NaN;
-  const valid = parsed.version === 1
-    && parsed.projectDir === normalizedProjectDir(projectDir)
-    && typeof parsed.ownerRunId === 'string'
-    && parsed.ownerRunId.length > 0
-    && Number.isFinite(claimedAt);
-  if (!valid || claimedAt > nowMs + 5_000) {
-    try {
-      const mtimeMs = statSync(path).mtimeMs;
-      if (nowMs - mtimeMs < LAUNCH_INTENT_TTL_MS) {
-        return {
-          version: 1,
-          projectDir: normalizedProjectDir(projectDir),
-          ownerRunId: 'unreadable-launch-intent',
-          claimedAt: new Date(mtimeMs).toISOString(),
-        };
-      }
-    } catch { return null; }
-    try { unlinkSync(path); } catch { /* already removed */ }
-    return null;
+  if (parsed.version !== 1 || parsed.projectDir !== normalizedProjectDir(projectDir)
+    || typeof parsed.ownerRunId !== 'string' || !parsed.ownerRunId
+    || typeof parsed.claimedAt !== 'string' || !Number.isFinite(Date.parse(parsed.claimedAt))) {
+    return { version: 1, projectDir: normalizedProjectDir(projectDir),
+      ownerRunId: 'unreadable-launch-intent', claimedAt: '' };
   }
-  if (nowMs - claimedAt >= LAUNCH_INTENT_TTL_MS) {
-    try { unlinkSync(path); } catch { /* already removed */ }
-    return null;
-  }
-  if (canonicalRunId(runsRoot(), parsed.ownerRunId!) === selfOwnerRunId) return null;
+  if (canonicalRunId(runsRoot(), parsed.ownerRunId) === selfOwnerRunId) return null;
   return parsed as LaunchIntent;
 }
 
@@ -168,22 +137,11 @@ function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs
       return { claimed: true };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      try {
-        const existing = JSON.parse(readFileSync(path, 'utf-8')) as Partial<LaunchIntent>;
-        const existingAt = typeof existing.claimedAt === 'string' ? Date.parse(existing.claimedAt) : NaN;
-        if (
-          typeof existing.ownerRunId === 'string' && canonicalRunId(runsRoot(), existing.ownerRunId) === ownerRunId &&
-          existing.projectDir === normalized &&
-          Number.isFinite(existingAt) &&
-          existingAt <= nowMs + 5_000 &&
-          nowMs - existingAt < LAUNCH_INTENT_TTL_MS
-        ) {
-          return { claimed: true };
-        }
-      } catch { /* readLaunchIntent below handles malformed/stale claims */ }
-      const blocking = readLaunchIntent(normalized, ownerRunId, nowMs);
-      if (blocking) return { claimed: false, blockingOwnerRunId: blocking.ownerRunId };
-      // The prior claim expired and readLaunchIntent removed it; retry wx.
+      const blocking = readLaunchIntent(normalized);
+      if (!blocking) continue; // The matching owner released while we read.
+      if (Number.isFinite(Date.parse(blocking.claimedAt))
+        && canonicalRunId(runsRoot(), blocking.ownerRunId) === ownerRunId) return { claimed: true };
+      return { claimed: false, blockingOwnerRunId: blocking.ownerRunId };
     }
   }
   return { claimed: false, blockingOwnerRunId: 'launch-intent-race' };
@@ -643,8 +601,8 @@ export function invalidateRunLockCache(): void {
 }
 
 /** Daemon admission blocker: launch owner id, or live run id plus scheduler PID. */
-export function isProjectBusy(projectDir: string, selfOwnerRunId?: string, nowMs = Date.now()): string | null {
-  const intent = readLaunchIntent(projectDir, selfOwnerRunId, nowMs);
+export function isProjectBusy(projectDir: string, selfOwnerRunId?: string): string | null {
+  const intent = readLaunchIntent(projectDir, selfOwnerRunId);
   if (intent) return intent.ownerRunId;
   return activeRunsByProject().get(normalizedProjectDir(projectDir)) ?? null;
 }

@@ -54,7 +54,7 @@ describe('acceptance gate: campaign relevance boundaries', () => {
         phaseComplete: true,
         nextPhase: undefined,
       }),
-    ], FIXED_NOW);
+    ]);
 
     expect(selection.recommendedPhase).toBeUndefined();
     expect(formatCampaignContextBlock({ campaignLabel: 'finished-chain', selection })).toBe('');

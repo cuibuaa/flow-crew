@@ -35,7 +35,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, readRunLockWaits, LAUNCH_INTENT_TTL_MS } from '../src/run-lock.js';
+import { claimLaunchIntent, releaseLaunchIntent, withProjectWriteOwnership, readRunLockWaits } from '../src/run-lock.js';
 import { readEvidence, captureProjectTree, validationForTree } from '../src/evidence-ledger.js';
 import * as validationOwner from '../src/project-validation.js';
 import * as validationBoundary from '../src/scheduler/sched_settlement/gate-validation.js';
@@ -772,7 +772,7 @@ describe('terminal publication is separate and never recovered into project file
       await Promise.all(children.map(entry => entry.closed));
     }
   }, 30000);
-  it('excludes admission throughout a restoration even beyond the launch intent TTL', async () => {
+  it('excludes admission throughout a restoration regardless of elapsed time', async () => {
     const home = fcGlobalDir(), current = createRun(project, 'fixture', '', []), next = createRun(project, 'fixture', '', []);
     const unknownWrite = vi.fn(); expect(withProjectWriteOwnership(project, current.runDirPath, unknownWrite)).toBe(false);
     expect(unknownWrite).not.toHaveBeenCalled();
@@ -789,7 +789,7 @@ describe('terminal publication is separate and never recovered into project file
         setFcGlobalDir(${JSON.stringify(home)});
         const wait = Atomics.wait;
         Atomics.wait = (...args) => { fs.writeFileSync(${JSON.stringify(queued)}, 'queued'); return wait(...args); };
-        console.log(JSON.stringify(claimLaunchIntent(${JSON.stringify(project)}, ${JSON.stringify(next.runId)}, Date.now() + ${2 * LAUNCH_INTENT_TTL_MS})));
+        console.log(JSON.stringify(claimLaunchIntent(${JSON.stringify(project)}, ${JSON.stringify(next.runId)}, Date.now() + 120_000)));
       `], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: home } });
         closed = new Promise((resolve, reject) => { child!.once('error', reject); child!.once('close', resolve); });
         child.stdout!.on('data', data => { output += data; });

@@ -454,7 +454,7 @@ async function deployDaemon(
     markDeploymentStopping(hold);
     stopRequested = true;
     await controls.sendRpc(socketPath, { cmd: 'stop' });
-    if (!await waitForOwnerRelease(socketPath, previous.pid, controls, 40)) throw new Error('Held daemon did not release its socket');
+    await waitForOwnerRelease(socketPath, previous.pid, controls);
     step = 'build';
     stdout.write(`Building deployment checkout ${projectRoot}\n`);
     await controls.build(projectRoot);
@@ -746,20 +746,7 @@ async function stopOwnedDaemonAndStart(
     // authoritative stop result; no cmdline inference is involved.
   }
 
-  let released = await waitForOwnerRelease(socketPath, previousPid, controls, 40);
-  if (!released) {
-    const currentOwner = controls.findSocketOwnerPid(socketPath);
-    if (currentOwner !== previousPid) {
-      throw new Error(
-        `Refusing to signal daemon: socket ownership changed from pid=${previousPid} to pid=${currentOwner ?? 'none'}`,
-      );
-    }
-    controls.killProcess(previousPid, 'SIGTERM');
-    released = await waitForOwnerRelease(socketPath, previousPid, controls, 20);
-  }
-  if (!released) {
-    throw new Error(`Daemon pid=${previousPid}, identified from ${socketPath}, did not release its socket after stop and SIGTERM`);
-  }
+  await waitForOwnerRelease(socketPath, previousPid, controls);
   return startDetachedAndWait(socketPath, logPath, controls);
 }
 
@@ -767,17 +754,15 @@ async function waitForOwnerRelease(
   socketPath: string,
   expectedPid: number,
   controls: DaemonProcessControls,
-  attempts: number,
-): Promise<boolean> {
-  for (let i = 0; i < attempts; i++) {
+): Promise<void> {
+  for (;;) {
     const owner = controls.findSocketOwnerPid(socketPath);
-    if (owner === undefined) return true;
+    if (owner === undefined) return;
     if (owner !== expectedPid) {
       throw new Error(`Socket ${socketPath} changed ownership from pid=${expectedPid} to pid=${owner}; refusing restart`);
     }
     await controls.delay(100);
   }
-  return false;
 }
 
 async function startDetachedAndWait(

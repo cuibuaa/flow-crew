@@ -14,7 +14,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import {
-  CAMPAIGN_CONTEXT_MAX_AGE_MS,
   formatCampaignContextBlock,
   selectRelevantCampaignContext,
 } from '../src/campaign-context.js';
@@ -78,15 +77,15 @@ function writeCampaignEntries(entries: CampaignHistoryEntry[]): void {
 }
 
 describe('campaign context relevance selector', () => {
-  it('keeps the exact 30-day boundary and rejects older or invalid timestamps', () => {
-    const atBoundary = new Date(NOW - CAMPAIGN_CONTEXT_MAX_AGE_MS).toISOString();
+  it('retains old nonterminal history while rejecting malformed timestamps', () => {
+    const atBoundary = new Date(NOW - (30 * 24 * 60 * 60 * 1000)).toISOString();
     const selection = selectRelevantCampaignContext([
       historyEntry({ seq: 1, runId: 'boundary', timestamp: atBoundary }),
-      historyEntry({ seq: 2, runId: 'too-old', timestamp: new Date(NOW - CAMPAIGN_CONTEXT_MAX_AGE_MS - 1).toISOString() }),
+      historyEntry({ seq: 2, runId: 'too-old', timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 1).toISOString() }),
       historyEntry({ seq: 3, runId: 'invalid-time', timestamp: 'not-a-timestamp' }),
-    ], NOW);
+    ]);
 
-    expect(selection.entries.map((entry) => entry.runId)).toEqual(['boundary']);
+    expect(selection.entries.map((entry) => entry.runId)).toEqual(['boundary', 'too-old']);
   });
 
   it('drops every narrative row for terminal runs but keeps a fresh parked run', () => {
@@ -94,7 +93,7 @@ describe('campaign context relevance selector', () => {
       historyEntry({ seq: 1, runId: 'terminal-run', score: 9 }),
       historyEntry({ seq: 2, runId: 'terminal-run', kind: 'task_ended', score: undefined, metric: undefined, status: RUN_STATUS.COMPLETE }),
       historyEntry({ seq: 3, runId: 'parked-run', score: 4, status: RUN_STATUS.PARKED }),
-    ], NOW);
+    ]);
 
     expect(selection.entries.map((entry) => entry.runId)).toEqual(['parked-run']);
   });
@@ -110,7 +109,7 @@ describe('campaign context relevance selector', () => {
         reason: 'completion reason must not leak',
         artifactSummary: 'completion artifact must not leak',
       }),
-    ], NOW);
+    ]);
     const context = formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection });
 
     expect(selection.entries).toEqual([]);
@@ -122,7 +121,7 @@ describe('campaign context relevance selector', () => {
 
     const closedWithoutHandoff = selectRelevantCampaignContext([
       historyEntry({ phase: 'phase-one', phaseComplete: true, nextPhase: undefined }),
-    ], NOW);
+    ]);
     expect(formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection: closedWithoutHandoff })).toBe('');
   });
 
@@ -148,7 +147,7 @@ describe('campaign context relevance selector', () => {
         phaseComplete: true,
         nextPhase: undefined,
       }),
-    ], NOW);
+    ]);
 
     expect(selection.recommendedPhase).toBeUndefined();
     expect(selection.phaseEntries).toEqual([]);
@@ -160,7 +159,7 @@ describe('campaign context relevance selector', () => {
       historyEntry({ seq: 1, runId: 'r1', score: 5, phase: 'active-phase', phaseComplete: false }),
       historyEntry({ seq: 2, runId: 'r2', score: 5 }),
       historyEntry({ seq: 3, runId: 'r3', score: 5 }),
-    ], NOW);
+    ]);
     const alert = checkCampaignHealth(active.entries);
     const context = formatCampaignContextBlock({
       campaignLabel: CAMPAIGN_ID,
@@ -176,10 +175,11 @@ describe('campaign context relevance selector', () => {
     expect(context).not.toContain('CAMPAIGN ALERT: plateau');
 
     const stale = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, timestamp: new Date(NOW - CAMPAIGN_CONTEXT_MAX_AGE_MS - 1).toISOString() }),
-      historyEntry({ seq: 2, timestamp: new Date(NOW - CAMPAIGN_CONTEXT_MAX_AGE_MS - 2).toISOString() }),
-      historyEntry({ seq: 3, timestamp: new Date(NOW - CAMPAIGN_CONTEXT_MAX_AGE_MS - 3).toISOString() }),
-    ], NOW);
+      historyEntry({ seq: 1, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 1).toISOString() }),
+      historyEntry({ seq: 2, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 2).toISOString() }),
+      historyEntry({ seq: 3, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 3).toISOString() }),
+    ]);
+    expect(stale.entries).toHaveLength(3);
     expect(checkCampaignHealth(stale.entries)).toBeNull();
     expect(formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection: stale })).toBe('');
   });
@@ -387,7 +387,7 @@ describe('campaign review health without principal scores', () => {
   });
 
   it('uses measured failure evidence while allowing technical recovery and justified reproduction', () => {
-    const selection = selectRelevantCampaignContext([historyEntry()], NOW);
+    const selection = selectRelevantCampaignContext([historyEntry()]);
     const context = formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection,
       alert: { type: 'repeated_failure', message: 'Repeated reviews failed.' } });
     expect(context).toContain('Avoid repeating mechanisms disproven by measurements without new evidence');

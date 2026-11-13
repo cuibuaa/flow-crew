@@ -4,10 +4,8 @@ import {
 } from './campaigns.js';
 import { isTerminalRunStatus } from './store.js';
 
-export const CAMPAIGN_CONTEXT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-
 export interface CampaignContextSelection {
-  /** Fresh, non-terminal entries after completed-phase details are removed. */
+  /** Non-terminal entries after completed-phase details are removed. */
   entries: CampaignHistoryEntry[];
   phaseEntries: CampaignHistoryEntry[];
   latestPhaseEntry?: CampaignHistoryEntry;
@@ -33,11 +31,6 @@ function cleanPhase(value: string | undefined): string | undefined {
   return phase || undefined;
 }
 
-function isFresh(entry: CampaignHistoryEntry, nowMs: number): boolean {
-  const timestampMs = Date.parse(entry.timestamp);
-  return Number.isFinite(timestampMs) && timestampMs >= nowMs - CAMPAIGN_CONTEXT_MAX_AGE_MS;
-}
-
 function isPhaseEntry(entry: CampaignHistoryEntry): boolean {
   return Boolean(entry.phase || entry.nextPhase || entry.outcome || typeof entry.phaseComplete === 'boolean');
 }
@@ -50,7 +43,6 @@ function isPhaseEntry(entry: CampaignHistoryEntry): boolean {
  */
 export function selectRelevantCampaignContext(
   entries: CampaignHistoryEntry[],
-  nowMs: number = Date.now(),
 ): CampaignContextSelection {
   const terminalRunIds = new Set(
     entries
@@ -58,7 +50,7 @@ export function selectRelevantCampaignContext(
       .map((entry) => entry.runId),
   );
   const candidates = entries
-    .filter((entry) => !terminalRunIds.has(entry.runId) && isFresh(entry, nowMs))
+    .filter((entry) => !terminalRunIds.has(entry.runId) && Number.isFinite(Date.parse(entry.timestamp)))
     .sort(compareEntries);
 
   const completions = candidates.filter((entry) => entry.phaseComplete === true);

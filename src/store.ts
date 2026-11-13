@@ -859,7 +859,6 @@ function generateRunId(at = new Date()): string {
 }
 
 export const RUN_RESERVATION_FILE = '.run-reservation.json';
-export const RUN_RESERVATION_TTL_MS = 15 * 60_000;
 
 export interface RunReservation {
   lifecycleAuthority?: typeof LIFECYCLE_AUTHORITY;
@@ -872,7 +871,7 @@ export interface RunReservation {
   reservedAt: string;
 }
 
-/** Give pre-initialization artifact writers a classified, expiring identity. */
+/** Give pre-initialization artifact writers a classified identity. */
 export function requireRunArtifactDirectory(projectDir: string, runId: string): string {
   requireSafeRunId(runId);
   // Validate before deriving or probing a path.  Otherwise a pre-existing
@@ -881,7 +880,7 @@ export function requireRunArtifactDirectory(projectDir: string, runId: string): 
   if (existsSync(runRecordPath(dir, 'run.json'))) return dir;
   if (readRunReservation(projectDir, runId)) return dir;
   // Artifact APIs can precede scheduler initialization. Classify that window
-  // with the same expiring reservation marker as reserveRun instead of
+  // with the same durable reservation marker as reserveRun instead of
   // creating an unidentifiable directory or inventing run state.
   ensureGlobalRunsDir();
   mkdirSync(dir, { recursive: true });
@@ -905,7 +904,7 @@ export function requireExistingRunArtifactDirectory(runDirectory: string): strin
     const marker = JSON.parse(readFileSync(runRecordPath(runDirectory, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
     const reservedAt = Date.parse(String(marker.reservedAt ?? ''));
     if (marker.version === 1 && marker.runId === basename(runDirectory)
-      && Number.isFinite(reservedAt) && Date.now() - reservedAt <= RUN_RESERVATION_TTL_MS) return runDirectory;
+      && Number.isFinite(reservedAt)) return runDirectory;
   } catch { /* classified below */ }
   throw new Error(`Run directory ${runDirectory} is neither initialized nor actively reserved`);
 }
@@ -948,8 +947,6 @@ export function reserveRun(projectDir: string, at = new Date()): { runId: string
 export function readRunReservation(
   projectDir: string,
   runId: string,
-  nowMs = Date.now(),
-  maxAgeMs = RUN_RESERVATION_TTL_MS,
 ): RunReservation | undefined {
   const dir = runDir(projectDir, runId);
   try {
@@ -963,7 +960,7 @@ export function readRunReservation(
       typeof reservation.reservedAt !== 'string'
     ) return undefined;
     const reservedAt = Date.parse(reservation.reservedAt);
-    if (!Number.isFinite(reservedAt) || reservedAt > nowMs + 5_000 || nowMs - reservedAt > maxAgeMs) return undefined;
+    if (!Number.isFinite(reservedAt)) return undefined;
     return reservation as RunReservation;
   } catch {
     return undefined;
@@ -978,7 +975,7 @@ export function initializeReservedRun(
   stageIds: string[],
 ): { runId: string; runDirPath: string } {
   const normalizedProjectDir = resolve(projectDir);
-  const reservation = readRunReservation(normalizedProjectDir, runId, Date.now(), Number.POSITIVE_INFINITY);
+  const reservation = readRunReservation(normalizedProjectDir, runId);
   if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
   const dir = runDir(normalizedProjectDir, runId);
   if (existsSync(runRecordPath(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);

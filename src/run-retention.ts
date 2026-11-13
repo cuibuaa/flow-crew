@@ -5,7 +5,7 @@ import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { rmSync } from './engine-fs.js';
 import { basename, dirname, join, resolve } from 'node:path';
 import { isTerminalRunStatus } from './lifecycle-status.js';
-import { readArchivedRunStateFromDirectory, withRunStateLock, runsRoot, requireKnownRunStatus, RUN_RESERVATION_FILE, RUN_RESERVATION_TTL_MS, type StoreState } from './store.js';
+import { readArchivedRunStateFromDirectory, withRunStateLock, runsRoot, requireKnownRunStatus, type StoreState } from './store.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { processLiveness, processStartToken, validProcessStartToken } from './process-liveness.js';
 import { checkpointConsumers, readHostBootId } from './checkpoint-liveness.js';
@@ -117,48 +117,27 @@ export function pruneRunWorkAreas(runPath: string, options: RetentionOptions = {
 /** Legacy clean uses the same ownership and continuation authority as prune. */
 function cleanHistory(keep: number): number {
   const root = runsRoot(), entries = children(root).reverse();
-  const readable: string[] = [], expired: string[] = [];
+  const readable: string[] = [];
   for (const id of entries) {
     const path = join(root, id);
     try {
       if (JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).runId === id) readable.push(id);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue;
-      try {
-        plainDirectory(path);
-        withRunStateLock(path, () => {
-          try { readFileSync(join(path, 'run.json')); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') retireRunScratch(path); else throw error; }
-        });
-        const marker = JSON.parse(readFileSync(runRecordPath(path, RUN_RESERVATION_FILE), 'utf8'));
-        if (marker.version === 1 && marker.runId === id && typeof marker.reservedAt === 'string'
-          && Date.now() - Date.parse(marker.reservedAt) > RUN_RESERVATION_TTL_MS) expired.push(id);
-      } catch { /* Unknown records and reservations remain intact. */ }
-    }
+    } catch { /* Pre-initialization and unknown records retain their durable identity. */ }
   }
   let cleaned = 0, skipped = 0;
-  for (const id of [...readable.slice(keep), ...expired]) {
+  for (const id of readable.slice(keep)) {
     const path = join(root, id);
     try {
       plainDirectory(path);
       withRunStateLock(path, () => {
-        if (expired.includes(id)) {
-          if (!['missing', 'dead', 'reused'].includes(inspectRunScheduler(id, path).kind)) throw new Error('Reservation owner is not settled');
-          try { readFileSync(join(path, 'run.json')); throw new Error('Reservation has been published'); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-          const marker = JSON.parse(readFileSync(runRecordPath(path, RUN_RESERVATION_FILE), 'utf8'));
-          if (marker.version !== 1 || marker.runId !== id || typeof marker.reservedAt !== 'string'
-            || !(Date.now() - Date.parse(marker.reservedAt) > RUN_RESERVATION_TTL_MS)) throw new Error('Reservation is no longer expired');
-        } else {
-          if (!runIsDeletable(path, retainedState(path))) throw new Error('Run retains a continuation');
-        }
+        if (!runIsDeletable(path, retainedState(path))) throw new Error('Run retains a continuation');
         retireRunScratch(path);
         rmSync(path, { recursive: true, force: true });
         cleaned++;
       });
     } catch { skipped++; }
   }
-  process.stdout.write(`Cleaned ${cleaned} old readable/expired-reservation entries (kept ${Math.min(keep, readable.length)} most recent readable runs).\n`);
+  process.stdout.write(`Cleaned ${cleaned} old readable entries (kept ${Math.min(keep, readable.length)} most recent readable runs).\n`);
   if (skipped) process.stdout.write(`Skipped ${skipped} live run(s) or retained/uncertain owners.\n`);
   return 0;
 }

@@ -119,7 +119,7 @@ export interface OrchestratorOptions {
   cliPath?: string;
   now?: () => Date;
   /** Single-in-flight probe (injectable so tests don't read the real ~/.fc/runs). */
-  isProjectBusy?: (projectDir: string, selfRunId?: string, nowMs?: number) => string | null;
+  isProjectBusy?: (projectDir: string, selfRunId?: string) => string | null;
   /** Bounded cancellation seams; production still supplies registry/unit ownership here. */
   cancellation?: Partial<Omit<
     RunCancellationOptions,
@@ -136,7 +136,7 @@ export class Orchestrator {
   private readonly intervalMs: number;
   private readonly cliPath: string;
   private readonly now: () => Date;
-  private readonly probeBusy: (projectDir: string, selfRunId?: string, nowMs?: number) => string | null;
+  private readonly probeBusy: (projectDir: string, selfRunId?: string) => string | null;
   private readonly cancellations: RunCancellationCoordinator;
   private readonly reconcileOrphanRuns?: () => void;
   /** Tasks currently awaiting runUnit(). A tick must not interpret their unit
@@ -169,10 +169,9 @@ export class Orchestrator {
 
   /** Busy check that also honors launches not yet visible to the run probe. */
   private busyFor(projectDir: string, selfRunId?: string): string | null {
-    const nowMs = this.now().getTime();
-    const intent = readLaunchIntent(projectDir, selfRunId, nowMs);
+    const intent = readLaunchIntent(projectDir, selfRunId);
     if (intent) return intent.ownerRunId;
-    return this.probeBusy(projectDir, selfRunId, nowMs);
+    return this.probeBusy(projectDir, selfRunId);
   }
 
   private failClosed(task: TaskEntry, reason: string): undefined {
@@ -202,7 +201,7 @@ export class Orchestrator {
     }
     if (task.run_id) {
       if (this.readBoundRun(task)) return task;
-      if (readRunReservation(task.projectDir, task.run_id, this.now().getTime())) return task;
+      if (readRunReservation(task.projectDir, task.run_id)) return task;
       return this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
     }
     try {
@@ -612,7 +611,7 @@ export class Orchestrator {
       if (!this.chargeLaunchEnding(task, recovery.cause, recovery.reason)) return;
       task = this.registry.update(task.id, { defer_kind: 'wait', defer_reason: recovery.reason });
     }
-    if (!bound && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
+    if (!bound && task.run_id && !readRunReservation(task.projectDir, task.run_id)) {
       this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
       return;
     }
@@ -919,7 +918,7 @@ export class Orchestrator {
       return true;
     }
     if (!task.run_id) return false; // legacy early crash
-    if (readRunReservation(task.projectDir, task.run_id, this.now().getTime())) return false;
+    if (readRunReservation(task.projectDir, task.run_id)) return false;
     this.failClosed(task, `${reason}; bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
     return true;
   }
@@ -1351,7 +1350,7 @@ export class NodeSystemd implements SupervisorBackend {
         const { stdout } = await execFileAsync(
           'systemctl',
           ['--user', 'show', unit, '--property=LoadState', '--value'],
-          { encoding: 'utf-8', timeout: 1_000 },
+          { encoding: 'utf-8' },
         );
         if (String(stdout).trim() === 'not-found') return { kind: 'absent' };
       } catch {
@@ -1397,8 +1396,11 @@ export class NodeSystemd implements SupervisorBackend {
         `--working-directory=${opts.workingDirectory}`,
         this.nodePath,
         ...shimArgs,
-      ], { timeout: 5_000 });
-    } catch {
+      ]);
+    } catch (error) {
+      // Only failure to spawn the manager proves no managed launch occurred.
+      // A rejected/lost acknowledgement retains launch.json for observation.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       try {
         const child = spawn(this.nodePath, shimArgs, {
           cwd: opts.workingDirectory,
