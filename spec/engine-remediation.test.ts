@@ -237,10 +237,12 @@ describe('engine behaviour contracts', () => {
     const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize', 'review'], '---\nterminal_states: {complete: docs/final.md}\noutputs: [docs/report.md]\n---\n');
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
+    const state = readRunState(projectDir, created.runId);
+    state.terminalArtifactBaselines = { [terminalPath]: { state: 'absent' } };
+    writeRunState(projectDir, created.runId, state);
     write(join(projectDir, terminalPath), '# final\n');
     write(join(projectDir, outputPath), 'archived report\n');
     const startedAt = new Date(Date.now() - 1_000).toISOString();
-    const state = readRunState(projectDir, created.runId);
     state.startedAt = startedAt;
     state.status = 'running';
     state.terminalStates = { complete: { paths: [terminalPath] } };

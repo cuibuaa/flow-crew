@@ -1,16 +1,17 @@
+import { concludeRun } from '../sched_policy/run-completion.js';
 import { runRecordPath } from '../../run-layout.js';
 // Boundary: Materialize admitted task metadata and brief configuration, and refuse malformed research/budget inputs before agents execute.
 import { admittedContract, type BriefAdmissionRecord } from '../../brief-preflight.js';
 import { resolveCampaignStorageKey } from '../../campaigns.js';
 
 import { splitBriefFrontmatter } from '../../brief-frontmatter.js';
-import { entryWorkflow, declarationConfiguration } from '../sched_admission/brief-contract.js';
+import { entryWorkflow, declarationConfiguration, captureTerminalReceiptBaselines, terminalReceiptGlob } from '../sched_admission/brief-contract.js';
 import { WorkflowConfig } from '../sched_admission/configuration.js';
 import { StoreState, readRunState, writeRunState } from '../../store.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { terminalArtifactIdentity } from '../../terminal-artifact-status.js';
+import { ARTIFACT_OWNERSHIP_UNVERIFIED, terminalArtifactIdentity } from '../../terminal-artifact-status.js';
 
 export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
@@ -53,9 +54,16 @@ export function configureWorkflowBrief(
   s.terminalStates = terminalStates;
   s.research = research;
   s.declaredOutputs = parsed.outputs;
-  if (terminalStates && needsConfiguration) s.terminalArtifactBaselines = Object.fromEntries(
-    Object.values(terminalStates).flatMap(entry => entry.paths)
+  if (terminalStates && needsConfiguration && !resumingExistingRun && s.terminalArtifactBaselines) {
+    s.terminalArtifactBaselines = Object.fromEntries(Object.values(terminalStates).flatMap(entry => entry.paths)
       .map(path => [path, terminalArtifactIdentity(join(projectDir, path), projectDir)]));
+    s.terminalReceiptBaselines = captureTerminalReceiptBaselines(projectDir, Object.values(terminalStates));
+  }
+  if (terminalStates && Object.values(terminalStates).some(entry => entry.paths.some(path => !s.terminalArtifactBaselines?.[path])
+    || (terminalReceiptGlob(entry) && !s.terminalReceiptBaselines?.[terminalReceiptGlob(entry)!]))) {
+    return { kind: 'settled', state: concludeRun(s, { status: 'incomplete', reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED,
+      detail: 'Terminal ownership cannot be verified without the recorded launch content baseline.' }) };
+  }
   s.briefConfigured = true;
   writeRunState(projectDir, runId, s);
   // An explicitly acknowledged continuation can update model instructions,

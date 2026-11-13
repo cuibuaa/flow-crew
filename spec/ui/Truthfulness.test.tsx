@@ -545,6 +545,14 @@ describe("dashboard truthfulness", () => {
     }
   });
 
+  it("shows unverified terminal ownership in run detail", () => {
+    const run: RunDetailData = { runId: 'legacy', projectDir: '/workspace', workflowName: 'fixture', status: 'complete', stages: [], events: [], stage_outputs: {},
+      operational: { version: 1, runStatus: 'complete', activeStages: [], pendingScope: [], sourceCoverage: { runState: 'read', events: 'missing', stageCount: 0 },
+        terminalArtifacts: [{ path: 'result.md', ownership: 'unverified' }] } };
+    render(<MemoryRouter><RunDetail run={run} /></MemoryRouter>);
+    expect(screen.getByTestId('operational-projection')).toHaveTextContent('Terminal artifact: result.md · unverified');
+  });
+
   it("uses output.md for a terminal stage", async () => {
     vi.mocked(fetchRunStageOutput).mockResolvedValue({
       text: "terminal output.md truth",

@@ -1,9 +1,10 @@
+import { createTerminalEvaluator } from '../src/scheduler/sched_policy/terminal.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createRun } from './test-support/create-run.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   mkdtempSync,
@@ -11,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   statSync,
   utimesSync,
   writeFileSync,
@@ -18,7 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { evaluateTerminalFloor } from '../src/scheduler/sched_admission/brief-contract.js';
+import { captureTerminalReceiptBaselines, evaluateTerminalFloor } from '../src/scheduler/sched_admission/brief-contract.js';
 import { type StoreState } from '../src/store.js';
 
 let fcHome: string;
@@ -97,7 +99,7 @@ const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs
 });
 
 describe('terminal artifact freshness', () => {
-  it.each(['file', 'directory'] as const)('finishes a retained current-format run whose owner already wrote its terminal %s without rerunning the owner', async kind => {
+  it.each(['file', 'directory'] as const)('refuses a retained run without a launch baseline for a terminal %s', async kind => {
     const projectDir = project();
     const path = 'docs/task_summary.md';
     const workflow = scheduler.WorkflowConfigSchema.parse({
@@ -137,7 +139,8 @@ describe('terminal artifact freshness', () => {
       join(PROJECT_ROOT, 'config', 'agents'), created.runId,
     );
 
-    expect(state.status, state.failureReason).toBe('shipped');
+    expect(state.status, state.failureReason).toBe('incomplete');
+    expect(state.reasonCode).toBe('artifact_ownership_unverified');
     expect(state.startedAt).toBe(startedAt);
     expect(state).not.toHaveProperty('terminalArtifactBaselines');
     expect(state.stages.deliver).toEqual(owner);
@@ -147,7 +150,7 @@ describe('terminal artifact freshness', () => {
     expect(statSync(artifact).mtimeMs).toBe(before);
   }, 60_000);
 
-  it('resumes an old on-disk run without terminal baselines and reaches its declared terminal state', async () => {
+  it('refuses continuation of an old run without manufacturing terminal baselines', async () => {
     const projectDir = project();
     const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'planner.yaml'));
     config.defaults.max_iterations = 3;
@@ -187,13 +190,145 @@ terminal_states:
     const imports = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
       .map(row => JSON.parse(row)).filter(row => row.type === 'run_status_imported');
     expect(imports).toEqual([expect.objectContaining({ lifecycleVersion: 1, snapshotSource: 'run.json', snapshotStatus: 'failed', runStatus: 'failed' })]);
-    expect(state.status, state.failureReason).toBe('shipped');
+    expect(state.status, state.failureReason).toBe('incomplete');
+    expect(state.reasonCode).toBe('artifact_ownership_unverified');
     expect(state.runId).toBe(created.runId);
     expect(state.startedAt).toBe(legacyState.startedAt);
     expect(state).not.toHaveProperty('terminalArtifactBaselines');
-    expect(state.stages.deliver?.status).toBe('complete');
-    expect(adapter.calls.map(call => call.stageId)).toEqual(['plan', 'deliver']);
+    expect(state.stages.deliver).toBeUndefined();
+    expect(adapter.calls).toEqual([]);
   }, 60_000);
+
+  it.each(['configured', 'inferred'])('persists %s receipt launch content before adapters work and accepts changed bytes with old mtimes', async mode => {
+    const projectDir = project();
+    const terminal = 'docs/task_summary.md', receipt = 'docs/stage_1_verdict.md';
+    writeOld(join(projectDir, terminal), 'inherited terminal');
+    writeOld(join(projectDir, receipt), 'inherited receipt');
+    const original = ScriptedAdapter.prototype.run;
+    const baselines: string[] = [];
+    vi.spyOn(ScriptedAdapter.prototype, 'run').mockImplementation(async function(prompt, role, opts) {
+      const saved = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'run.json'), 'utf8'));
+      expect(saved.terminalArtifactBaselines[terminal].state).toBe('present');
+      expect(saved.terminalReceiptBaselines['docs/stage_*_verdict.md'].files[receipt].state).toBe('present');
+      baselines.push(JSON.stringify([saved.terminalArtifactBaselines, saved.terminalReceiptBaselines]));
+      const result = await original.call(this, prompt, role, opts);
+      for (const path of [terminal, receipt]) utimesSync(join(projectDir, path), new Date('2000-01-01'), new Date('2000-01-01'));
+      return result;
+    });
+    const { state } = await run(projectDir, `---
+terminal_states:
+  shipped:
+    paths: [${terminal}]
+${mode === 'configured' ? '    stage_glob: docs/stage_*_verdict.md\n' : ''}    floor: {min_attempted_stages: 1}
+---
+`, { plan: dispatch('deliver', [terminal, receipt], [terminal, receipt]),
+      deliver: { projectFiles: { [terminal]: 'changed terminal', [receipt]: 'changed receipt' } } });
+    expect(state.status, state.failureReason).toBe('shipped');
+    expect(baselines.length).toBe(2);
+    expect(new Set(baselines).size).toBe(1);
+    expect(statSync(join(projectDir, terminal)).mtimeMs).toBe(Date.parse('2000-01-01'));
+    vi.restoreAllMocks();
+  });
+
+  it.each(['touch', 'rewrite', 'inherited'])('refuses a %s receipt with unchanged bytes despite a newer mtime', mode => {
+    const projectDir = project(), path = join(projectDir, 'stage_1_verdict.md');
+    writeOld(path, 'same receipt');
+    const entry = { paths: ['result.md'], floor: { minAttemptedStages: 1 } };
+    const state = { startedAt: '2026-01-01T00:00:00.000Z', terminalReceiptBaselines: captureTerminalReceiptBaselines(projectDir, [entry]) } as StoreState;
+    if (mode === 'rewrite') writeFileSync(path, 'same receipt');
+    if (mode !== 'inherited') utimesSync(path, new Date('2030-01-01'), new Date('2030-01-01'));
+    expect(evaluateTerminalFloor(state, entry, projectDir)).toMatchObject({ passed: false, reason: expect.stringContaining('unchanged launch content') });
+  });
+
+  it('refuses legacy receipt floors with a typed reason rather than accepting timestamps', () => {
+    const projectDir = project();
+    writeOld(join(projectDir, 'stage_1_verdict.md'), 'receipt');
+    expect(evaluateTerminalFloor({ startedAt: '1990-01-01' } as StoreState,
+      { paths: ['result.md'], floor: { minAttemptedStages: 1 } }, projectDir)).toMatchObject({ passed: false, reasonCode: 'artifact_ownership_unverified' });
+  });
+
+  it('preserves launch baselines across resume and records absence before files exist', async () => {
+    const { configureWorkflowBrief } = await import('../src/scheduler/sched_loop/brief.js');
+    const projectDir = project();
+    const brief = '---\nterminal_states: {shipped: {paths: [result.md], floor: {min_attempted_stages: 1}}}\n---\n';
+    const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config/workflows/planner.yaml'));
+    const created = createRun(projectDir, config.name, raw, ['plan'], brief);
+    const configure = (resumingExistingRun: boolean) => configureWorkflowBrief(config, projectDir, created.runId, created.runDirPath, 1,
+      { resumingExistingRun, briefWasAdmitted: true });
+    expect(configure(false).kind).toBe('configured');
+    const launched = store.readRunState(projectDir, created.runId);
+    expect(launched.terminalArtifactBaselines).toEqual({ 'result.md': { state: 'absent' } });
+    expect(launched.terminalReceiptBaselines).toEqual({ './stage_*_verdict.md': { files: {} } });
+    writeOld(join(projectDir, 'result.md'), 'terminal');
+    writeOld(join(projectDir, 'stage_1_verdict.md'), 'receipt');
+    expect(configure(true).kind).toBe('configured');
+    const resumed = store.readRunState(projectDir, created.runId);
+    expect(resumed.terminalArtifactBaselines).toEqual(launched.terminalArtifactBaselines);
+    expect(resumed.terminalReceiptBaselines).toEqual(launched.terminalReceiptBaselines);
+    expect(evaluateTerminalFloor(resumed, resumed.terminalStates!.shipped!, projectDir).passed).toBe(true);
+  });
+
+  it.each([true, false])('never captures a historical baseline for unconfigured legacy metadata (resuming=%s)', async resumingExistingRun => {
+    const { configureWorkflowBrief } = await import('../src/scheduler/sched_loop/brief.js');
+    const projectDir = project();
+    const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config/workflows/planner.yaml'));
+    const created = createRun(projectDir, config.name, raw, ['plan'], '---\nterminal_states: {shipped: result.md}\n---\n');
+    const legacy = store.readRunState(projectDir, created.runId);
+    delete legacy.terminalArtifactBaselines;
+    delete legacy.terminalReceiptBaselines;
+    legacy.briefConfigured = false;
+    store.writeRunState(projectDir, created.runId, legacy);
+    writeOld(join(projectDir, 'result.md'), 'existing legacy result');
+    const outcome = configureWorkflowBrief(config, projectDir, created.runId, created.runDirPath, 1, { resumingExistingRun, briefWasAdmitted: true });
+    expect(outcome.kind).toBe('settled');
+    const refused = store.readRunState(projectDir, created.runId);
+    expect(refused.reasonCode).toBe('artifact_ownership_unverified');
+    expect(refused).not.toHaveProperty('terminalArtifactBaselines');
+    expect(refused).not.toHaveProperty('terminalReceiptBaselines');
+  });
+
+  it('refuses receipt globs and symlink targets outside the project boundary', () => {
+    const root = project(), projectDir = join(root, 'project');
+    mkdirSync(projectDir);
+    writeOld(join(root, 'stage_1_verdict.md'), 'outside receipt');
+    const entry = { paths: ['result.md'], stageGlob: '../stage_*_verdict.md', floor: { minAttemptedStages: 1 } };
+    const state = { startedAt: '2026-01-01', terminalReceiptBaselines: captureTerminalReceiptBaselines(projectDir, [entry]) } as StoreState;
+    expect(evaluateTerminalFloor(state, entry, projectDir)).toMatchObject({ passed: false, reasonCode: 'artifact_ownership_unverified' });
+    const inside = { ...entry, stageGlob: 'stage_*_verdict.md' };
+    state.terminalReceiptBaselines = captureTerminalReceiptBaselines(projectDir, [inside]);
+    symlinkSync('../stage_1_verdict.md', join(projectDir, 'stage_1_verdict.md'));
+    expect(evaluateTerminalFloor(state, inside, projectDir).passed).toBe(false);
+  });
+
+  it('terminal evaluation refuses a missing baseline with a typed reason', async () => {
+    const evaluator = createTerminalEvaluator({ writeCampaignEntry: () => {}, concludeRepeatedBlockage: () => null });
+    expect(await evaluator.tryTerminateOnTerminalState({ terminalStates: { shipped: { paths: ['result.md'] } }, stages: {} } as StoreState,
+      { projectDir: project(), runDirPath: '/unused', runId: 'fixture', iteration: 1, stages: [] })).toMatchObject({ decision: 'deferred', reasonCode: 'artifact_ownership_unverified' });
+  });
+
+  it.each(['terminal', 'receipt'] as const)('preserves the typed %s ownership refusal through quiescent conclusion', async missing => {
+    const { createTerminalEvaluator: evaluatorFactory } = await import('../src/scheduler/sched_policy/terminal.js');
+    const projectDir = project();
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['work']);
+    const state = store.readRunState(projectDir, created.runId);
+    state.stages.work = { status: 'complete', retries: 0 };
+    state.startedAt = '2026-01-01T00:00:00.000Z';
+    state.terminalStates = { shipped: { paths: ['result.md'], floor: { minAttemptedStages: 1 } } };
+    delete state.terminalReceiptBaselines;
+    if (missing === 'terminal') delete state.terminalArtifactBaselines;
+    else state.terminalArtifactBaselines = { 'result.md': { state: 'absent' } };
+    store.writeRunState(projectDir, created.runId, state);
+    writeOld(join(projectDir, 'result.md'), 'terminal bytes');
+    writeOld(join(projectDir, 'stage_1_verdict.md'), 'receipt bytes');
+    const evaluator = evaluatorFactory({ writeCampaignEntry: () => {}, concludeRepeatedBlockage: () => null });
+    const ctx = { projectDir, runDirPath: created.runDirPath, runId: created.runId, iteration: 1, stages: [] };
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:00.000Z'));
+    try {
+      expect(await evaluator.tryTerminateOnTerminalState(state, ctx)).toMatchObject({ decision: 'deferred', reasonCode: 'artifact_ownership_unverified' });
+      expect(await evaluator.concludeDeclaredTerminalAtQuiescence(state, [], ctx, 'fixture')).toMatchObject({ status: 'incomplete', reasonCode: 'artifact_ownership_unverified' });
+      expect(store.readRunState(projectDir, created.runId)).toMatchObject({ status: 'incomplete', reasonCode: 'artifact_ownership_unverified' });
+    } finally { clock.mockRestore(); }
+  });
 
   it('rejects a preexisting terminal artifact rewritten with identical bytes', async () => {
     const projectDir = project();
@@ -219,7 +354,7 @@ terminal_states:
     expect(adapter.calls.map(call => call.stageId)).toEqual(['plan', 'regenerate']);
   }, 60_000);
 
-  it('rejects an artifact older than run start, records explicit guidance, then accepts the same path after a non-plan stage rewrites it', async () => {
+  it('rejects unchanged inherited content then accepts changed terminal bytes', async () => {
     const projectDir = project();
     const artifact = join(projectDir, 'docs', 'task_summary.md');
     writeOld(artifact, '# stale result from a previous task\n');
@@ -240,7 +375,7 @@ terminal_states:
     expect(adapter.calls.some((call) => call.stageId === 'implement')).toBe(true);
     expect(guidance).toContain("docs/task_summary.md exists but its content is unchanged from this run's initial content");
     expect(guidance).not.toContain('早于本次 run 启动');
-    expect(statSync(artifact).mtimeMs).toBeGreaterThanOrEqual(Date.parse(state.startedAt));
+
   }, 60_000);
 
   it('does not let the plan stage alone turn a freshly written artifact into success', async () => {
@@ -277,7 +412,7 @@ terminal_states:
       const relative = `${verdictDir}/${verdictName(i)}`;
       const content = `Stage ${i}: pass\n`;
       writeOld(join(projectDir, relative), content);
-      verdicts[relative] = content;
+      verdicts[relative] = `Changed receipt ${i}: pass\n`;
     }
 
     const { state, guidance } = await run(projectDir, `---
@@ -304,7 +439,7 @@ ${stageGlobLine}    floor:
     expect(state.status).toBe('shipped');
     expect(state.stages.refresh_verdicts?.status).toBe('complete');
     expect(guidance).toContain(`${label} stage_glob`);
-    expect(guidance).toContain('2 matching file(s) exist but predate this run start');
+    expect(guidance).toContain('2 matching file(s) have unchanged launch content');
   }, 60_000);
 
   it('keeps a legitimate fast terminal reachable when fresh stage evidence satisfies the floor', async () => {
@@ -330,7 +465,7 @@ terminal_states:
 
     expect(state.status).toBe('shipped');
     expect(state.stages.deliver?.status).toBe('complete');
-    expect(Date.parse(state.completedAt!) - Date.parse(state.startedAt)).toBeLessThan(60_000);
+
     expect(guidance).not.toContain('wall time');
   }, 60_000);
 
@@ -340,12 +475,13 @@ terminal_states:
     mkdirSync(resolve(receipt, '..'), { recursive: true });
     const state: StoreState = {
       runId: 'fixture', workflowName: 'fixture', projectDir, status: 'running', stages: {},
-      startedAt: new Date(Date.now() - 1000).toISOString(),
+      startedAt: '2026-01-01T00:00:00.000Z',
     };
     const entry = {
       paths: ['docs/task_summary.md'], stageGlob: 'evidence/check_*_verdict.md',
       floor: { minAttemptedStages: 1 },
     };
+    state.terminalReceiptBaselines = captureTerminalReceiptBaselines(projectDir, [entry]);
     if (shape === 'empty') writeFileSync(receipt, '');
     if (shape === 'directory') mkdirSync(receipt);
     expect(evaluateTerminalFloor(state, entry, projectDir).passed).toBe(false);

@@ -134,7 +134,7 @@ const {
   resolveAdapterChoice,
 } = adapterAvailabilityModule;
 const { commandSucceeds, detectSupervisorBackend } = cliDoctorModule;
-const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
+const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch, terminalArtifactOwnership } = terminalArtifactStatusModule;
 const {
   formatHumanDuration,
   formatOperationalReason,
@@ -1564,6 +1564,7 @@ function cmdStatus() {
   for (const line of formatRunDriftProjection(operational.drift)) console.log(line);
   console.log(`Evidence: state ${operational.sourceCoverage.runState}; events ${operational.sourceCoverage.events}; ${operational.sourceCoverage.stageCount} stages`);
   if (mismatch) console.log(`Status mismatch: ${formatTerminalArtifactStatusMismatch(mismatch)}`);
+  for (const artifact of operational.terminalArtifacts ?? []) console.log(`Terminal artifact: ${artifact.path} · ${artifact.ownership}`);
   console.log(`Iteration: ${state.currentIteration ?? '?'}/${state.maxIterations ?? '?'}`);
   console.log('Stages:');
   for (const [id, ss] of Object.entries(state.stages ?? {})) {
@@ -1600,7 +1601,9 @@ function cmdList() {
       const lifecycle = statusResolution.kind === 'unknown'
         ? `? unrecognized ${statusResolution.display}`
         : CLI_RUN_STATUS_PRESENTATION[statusResolution.status].listLabel;
-      const status = mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle;
+      const ownership = terminalArtifactOwnership(state, { runDir: join(root, runId) });
+      const status = (mismatch ? `${lifecycle} [terminal artifact says ${mismatch.terminalStatus}]` : lifecycle)
+        + ownership.map(artifact => ` [${artifact.path}: ${artifact.ownership}]`).join('');
       const startMs = new Date(state.startedAt ?? '').getTime();
       const endMs = state.completedAt ? new Date(state.completedAt).getTime() : Date.now();
       const duration = formatHumanDuration(endMs - startMs).padEnd(8);

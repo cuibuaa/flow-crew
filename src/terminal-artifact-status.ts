@@ -1,5 +1,5 @@
 import { runRecordPath } from './run-layout.js';
-import { realpathSync, statSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { compareContentIdentities, readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { within } from './source_services/cli-inputs.js';
@@ -24,7 +24,6 @@ export interface PersistedTerminalArtifactState {
 export interface TerminalArtifactStatusEvidence {
   projectDir?: string;
   runDir?: string;
-  artifactMtimeMs?: (path: string) => number | undefined;
   artifactIdentity?: (path: string) => ContentIdentity;
 }
 
@@ -74,23 +73,36 @@ export function terminalArtifactIdentity(path: string, root: string, evidence: T
   }
 }
 
-/** Run-start content is the shared freshness boundary, independent of wall clocks. */
+export type ArtifactOwnership = 'current' | 'stale' | 'unverified';
+export const ARTIFACT_OWNERSHIP_UNVERIFIED = 'artifact_ownership_unverified' as const;
+
+/** Only recorded content proves ownership; missing metadata is never recorded absence. */
+export function artifactOwnership(baseline: ContentIdentity | undefined, identity: ContentIdentity): ArtifactOwnership {
+  if (!baseline || baseline.state === 'unavailable' || identity.state === 'unavailable') return 'unverified';
+  if (identity.state !== 'present' || identity.type !== 'file') return 'stale';
+  return compareContentIdentities(baseline, identity) === 'different' ? 'current' : 'stale';
+}
+
 export function freshTerminalArtifact(
   state: PersistedTerminalArtifactState, declaredPath: string, path: string, root: string,
   evidence: TerminalArtifactStatusEvidence = {},
 ): boolean {
-  // Pre-deploy runs have no content boundary: retain their original timestamp meaning.
-  if (!state.terminalArtifactBaselines) {
-    try {
-      const mtimeMs = evidence.artifactMtimeMs ? evidence.artifactMtimeMs(path) : statSync(path).mtimeMs;
-      return typeof state.startedAt === 'string' && typeof mtimeMs === 'number'
-        && Number.isFinite(mtimeMs) && mtimeMs >= Date.parse(state.startedAt);
-    }
-    catch { return false; }
-  }
-  const identity = terminalArtifactIdentity(path, root, evidence);
-  if (identity.state !== 'present' || identity.type !== 'file') return false;
-  return compareContentIdentities(state.terminalArtifactBaselines[declaredPath] ?? { state: 'absent' }, identity) === 'different';
+  return artifactOwnership(state.terminalArtifactBaselines?.[declaredPath], terminalArtifactIdentity(path, root, evidence)) === 'current';
+}
+
+/** Reader projection shared by status, listing, daemon and UI. */
+export function terminalArtifactOwnership(state: PersistedTerminalArtifactState, evidence: TerminalArtifactStatusEvidence = {}): Array<{ path: string; ownership: ArtifactOwnership }> {
+  const root = evidence.projectDir ?? (typeof state.projectDir === 'string' ? state.projectDir : undefined);
+  const paths = new Set<string>(Object.values(state.terminalStates ?? {}).flatMap(entry => {
+    const declared = entry && typeof entry === 'object' ? (entry as { paths?: unknown }).paths : undefined;
+    return Array.isArray(declared) ? declared.filter((path): path is string => typeof path === 'string') : [];
+  }));
+  if (typeof state.terminalArtifact === 'string' && ![...paths].some(path => path === state.terminalArtifact || basename(path) === state.terminalArtifact)) paths.add(state.terminalArtifact);
+  return [...paths].map(path => {
+    const candidate = root && safeDeclaredCandidate(root, path);
+    return { path, ownership: artifactOwnership(state.terminalArtifactBaselines?.[path], candidate
+      ? terminalArtifactIdentity(candidate, root!, evidence) : { state: 'unavailable', reason: 'artifact root unavailable' }) };
+  });
 }
 
 function everyStageSettled(stages: unknown): boolean {

@@ -419,9 +419,11 @@ describe('independent engine-remediation verification', () => {
     setFcGlobalDir(join(root, 'fc-home'));
     const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer'], '---\nterminal_states: {complete: docs/final.md}\n---\n');
     const terminalPath = 'docs/final.md';
+    const state = readRunState(projectDir, created.runId);
+    state.terminalArtifactBaselines = { [terminalPath]: { state: 'absent' } };
+    writeRunState(projectDir, created.runId, state);
     const startedAt = new Date(Date.now() - 1_000).toISOString();
     write(join(projectDir, terminalPath), '# final round terminal\n');
-    const state = readRunState(projectDir, created.runId);
     state.startedAt = startedAt;
     state.status = 'running';
     state.currentIteration = 5;

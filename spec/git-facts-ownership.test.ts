@@ -230,7 +230,7 @@ it.each([
   updateRunState(project, runId, state => {
     state.stages.work.status = 'complete';
     state.terminalStates = { complete: { paths: ['done.md'], postTerminateHook: hook } };
-    state.terminalArtifactBaselines = {};
+    state.terminalArtifactBaselines = { 'done.md': { state: 'absent' } };
     state.engineCheckpoint = { pid: process.pid, processes: [] } as never;
     if (consumer === 'hook') state.status = 'complete';
   });

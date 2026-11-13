@@ -3,14 +3,14 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { terminalArtifactIdentity, terminalArtifactStatusMismatch } from '../src/terminal-artifact-status.js';
+import { artifactOwnership, freshTerminalArtifact, terminalArtifactOwnership, terminalArtifactIdentity, terminalArtifactStatusMismatch } from '../src/terminal-artifact-status.js';
 import { type ContentIdentity } from '../src/content-identity.js';
 import { terminalArtifactSnapshotName } from '../src/store.js';
 
 const content = (sha256: string): ContentIdentity => ({ state: 'present', type: 'file', byteLength: 1, sha256 });
 
 describe('terminal artifact status diagnostics', () => {
-  it('reads an old on-disk run without baselines using its original run-start freshness boundary', () => {
+  it('shows old on-disk artifacts as unverified regardless of timestamps', () => {
     const root = mkdtempSync(join(tmpdir(), 'legacy-terminal-status-'));
     try {
       const artifact = join(root, 'result.md');
@@ -27,9 +27,8 @@ describe('terminal artifact status diagnostics', () => {
       expect(terminalArtifactStatusMismatch(legacyState)).toBeUndefined();
       const fresh = new Date('2026-01-01T00:00:01.000Z');
       utimesSync(artifact, fresh, fresh);
-      expect(terminalArtifactStatusMismatch(legacyState)).toEqual({
-        lifecycleStatus: 'running', terminalStatus: 'complete', terminalArtifact: 'result.md',
-      });
+      expect(terminalArtifactStatusMismatch(legacyState)).toBeUndefined();
+      expect(terminalArtifactOwnership(legacyState)).toEqual([{ path: 'result.md', ownership: 'unverified' }]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -51,17 +50,26 @@ describe('terminal artifact status diagnostics', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('retains the legacy mtime evidence override without requiring a local content identity', () => {
-    const state = {
-      status: 'running', startedAt: new Date(1_000).toISOString(),
-      stages: { owner: { status: 'complete' } }, terminalStates: { complete: { paths: ['result.md'] } },
-    };
-    const evidence = { projectDir: '/workspace', artifactMtimeMs: () => 1_000 };
-    expect(terminalArtifactStatusMismatch(state, evidence)).toMatchObject({
-      lifecycleStatus: 'running', terminalStatus: 'complete', terminalArtifact: 'result.md',
-    });
-    expect(terminalArtifactStatusMismatch(state, { ...evidence, artifactMtimeMs: () => 999 })).toBeUndefined();
-    expect(terminalArtifactStatusMismatch(state, { ...evidence, artifactMtimeMs: () => undefined })).toBeUndefined();
+  it('requires an explicit recorded baseline for each path', () => {
+    expect(artifactOwnership(undefined, content('new'))).toBe('unverified');
+    expect(terminalArtifactOwnership({ terminalArtifact: 'recorded.md' })).toEqual([{ path: 'recorded.md', ownership: 'unverified' }]);
+    expect(artifactOwnership({ state: 'absent' }, content('new'))).toBe('current');
+    expect(artifactOwnership(content('new'), content('new'))).toBe('stale');
+  });
+
+  it.each(['touch', 'rewrite', 'inherited'])('rejects %s terminal bytes even with newer timestamps', mode => {
+    const root = mkdtempSync(join(tmpdir(), 'terminal-content-'));
+    try {
+      const path = join(root, 'result.md');
+      writeFileSync(path, 'same');
+      const state = { startedAt: '2026-01-01', terminalArtifactBaselines: { 'result.md': terminalArtifactIdentity(path, root) } };
+      if (mode === 'rewrite') writeFileSync(path, 'same');
+      utimesSync(path, new Date(mode === 'inherited' ? '2000-01-01' : '2030-01-01'), new Date(mode === 'inherited' ? '2000-01-01' : '2030-01-01'));
+      expect(freshTerminalArtifact(state, 'result.md', path, root)).toBe(false);
+      writeFileSync(path, 'changed');
+      utimesSync(path, new Date('2000-01-01'), new Date('2000-01-01'));
+      expect(freshTerminalArtifact(state, 'result.md', path, root)).toBe(true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('returns only an unambiguous disagreement and never rewrites lifecycle status', () => {
@@ -113,7 +121,7 @@ describe('terminal artifact status diagnostics', () => {
     expect(completeSnapshot.length).toBeLessThan(255);
     expect(escalatedSnapshot).not.toBe(completeSnapshot);
     const state = {
-      status: 'running', terminalArtifactBaselines: {}, startedAt: new Date(1_000).toISOString(),
+      status: 'running', terminalArtifactBaselines: { [complete]: { state: 'absent' as const }, [escalated]: { state: 'absent' as const } }, startedAt: new Date(1_000).toISOString(),
       stages: { finalize: { status: 'complete' } },
       terminalStates: { complete: { paths: [complete] }, escalated: { paths: [escalated] } },
     };
@@ -131,7 +139,7 @@ describe('terminal artifact status diagnostics', () => {
       const runDir = join(root, 'run'), projectDir = join(root, 'project');
       mkdirSync(runDir); mkdirSync(projectDir);
       const declared = 'docs/result.md';
-      const state = { storageLayout, projectDir, status: 'running', terminalArtifactBaselines: {},
+      const state = { storageLayout, projectDir, status: 'running', terminalArtifactBaselines: { [declared]: { state: 'absent' as const } },
         stages: { done: { status: 'complete' } }, terminalStates: { complete: { paths: [declared] } } };
       const stateBytes = JSON.stringify(state);
       writeFileSync(join(runDir, 'run.json'), stateBytes);
@@ -155,7 +163,7 @@ describe('terminal artifact status diagnostics', () => {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
       projectDir,
-      terminalArtifactBaselines: { 'docs/final_verification.md': content('old') },
+      terminalArtifactBaselines: { 'docs/final_verification.md': content('old'), 'docs/escalation_note.md': { state: 'absent' as const } },
       stages: {
         implement: { status: 'complete' },
         verify: { status: 'failed' },

@@ -256,6 +256,10 @@ describe('daemon status local diagnosis', () => {
         terminal_artifact: 'escalation_note.md',
       },
     });
+    expect(merged.operational?.terminalArtifacts).toEqual([
+      { path: 'docs/parity_verification.md', ownership: 'unverified' },
+      { path: 'docs/front_end_parity/escalation_note.md', ownership: 'unverified' },
+    ]);
     expect(merged.completed_at).toBeUndefined();
     expect(merged).not.toHaveProperty('failure_reason');
     expect(merged.operational?.drift?.rows).toHaveLength(4);
@@ -302,7 +306,7 @@ describe('daemon status local diagnosis', () => {
       projectDir,
       status: 'running',
       startedAt: '2000-01-01T00:00:00.000Z',
-      terminalArtifactBaselines: {},
+      terminalArtifactBaselines: { 'docs/final_verification.md': { state: 'absent' }, 'docs/escalation_note.md': { state: 'absent' } },
       stages: {
         implementation: { status: 'complete' },
         verification: { status: 'complete' },

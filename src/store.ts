@@ -439,6 +439,7 @@ export interface StoreState {
   terminalStates?: TerminalStatesConfig;
   /** Terminal content captured before producers execute; retained on continuation. */
   terminalArtifactBaselines?: Record<string, import('./content-identity.js').ContentIdentity>;
+  terminalReceiptBaselines?: Record<string, import('./scheduler/sched_admission/brief-contract.js').ReceiptBaseline>;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
   terminalArtifact?: string;
   /** Legacy destination intents, retained only for historical record decoding. */

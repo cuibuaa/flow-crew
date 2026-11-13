@@ -571,12 +571,17 @@ the run before a retry can adopt that content. Unsupported special entries remai
 cannot qualify as terminal files.
 An archived engine snapshot remains reader evidence; it does not substitute for an absent declared
 project artifact at settlement. Multiple fresh outcomes are ambiguous and cannot terminate the run.
-Historical records without a
-content baseline retain their original timestamp interpretation for readers and continuation.
+Historical records without a content baseline show terminal artifacts as `unverified` in
+status, listing and UI detail. Continuation and terminal settlement refuse them with
+`artifact_ownership_unverified`; timestamps never establish ownership.
 
 An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
 (entry level only; `floor.stage_glob` is refused). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
-matching the declared evidence pattern. Result checks determine whether those receipts prove the outcome; file length does not.
+matching the declared evidence pattern whose bytes differ from the content baseline recorded
+before work begins. Both declared and inferred receipt patterns use that recorded baseline,
+which is retained on continuation. Changed bytes count even with preserved old timestamps;
+touched files and identical rewrites do not. A missing receipt baseline is refused with
+`artifact_ownership_unverified`. Result checks determine whether those receipts prove the outcome; file length does not.
 Research reports are engine-owned and stopping is determined by the declared search budget.
 For engineering, with an attempted-stage floor satisfied,
 wall time is advisory; without it, wall time can be the sole floor. Use substantive artifacts

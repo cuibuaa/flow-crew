@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +82,25 @@ afterEach(() => {
 });
 
 describe('project-scoped status', () => {
+  it('shows legacy terminal ownership as unverified in status and listing', () => {
+    const directory = writeRun('legacy-run', projectB, 'Legacy terminal', 'complete', 1000);
+    const file = runRecordPath(directory, 'run.json');
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    state.terminalStates = { complete: { paths: ['result.md'] } };
+    writeFileSync(file, JSON.stringify(state));
+    writeFileSync(join(projectB, 'result.md'), 'inherited bytes');
+    utimesSync(join(projectB, 'result.md'), new Date('2030-01-01'), new Date('2030-01-01'));
+    const detail = status();
+    expect(detail.status, detail.stderr).toBe(0);
+    expect(detail.stdout).toContain('Terminal artifact: result.md · unverified');
+    const listing = spawnSync(process.execPath, ['--import', tsxLoader, join(repositoryRoot, 'src/cli.ts'), 'list'], {
+      cwd: projectB, env: { ...process.env, HOME: join(fixtureRoot, 'home'), FC_HOME: fcHome }, encoding: 'utf8', timeout: 60000,
+    });
+    expect(listing.status, listing.stderr).toBe(0);
+    expect(listing.stdout).toContain('[result.md: unverified]');
+    expect(JSON.parse(readFileSync(file, 'utf8'))).not.toHaveProperty('terminalArtifactBaselines');
+  });
+
   it('scopes the default to cwd and preserves explicit all/project escape hatches', () => {
     writeRun('run-b', projectB, 'Project B result', 'complete', 1_000);
     writeRun('run-a', projectA, 'Project A newer run', 'running', 2_000);

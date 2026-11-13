@@ -3,7 +3,11 @@ import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '..
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
 import { type TerminalStatesConfig, type ResearchConfig, type TerminalStateEntry, type StoreState } from '../../store.js';
 import { join } from 'node:path';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { artifactOwnership, terminalArtifactIdentity, ARTIFACT_OWNERSHIP_UNVERIFIED } from '../../terminal-artifact-status.js';
+import type { ContentIdentity } from '../../content-identity.js';
+import { within } from '../../source_services/cli-inputs.js';
+import { resolve } from 'node:path';
+import { readdirSync, realpathSync } from 'node:fs';
 import { type BriefOutputDeclaration, outputsFromDeclarations } from '../../ship-inputs.js';
 import { log } from './shared.js';
 
@@ -65,9 +69,9 @@ export function evaluateTerminalFloor(
   state: StoreState,
   entry: TerminalStateEntry,
   projectDir: string,
-): { passed: boolean; reason?: string } {
+): { passed: boolean; reason?: string; reasonCode?: typeof ARTIFACT_OWNERSHIP_UNVERIFIED } {
   if (!entry.floor) return { passed: true };
-  const { floor, stageGlob, paths } = entry;
+  const { floor, stageGlob } = entry;
   const startedAtMs = Date.parse(state.startedAt);
   if (!Number.isFinite(startedAtMs)) {
     return { passed: false, reason: `run startedAt '${state.startedAt}' is invalid; freshness cannot be proven` };
@@ -78,19 +82,24 @@ export function evaluateTerminalFloor(
   // Result checks own whether the evidence proves the outcome; a count or
   // duration cannot establish its substance.
   if (floor.minAttemptedStages !== undefined) {
-    let glob = stageGlob;
-    if (!glob && paths.length > 0) {
-      const first = paths[0];
-      const dir = first.includes('/') ? first.substring(0, first.lastIndexOf('/')) : '.';
-      glob = `${dir}/stage_*_verdict.md`;
+    const glob = terminalReceiptGlob(entry);
+    const baseline = glob ? state.terminalReceiptBaselines?.[glob] : undefined;
+    if (!baseline || baseline.error) return { passed: false, reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED,
+      reason: 'terminal receipt content baseline is unavailable' };
+    const files = glob ? receiptIdentities(projectDir, glob) : { files: {} };
+    if (files.error) return { passed: false, reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED, reason: files.error };
+    let fresh = 0, stale = 0;
+    for (const [path, identity] of Object.entries(files.files)) {
+      if (identity.state !== 'present' || identity.type !== 'file' || identity.byteLength === 0) continue;
+      const ownership = artifactOwnership(baseline.files[path] ?? { state: 'absent' }, identity);
+      if (ownership === 'unverified') return { passed: false, reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED, reason: 'terminal receipt content is unavailable' };
+      if (ownership === 'current') fresh++; else stale++;
     }
-    const matches = glob
-      ? countGlobMatches(projectDir, glob, startedAtMs)
-      : { fresh: 0, stale: 0 };
+    const matches = { fresh, stale };
     if (matches.fresh < floor.minAttemptedStages) {
       const globSource = stageGlob ? 'configured stage_glob' : 'inferred stage_glob';
       const staleDetail = matches.stale > 0
-        ? `; ${matches.stale} matching file(s) exist but predate this run start`
+        ? `; ${matches.stale} matching file(s) have unchanged launch content`
         : '';
       return {
         passed: false,
@@ -114,28 +123,38 @@ export function evaluateTerminalFloor(
   return { passed: true };
 }
 
-function countGlobMatches(projectDir: string, glob: string, startedAtMs: number): { fresh: number; stale: number } {
+export function terminalReceiptGlob(entry: TerminalStateEntry): string | undefined {
+  if (entry.floor?.minAttemptedStages === undefined) return undefined;
+  const first = entry.paths[0];
+  return entry.stageGlob ?? (first ? `${first.includes('/') ? first.substring(0, first.lastIndexOf('/')) : '.'}/stage_*_verdict.md` : undefined);
+}
+
+export interface ReceiptBaseline { files: Record<string, ContentIdentity>; error?: string }
+
+/** A successful enumeration records absence for future matching names, too. */
+export function receiptIdentities(projectDir: string, glob: string): ReceiptBaseline {
+  const files: Record<string, ContentIdentity> = {};
   const slash = glob.lastIndexOf('/');
-  const dir = slash >= 0 ? glob.substring(0, slash) : '.';
+  const dir = resolve(projectDir, slash >= 0 ? glob.substring(0, slash) : '.');
   const pattern = slash >= 0 ? glob.substring(slash + 1) : glob;
-  // Convert simple `*` glob to anchored regex (escape dots, expand stars)
-  const re = new RegExp('^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
+  const re = new RegExp('^' + pattern.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
   try {
-    const fullDir = join(projectDir, dir);
-    if (!existsSync(fullDir)) return { fresh: 0, stale: 0 };
-    let fresh = 0;
-    let stale = 0;
-    for (const f of readdirSync(fullDir)) {
-      if (!re.test(f)) continue;
-      try {
-        const stat = statSync(join(fullDir, f));
-        if (!stat.isFile() || stat.size === 0) continue;
-        if (stat.mtimeMs >= startedAtMs) fresh += 1;
-        else stale += 1;
-      } catch { /* a disappearing/unreadable file does not count */ }
+    if (!within(resolve(projectDir), dir) || !within(realpathSync.native(projectDir), realpathSync.native(dir))) {
+      return { files, error: 'terminal receipt glob escapes its root' };
     }
-    return { fresh, stale };
-  } catch {
-    return { fresh: 0, stale: 0 };
+    for (const name of readdirSync(dir)) {
+      if (re.test(name)) files[join(dir, name).substring(resolve(projectDir).length + 1)] = terminalArtifactIdentity(join(dir, name), projectDir);
+    }
+    return { files };
+  } catch (error) {
+    return ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '') ? { files }
+      : { files, error: 'terminal receipt baseline could not be enumerated' };
   }
+}
+
+export function captureTerminalReceiptBaselines(projectDir: string, entries: TerminalStateEntry[]): Record<string, ReceiptBaseline> {
+  return Object.fromEntries(entries.flatMap(entry => {
+    const glob = terminalReceiptGlob(entry);
+    return glob ? [[glob, receiptIdentities(projectDir, glob)]] : [];
+  }));
 }

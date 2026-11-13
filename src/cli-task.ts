@@ -195,6 +195,7 @@ function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withS
     ];
     if (withSummary) fields.push(truncate(task.summary_one_liner ?? '', 80));
     stdout.write(`${fields.join('  ')}\n`);
+    for (const artifact of task.operational?.terminalArtifacts ?? []) stdout.write(`  Terminal artifact: ${artifact.path} · ${artifact.ownership}\n`);
   }
 }
 
@@ -222,6 +223,7 @@ function printTask(
       + `terminal artifact ${JSON.stringify(task.terminal_status_mismatch.terminal_artifact)} `
       + `declares ${task.terminal_status_mismatch.terminal_status}\n`);
   }
+  for (const artifact of task.operational?.terminalArtifacts ?? []) stdout.write(`Terminal artifact: ${artifact.path} · ${artifact.ownership}\n`);
   if (Number.isSafeInteger(exitCode)) stdout.write(`Exit code: ${exitCode}\n`);
   if (unitStatus?.kind === 'terminal' && unitStatus.signal) stdout.write(`Signal: ${unitStatus.signal}\n`);
   stdout.write(`Launch: ${task.launch}; budget used: ${task.attempt}/${task.max_attempts}\n`);

@@ -260,6 +260,17 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('complete [terminal artifact says escalated]');
   });
 
+  it.each(['list', 'show'])('shows unverified terminal ownership in task %s', async command => {
+    const entry = { ...task({ id: 2, status: 'done' }), operational: { ...buildOperationalProjection({ status: 'complete' }),
+      terminalArtifacts: [{ path: 'result.md', ownership: 'unverified' as const }] } };
+    server = await startRpcServer(socketPath, () => command === 'list' ? { tasks: [entry] } : { task: entry, recent_ticks: [] });
+    const out = new Capture();
+    const code = await cmdTask(command === 'list' ? ['task', 'list', '--socket', socketPath] : ['task', 'show', '2', '--socket', socketPath],
+      { stdout: out.stream as any, stderr: out.err as any });
+    expect(code).toBe(0);
+    expect(out.text()).toContain('Terminal artifact: result.md · unverified');
+  });
+
   it('prints only summary markdown with --summary-only', async () => {
     const summary = '# Task Summary\n\n**Verdict**: PASS\n';
     server = await startRpcServer(socketPath, () => ({ task: task({ id: 3, status: 'done', summary_full: summary }), recent_ticks: ['- tick'] }));

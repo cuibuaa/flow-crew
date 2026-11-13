@@ -270,7 +270,7 @@ describe('watch heartbeat and edge semantics', () => {
     fixture.addRun('settled-but-running', {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
-      terminalArtifactBaselines: {},
+      terminalArtifactBaselines: { 'docs/final_verification.md': { state: 'absent' }, 'docs/escalation_note.md': { state: 'absent' } },
       projectDir,
       stages: {
         implement: { status: 'complete' },
@@ -436,7 +436,7 @@ describe('watch delayed terminal indecision', () => {
     return {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
-      terminalArtifactBaselines: {},
+      terminalArtifactBaselines: { 'docs/final_verification.md': { state: 'absent' }, 'docs/escalation_note.md': { state: 'absent' } },
       stages: {
         verify: { status: 'complete' },
         repair: { status: 'pending' },

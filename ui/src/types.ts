@@ -247,6 +247,7 @@ export interface OperationalReason {
 }
 
 export interface OperationalProjection {
+  terminalArtifacts?: Array<{ path: string; ownership: "current" | "stale" | "unverified" }>;
   version: 1;
   runId?: string;
   projectDir?: string;

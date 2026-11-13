@@ -81,8 +81,8 @@ describe("H-M7-ui-cwd-discovery", () => {
       const fromUi = listUiTests(UI_ROOT, [], sandbox);
 
       expect(fromRepository).toEqual(fromUi);
-      // Execution approval controls and their two UI mutation cases are removed; all read-only and prelaunch cases remain.
-      expect(fromUi.cases).toBe(51);
+      // Retain the governed UI cases, including the terminal ownership projection.
+      expect(fromUi.cases).toBe(52);
       expect(relativeFiles(fromUi, PROJECT_ROOT)).toEqual(EXPECTED_UI_TESTS);
       expect(fromUi.files.every((file) => file.startsWith(`${PUBLIC_UI_TEST_ROOT.replaceAll("\\", "/")}/`)))
         .toBe(true);

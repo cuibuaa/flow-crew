@@ -1,3 +1,4 @@
+import { terminalArtifactOwnership, type PersistedTerminalArtifactState } from './terminal-artifact-status.js';
 import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { runRecordPath } from './run-layout.js';
 import { parseJsonl } from './jsonl.js';
@@ -45,7 +46,7 @@ interface StageLike {
   attempts?: unknown;
 }
 
-export interface OperationalRunState {
+export interface OperationalRunState extends PersistedTerminalArtifactState {
   runId?: unknown;
   projectDir?: unknown;
   workflowName?: unknown;
@@ -84,6 +85,7 @@ export interface OperationalPendingScope {
 }
 
 export interface OperationalProjection {
+  terminalArtifacts?: ReturnType<typeof terminalArtifactOwnership>;
   version: 1;
   runId?: string;
   projectDir?: string;
@@ -382,12 +384,12 @@ export function readOperationalProjection(
   const drift = options.includeDrift === false
     ? undefined
     : readRunDriftProjection(runDirectory, { state, events, eventsCoverage });
-  return buildOperationalProjection(state, events, {
+  return { ...buildOperationalProjection(state, events, {
     nowMs: options.nowMs,
     eventsCoverage,
     includeDrift: options.includeDrift,
     ...(drift ? { drift } : {}),
-  });
+  }), terminalArtifacts: state ? terminalArtifactOwnership(state, { runDir: runDirectory }) : [] };
 }
 
 export function formatHumanDuration(milliseconds: number | undefined): string {

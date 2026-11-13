@@ -1,3 +1,4 @@
+import { terminalArtifactOwnership } from './terminal-artifact-status.js';
 import { projectRunLifecycle } from './run-lifecycle.js';
 import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { resolveRunStatus } from './lifecycle-status.js';
@@ -314,6 +315,7 @@ export interface RunStateView {
   validation?: import('./store.js').GateVerdict['validation'];
   stages: Record<string, StageStatus>;
   histories: Pick<ArchivedStoreState, 'retiredStageUsage' | 'stageEvidence' | 'criterionDischarges' | 'unresolvedStageObligations' | 'auxiliaryAttempts'>;
+  terminalArtifacts: ReturnType<typeof terminalArtifactOwnership>;
   artifacts: ArtifactObservation[];
   artifactContracts: Array<{ stageId: string; path: string; record: unknown }>;
   budget: ReturnType<typeof budgetView>;
@@ -548,6 +550,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       version: 1, observedAt,
       lockWaits: readRunLockWaits(projectDir, runDirectory),
       snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw ?? ''), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
+      terminalArtifacts: fence.watchValue(() => terminalArtifactOwnership(state, { runDir: runDirectory })),
       run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason, writeGrant: state.writeGrant ?? legacyWriteGrant() },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },
       ...(state.validation ? { validation: state.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) } : {}),

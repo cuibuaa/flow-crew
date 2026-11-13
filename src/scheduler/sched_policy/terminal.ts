@@ -1,5 +1,5 @@
 import { runRecordPath } from '../../run-layout.js';
-import { freshTerminalArtifact } from '../../terminal-artifact-status.js';
+import { freshTerminalArtifact, ARTIFACT_OWNERSHIP_UNVERIFIED } from '../../terminal-artifact-status.js';
 import { concludeRun } from './run-completion.js';
 /** Terminal selection, floor/freshness/gate/reality enforcement and quiescent conclusion; receives campaign and escalation services. */
 import { type StoreState, isContinuingStage, RUN_STATUS, STAGE_STATUS, writeRunState, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
@@ -42,7 +42,7 @@ export interface TerminalEvaluationContext {
 
 export type TerminalEvaluation =
   | { decision: 'matched'; state: StoreState; reasons: string[] }
-  | { decision: 'deferred' | 'not_matched'; reasons: string[] };
+  | { decision: 'deferred' | 'not_matched'; reasons: string[]; reasonCode?: typeof ARTIFACT_OWNERSHIP_UNVERIFIED };
 
 function quarantineTerminalCandidate(runDirPath: string, sourcePath: string, label: string): string | undefined {
   if (!existsSync(sourcePath)) return undefined;
@@ -97,6 +97,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     }
     if (Object.values(state.stages).some(isContinuingStage)) {
       return { decision: 'deferred', reasons: ['retained stage budget work must continue before terminal settlement'] };
+    }
+    if (Object.values(state.terminalStates).some(entry => entry.paths.some(path => !state.terminalArtifactBaselines?.[path]))) {
+      return { decision: 'deferred', reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED, reasons: ['terminal launch content baseline is unavailable'] };
     }
     const stages = state.planControl?.stages ?? (state.dispatchedStages as StageConfig[] | undefined) ?? ctx.stages ?? [];
     const byId = new Map(stages.map(stage => [stage.id, stage]));
@@ -173,6 +176,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         const sourcePath = projPath;
         const floorCheck = evaluateTerminalFloor(state, entry, ctx.projectDir);
         if (!floorCheck.passed) {
+          if (floorCheck.reasonCode) return { decision: 'deferred', reasonCode: floorCheck.reasonCode, reasons: [floorCheck.reason!] };
           
           const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
           appendSchedulerGuidanceOnce(
@@ -329,7 +333,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     const conclusion = evaluation.decision === 'not_matched'
       ? `All stages settled, but no declared terminal state matched (${completionPath}): ${reasonDetail}`
       : `All stages settled, but declared terminal evaluation could not decide (${completionPath}): ${reasonDetail}`;
-    state = concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'terminal_unmatched', detail: conclusion, pendingStageNote: conclusion, eventFields: () => ({
+    state = concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: evaluation.reasonCode ?? 'terminal_unmatched', detail: conclusion, pendingStageNote: conclusion, eventFields: () => ({
       iteration: ctx.iteration,
       detail: `terminal evaluation ${evaluation.decision}: ${conclusion}`,
     }), writeCampaignEntry });

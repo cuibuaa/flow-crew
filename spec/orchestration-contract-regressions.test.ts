@@ -220,7 +220,7 @@ describe('gate settlement and research evidence', () => {
     const state = {
       ...readRunState(projectDir, runId),
       runId, workflowName: 'test', projectDir, status: 'running', startedAt,
-      terminalArtifactBaselines: {},
+      terminalArtifactBaselines: { 'docs/final.md': { state: 'absent' }, 'docs/escalation.md': { state: 'absent' } },
       terminalStates: {
         complete: { paths: ['docs/final.md'] },
         escalated: { paths: ['docs/escalation.md'] },
@@ -267,7 +267,7 @@ describe('gate settlement and research evidence', () => {
     const state = {
       ...readRunState(projectDir, runId),
       runId, workflowName: 'test', projectDir, status: 'running', startedAt,
-      terminalArtifactBaselines: {},
+      terminalArtifactBaselines: { 'docs/final.md': { state: 'absent' }, 'docs/escalation.md': { state: 'absent' } },
       terminalStates: {
         complete: { paths: ['docs/final.md'] },
         escalated: { paths: ['docs/escalation.md'] },

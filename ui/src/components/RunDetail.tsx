@@ -566,6 +566,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
                 ? `${run.operational.pendingScope.length} scope revision ${run.operational.pendingScope.length === 1 ? "request" : "requests"}`
                 : "none"}</strong>
           </div>
+          {run.operational.terminalArtifacts?.map(artifact => <p key={artifact.path}>Terminal artifact: {artifact.path} · {artifact.ownership}</p>)}
           <small>Evidence: state {run.operational.sourceCoverage.runState}; events {run.operational.sourceCoverage.events}; {run.operational.sourceCoverage.stageCount} stages.</small>
         </section>
       ) : (
