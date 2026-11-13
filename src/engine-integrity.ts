@@ -14,7 +14,6 @@ import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { flushTextRecords } from './append-boundary.js';
 import { engineOwnedDatabasePaths, prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
-import { externalOutputDirectory, readAdmittedBriefContract } from './ship-inputs.js';
 
 export class EngineStateError extends Error {}
 
@@ -266,11 +265,6 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     for (const { artifact, output } of outputs) {
       if (artifact.root !== 'run') continue;
       publishEngineFile(artifact.kind === 'directory' ? output : dirname(output), () => mkdirSync(artifact.kind === 'directory' ? output : dirname(output), { recursive: true }));
-    }
-    const contract = readAdmittedBriefContract(run);
-    for (const output of contract.outputs.filter(o => isAbsolute(o.path))) {
-      const directory = externalOutputDirectory(output, project, undefined, { runDir: run, inputPaths: contract.inputs.map(input => input.path) });
-      publishEngineFile(directory, () => mkdirSync(directory, { recursive: true }));
     }
   }
   const owns = (path: string): boolean => roots.some(root => inside(root, path));

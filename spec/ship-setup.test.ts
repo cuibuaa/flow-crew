@@ -33,7 +33,9 @@ import type { ValidationCommandRunner } from '../src/project-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { execWithStdin } from '../src/adapters/base.js';
-import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { runStage } from './test-support/stage-deadline.js';
+import { fixtureResult } from './test-support/declared-dispatch.js';
+import { HANDOFF_SCHEMA } from '../src/handoff.js';
 
 
 // Temporary projects and outputs share this repository as a container, while
@@ -370,13 +372,18 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work',
       artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } };
     const action = vi.fn(async () => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(path)},{recursive:true});fs.writeFileSync(${JSON.stringify(runRecordPath(path, 'result.txt'))},'result');`], '', { cwd: target, timeout_ms: 5000 }));
+    const execute = () => runStage({ run: async (_prompt, _role, opts) => fixtureResult(await action(), opts) }, {
+      ...input, runId: run.runId,
+      role: { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' },
+      dependsOn: [], promptTemplate: 'Retain results.', timeout_ms: 5000, retries: 0, outputSchema: HANDOFF_SCHEMA,
+    });
     if (inPlace) {
-      await expect(withEngineIntegrity(input, action)).rejects.toThrow('overlaps project');
+      await expect(execute()).rejects.toThrow('overlaps project');
       expect(action).not.toHaveBeenCalled();
       expect(existsSync(path)).toBe(false);
     } else {
       expect(report.targetOutputInventory?.blocking).toHaveLength(0);
-      const result = await withEngineIntegrity(input, action);
+      const result = await execute();
       expect(result.exitCode, result.output).toBe(0);
       expect(readFileSync(runRecordPath(path, 'result.txt'), 'utf8')).toBe('result');
     }

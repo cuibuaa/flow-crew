@@ -114,7 +114,10 @@ export const BriefDeclarationsSchema = z.object({
       });
     });
   }
-});
+}).meta({ replacements: {
+  research: { key: 'research', protocol: ResearchInstrumentSchema.shape.protocol.value },
+  objective: { key: 'research', protocol: ResearchInstrumentSchema.shape.protocol.value },
+} });
 export type BriefDeclarations = z.infer<typeof BriefDeclarationsSchema>;
 
 /** All semantic readers validate the entire declaration before selecting a field. */
@@ -134,15 +137,17 @@ export function parseBriefDeclarations(brief: string): BriefDeclarations {
     const issue = issues.map(issue => ({ ...issue, path: issue.code === 'unrecognized_keys' ? [...issue.path, issue.keys[0]] : issue.path }))
       .sort((a, b) => b.path.length - a.path.length || Number(b.code === 'unrecognized_keys') - Number(a.code === 'unrecognized_keys'))[0];
     const path = issue.path.join('.') || '$';
-    throw new DeclarationRefusal(path, issue.message);
+    const replacements = BriefDeclarationsSchema.meta()?.replacements as Record<string, { key: string; protocol: string }>;
+    const rootKey = String(issue.path[0]);
+    throw new DeclarationRefusal(path, issue.message, Object.hasOwn(replacements, rootKey) ? replacements[rootKey] : undefined);
   }
   return result.data;
 }
 
 export class DeclarationRefusal extends Error {
   readonly code = 'declaration_invalid';
-  constructor(readonly keyPath: string, detail: string) {
-    super(`DECLARATION_INVALID: ${keyPath}: ${detail}`);
+  constructor(readonly keyPath: string, detail: string, readonly replacement?: { key: string; protocol: string }) {
+    super(`DECLARATION_INVALID: ${keyPath}: ${detail}${replacement ? `; use ${replacement.key} with protocol ${replacement.protocol}` : ''}`);
     this.name = 'DeclarationRefusal';
   }
 }

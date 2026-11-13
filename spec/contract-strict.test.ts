@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
 import { parseBriefDeclarations, DeclarationRefusal } from '../src/brief-declarations.js';
+import * as admissionCodec from '../src/brief-admission.js';
 import { admittedContract, createBriefAdmission, inspectBrief, verifyBriefAdmission } from '../src/brief-preflight.js';
 import { readAdmittedContract } from '../src/brief-criteria.js';
 import { readBriefCriteriaForAdmission } from '../src/scheduler/sched_admission/dispatch.js';
@@ -176,6 +177,22 @@ describe('frozen run declaration', () => {
     expect(readAdmittedContract(created.runDirPath).brief).toBe(created.brief);
   });
 
+  it('does not revalidate unchanged contracts on ordinary or operational state writes', () => {
+    const created = parked();
+    const check = vi.spyOn(admissionCodec, 'admittedContract');
+    try {
+      updateRunState(project, created.runId, state => { state.taskDescription = 'ordinary tick'; });
+      updateOperationalRunState(created.runDirPath, state => { state.taskDescription = 'operational tick'; });
+      expect(check).not.toHaveBeenCalled();
+    } finally { check.mockRestore(); }
+    expect(readAdmittedContract(created.runDirPath).brief).toBe(created.brief);
+  });
+
+  it('refuses absent admission carriers with a typed missing-contract outcome', () => {
+    expect(() => readAdmittedContract(join(root, 'absent-run'))).toThrow(admissionCodec.ContractRefusal);
+    expect(() => readAdmittedContract(join(root, 'absent-run'))).toThrow('contract_hash_missing');
+  });
+
   it('refuses a mismatched changed-brief receipt before any resume write', () => {
     const created = parked(), path = runRecordPath(created.runDirPath, 'run.json');
     const receipt = createBriefAdmission(inspectBrief('Acknowledged'), { kind: 'explicit', source: 'cli_digest_flag', at: new Date().toISOString() });
@@ -201,9 +218,11 @@ describe('frozen run declaration', () => {
     } finally { removeSchedulerPidIfOwned(runRecordPath(created.runDirPath, 'scheduler.pid')); releaseLaunchIntent(project, created.runId); }
   });
 
-  it('refuses a tampered recorded declaration before resume, recovery or contract consumption', () => {
+  it.each(['value', 'shape'])('refuses a tampered recorded declaration before resume, recovery or contract consumption: %s', tamper => {
     const created = parked(), path = runRecordPath(created.runDirPath, 'run.json');
-    const raw = JSON.parse(readFileSync(path, 'utf8')); raw.briefAdmission.contract.declaration.max_continuations = 9;
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (tamper === 'value') raw.briefAdmission.contract.declaration.max_continuations = 9;
+    else raw.briefAdmission.contract.declaration.outputs = {};
     writeFileSync(path, JSON.stringify(raw));
     for (const consume of [() => readAdmittedContract(created.runDirPath), () => assertContinuationCompatible(project, created.runId),
       () => reconcileHostInterruptedRun(project, created.runId), () => prepareWorkflowLaunch(created.w, stringify(created.w), project, created.runId)]) {
@@ -221,7 +240,12 @@ describe('frozen run declaration', () => {
     raw.briefContinuationAdmission.contract.contractHash = '0'.repeat(64);
     writeFileSync(path, JSON.stringify(raw));
     const before = readFileSync(path, 'utf8');
-    expect(() => prepareWorkflowLaunch(created.w, stringify(created.w), project, created.runId)).toThrow('contract_hash_mismatch');
+    for (const consume of [() => prepareWorkflowLaunch(created.w, stringify(created.w), project, created.runId),
+      () => assertContinuationCompatible(project, created.runId), () => reconcileHostInterruptedRun(project, created.runId),
+      () => readAdmittedContract(created.runDirPath), () => ensureAttemptValidationPlan(project, created.runId),
+      () => readBriefCriteriaForAdmission(created.runDirPath)]) {
+      expect(consume).toThrow('contract_hash_mismatch');
+    }
     expect(readFileSync(path, 'utf8')).toBe(before);
   });
 

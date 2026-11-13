@@ -1,5 +1,5 @@
 import { readRunSnapshot } from './run-lifecycle.js';
-import { admittedContract, type FrozenBriefContract, type BriefAdmissionRecord } from './brief-admission.js';
+import { ContractRefusal, admittedContract, type FrozenBriefContract, type BriefAdmissionRecord } from './brief-admission.js';
 import { runRecordPath } from './run-layout.js';
 import { parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
 import { createHash } from 'node:crypto';
@@ -60,6 +60,13 @@ export function readBriefCriteriaArtifact(runDir: string): BriefCriteriaArtifact
 
 /** The run admission is the sole runtime contract carrier. Sidecars are exports. */
 export function readAdmittedContract(runDir: string): FrozenBriefContract {
-  const state = readRunSnapshot(runDir) as { briefAdmission?: BriefAdmissionRecord };
-  return admittedContract(state.briefAdmission);
+  let state: { briefAdmission?: BriefAdmissionRecord; briefContinuationAdmission?: BriefAdmissionRecord };
+  try { state = readRunSnapshot(runDir); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ContractRefusal('contract_hash_missing');
+    throw error;
+  }
+  const contract = admittedContract(state.briefAdmission);
+  if (state.briefContinuationAdmission) admittedContract(state.briefContinuationAdmission);
+  return contract;
 }

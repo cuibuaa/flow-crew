@@ -164,7 +164,10 @@ describe('UX/performance engine-loop evidence replays', () => {
 
   it('item 11: warm project observations reuse clean identities without reading or hashing bytes', () => {
     const projectDir = temporaryRoot();
-    const runDirectory = temporaryRoot('flowcrew-rollback-run-');
+    const stateRoot = temporaryRoot('flowcrew-rollback-run-');
+    priorStateRoot = fcGlobalDir();
+    setFcGlobalDir(stateRoot);
+    const runDirectory = createRun(projectDir, 'rollback', 'name: rollback\nstages: []\n', []).runDirPath;
     mkdirSync(join(projectDir, 'scoped'), { recursive: true });
     mkdirSync(join(projectDir, 'outside'), { recursive: true });
     writeFileSync(join(projectDir, 'scoped', 'only.txt'), 'scope\n');
@@ -194,7 +197,10 @@ describe('UX/performance engine-loop evidence replays', () => {
 
   it('item 11: a watcher reliability loss takes the conservative full audit and detects an outside write', () => {
     const projectDir = temporaryRoot();
-    const runDirectory = temporaryRoot('flowcrew-rollback-overflow-');
+    const stateRoot = temporaryRoot('flowcrew-rollback-overflow-');
+    priorStateRoot = fcGlobalDir();
+    setFcGlobalDir(stateRoot);
+    const runDirectory = createRun(projectDir, 'rollback', 'name: rollback\nstages: []\n', []).runDirPath;
     mkdirSync(join(projectDir, 'scoped'), { recursive: true });
     mkdirSync(join(projectDir, 'outside'), { recursive: true });
     writeFileSync(join(projectDir, 'scoped', 'only.txt'), 'scope\n');
@@ -254,7 +260,8 @@ describe('UX/performance engine-loop evidence replays', () => {
         skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [],
       }],
     };
-    const created = createRun(projectDir, config.name, 'fixture', ['work']);
+    const brief = '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.';
+    const created = createRun(projectDir, config.name, 'fixture', ['work'], brief);
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
@@ -262,7 +269,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     // the later empty-scope stage must still be caught and restored independently.
     const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/**'],
       depends_on: [], dependency_reasons: {} });
-    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief);
     const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
     expect(admitted.files.get('src/dirty.txt')?.backingPath).toBeTruthy();
     expect(admitted.files.get('src/untracked.txt')?.backingPath).toBeTruthy();
@@ -308,13 +315,14 @@ describe('UX/performance engine-loop evidence replays', () => {
         skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [],
       }],
     };
-    const created = createRun(projectDir, config.name, 'fixture', ['work']);
+    const brief = '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.';
+    const created = createRun(projectDir, config.name, 'fixture', ['work'], brief);
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
     const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/protected.txt'],
       depends_on: [], dependency_reasons: {} });
-    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief);
     const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
     expect(admitted.measurement.baselineStrategy).toBe('filesystem-images');
     expect(admitted.files.get('src/protected.txt')?.backingPath).toBeTruthy();

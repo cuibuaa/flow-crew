@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { execWithStdin, type Adapter } from '../src/adapters/base.js';
+import { execWithStdin, type Adapter, type RunResult } from '../src/adapters/base.js';
 import { archiveDeclaredOutputs, declaredOutputSource } from '../src/declared-output-archive.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
@@ -11,6 +11,8 @@ import { extractBriefOutputDeclarations, inspectBriefOutputs, nodeShipInputFileS
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { runStage } from './test-support/stage-deadline.js';
+import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { registerEngineOwnedSqlitePath } from '../src/engine-owned-carriers.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 
@@ -49,7 +51,12 @@ function boundaryFixture(source = brief(output)) {
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), source);
   const input = { projectDir: project, runDir: created.runDirPath, stageId: 'work',  artifactContract: contract };
   const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
-  return { ...created, input, command };
+  const execute = (action: () => Promise<RunResult>) => runStage({ run: async (_prompt, _role, opts) => fixtureResult(await action(), opts) }, {
+    ...input, runId: created.runId,
+    role: { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' },
+    dependsOn: [], promptTemplate: 'Do the work.', timeout_ms: 5000, retries: 0, outputSchema: HANDOFF_SCHEMA,
+  });
+  return { ...created, input, execute, command };
 }
 
 describe('absolute directories in the declared output contract', () => {
@@ -190,26 +197,30 @@ describe('absolute directories in the declared output contract', () => {
 describe('external output execution', () => {
   it('retains ordinary filesystem access beyond declared output roots', async () => {
     const f = boundaryFixture();
-    await withEngineIntegrity(f.input, async () => {
-      const paths = [join(output, 'result'), join(root, 'ordinary'), join(project, 'ordinary')];
-      const result = await f.command(`const fs=require('node:fs'); for(const path of ${JSON.stringify(paths)}) fs.writeFileSync(path,'result');`);
-      expect(result.exitCode, result.output).toBe(0);
-      for (const path of paths) expect(readFileSync(path, 'utf8')).toBe('result');
+    const paths = [join(output, 'result'), join(root, 'ordinary'), join(project, 'ordinary')];
+    expect(existsSync(output)).toBe(false);
+    // The caller prepares ordinary paths; this probe isolates the storage guard from stage write grants.
+    mkdirSync(output, { recursive: true });
+    const result = await withEngineIntegrity(f.input, async () => {
+      expect(existsSync(output)).toBe(true);
+      return f.command(`const fs=require('node:fs'); for(const path of ${JSON.stringify(paths)}) fs.writeFileSync(path,'result');`);
     });
+    expect(result.exitCode, result.output).toBe(0);
+    for (const path of paths) expect(readFileSync(path, 'utf8')).toBe('result');
   });
 
   it('refuses an invalid declaration before entering stage code', async () => {
     const f = boundaryFixture(brief(runRecordPath(join(stateRoot, 'runs', 'other'), 'results')));
-    const action = vi.fn(async () => {});
-    await expect(withEngineIntegrity(f.input, action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
+    const action = vi.fn(async () => ({ exitCode: 0, duration_ms: 1, output: 'must not run' }));
+    await expect(f.execute(action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
     expect(action).not.toHaveBeenCalled();
   });
 
   it('refuses a source-overlapping in-place launch before stage code', async () => {
     const path = join(project, 'runs', 'results');
     const f = boundaryFixture(brief(path));
-    const action = vi.fn(async () => {});
-    await expect(withEngineIntegrity(f.input, action)).rejects.toThrow('overlaps project');
+    const action = vi.fn(async () => ({ exitCode: 0, duration_ms: 1, output: 'must not run' }));
+    await expect(f.execute(action)).rejects.toThrow('overlaps project');
     expect(action).not.toHaveBeenCalled();
     expect(existsSync(path)).toBe(false);
   });

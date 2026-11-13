@@ -15,7 +15,9 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
       import setup from ${JSON.stringify(new URL('../scripts/vitest-global-setup.ts', import.meta.url).href)};
       import { createInvocationScratch, retireRunScratch } from ${JSON.stringify(new URL('../src/invocation-scratch.ts', import.meta.url).href)};
       import { prepareAdapterHome } from ${JSON.stringify(new URL('../src/adapter-home.ts', import.meta.url).href)};
-      import { withEngineIntegrity } from ${JSON.stringify(new URL('../src/engine-integrity.ts', import.meta.url).href)};
+      import { withEngineIntegrity, EngineStateError } from ${JSON.stringify(new URL('../src/engine-integrity.ts', import.meta.url).href)};
+      import { readAdmittedContract } from ${JSON.stringify(new URL('../src/brief-criteria.ts', import.meta.url).href)};
+      import { ContractRefusal } from ${JSON.stringify(new URL('../src/brief-admission.ts', import.meta.url).href)};
       import { setFcGlobalDir, reserveRun, initializeReservedRun } from ${JSON.stringify(new URL('../src/store.ts', import.meta.url).href)};
       const root = process.argv[1];
       const authorRun = join(root, 'author-run');
@@ -42,15 +44,18 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
         });
         const carrier = join(run, 'engine', 'verdict_previous.json');
         writeFileSync(carrier, 'authentic');
+        let noAdmissionRefused = false;
+        try { readAdmittedContract(run); }
+        catch (error) { noAdmissionRefused = error instanceof ContractRefusal && error.code === 'contract_hash_missing'; }
         let tamperRefused = false;
         try {
           await withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'work' }, async () => {
             writeFileSync(carrier, 'counterfeit');
           });
-        } catch (error) { tamperRefused = String(error).includes('ENGINE_STATE_TAMPERED'); }
+        } catch (error) { tamperRefused = error instanceof EngineStateError && error.message.startsWith('ENGINE_STATE_TAMPERED:'); }
         const restored = readFileSync(carrier, 'utf8') === 'authentic';
         teardown(); teardown = undefined;
-        console.log(JSON.stringify({ homePrepared, socketClosed: !server.listening, tamperRefused, restored,
+        console.log(JSON.stringify({ homePrepared, socketClosed: !server.listening, noAdmissionRefused, tamperRefused, restored,
           suiteRetired: !existsSync(suite), callerRetained: readFileSync(retained, 'utf8') === 'keep author evidence',
           environmentRestored: ['TMPDIR', 'TMP', 'TEMP'].every(name => process.env[name] === author.path) }));
       } finally {
@@ -63,7 +68,7 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
     });
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      homePrepared: true, socketClosed: true, tamperRefused: true, restored: true,
+      homePrepared: true, socketClosed: true, noAdmissionRefused: true, tamperRefused: true, restored: true,
       suiteRetired: true, callerRetained: true, environmentRestored: true,
     });
   } finally { rmSync(root, { recursive: true, force: true }); }

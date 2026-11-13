@@ -8,7 +8,7 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
 import { verifyDeclaredBriefInputs } from '../../ship-inputs.js';
 import { parseBriefDeclarations } from '../../brief-declarations.js';
-import { writeBriefCriteriaArtifact } from '../../brief-criteria.js';
+import { readAdmittedContract, writeBriefCriteriaArtifact } from '../../brief-criteria.js';
 import { BriefAdmissionRecord, verifyBriefAdmission, admittedContract, createBriefAdmission, inspectBrief } from '../../brief-preflight.js';
 import { resolveRunIdentity } from '../../cancellation-policy.js';
 import { reconcileHostInterruptedRun } from '../../restart-recovery.js';
@@ -59,11 +59,11 @@ export function prepareWorkflowLaunch(
   const launchUnchanged = (state: StoreState): boolean => !launchState
     || (state.status === launchState.status && state.completedAt === launchState.completedAt);
   if (existingRunId && existsSync(runRecordPath(runDir(projectDir, existingRunId), 'run.json'))) {
+    readAdmittedContract(runDir(projectDir, existingRunId));
     const archived = readRunState(projectDir, existingRunId);
     requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
     assertSeparatedRunLayout(runDir(projectDir, existingRunId));
     launchState = archived;
-    admittedContract(archived.briefAdmission);
     briefWasAdmitted = true;
     if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {

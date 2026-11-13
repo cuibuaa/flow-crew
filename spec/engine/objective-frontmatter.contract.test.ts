@@ -1,9 +1,4 @@
-/**
- * Phase-0 safety net — Objective primitive frontmatter contract.
- *
- * `objective:` is the unified primitive name; `research:` is the back-compat alias. Both parse to
- * the same ResearchConfig (metric-kind). Pins that promoting the name didn't break the legacy block.
- */
+/** Legacy metric blocks and the retired alias refuse with a schema-owned migration pointer. */
 import { describe, expect, it } from 'vitest';
 import { parseBriefFrontmatter } from '../../src/scheduler.js';
 
@@ -17,13 +12,26 @@ describe('Objective primitive — research/objective frontmatter', () => {
   it('refuses the legacy research block', () => {
     const parsed = parseBriefFrontmatter(body('research'));
     expect(parsed.research).toBeUndefined();
-    expect(parsed.workflowError).toContain('research-instrument/v1');
+    expect(parsed.declarationRefusal).toMatchObject({
+      code: 'declaration_invalid', keyPath: 'research.baseline',
+      replacement: { key: 'research', protocol: 'research-instrument/v1' },
+    });
   });
 
   it('refuses the retired objective alias identically', () => {
     const parsed = parseBriefFrontmatter(body('objective'));
     expect(parsed.research).toBeUndefined();
-    expect(parsed.workflowError).toContain('research-instrument/v1');
+    expect(parsed.declarationRefusal).toMatchObject({
+      code: 'declaration_invalid', keyPath: 'objective',
+      replacement: { key: 'research', protocol: 'research-instrument/v1' },
+    });
+  });
+
+  it.each(['unknown', 'constructor', 'toString', '__proto__'])('refuses unrelated %s without inventing a migration pointer', key => {
+    const parsed = parseBriefFrontmatter(`---\n${key}: true\n---\n# task`);
+    expect(parsed.research).toBeUndefined();
+    expect(parsed.declarationRefusal).toMatchObject({ code: 'declaration_invalid', keyPath: key });
+    expect(parsed.declarationRefusal?.replacement).toBeUndefined();
   });
 
   it('strips the frontmatter from the brief body either way', () => {

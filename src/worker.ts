@@ -912,6 +912,7 @@ export async function runStage(
         const externalDirectories = opts.isGate || isolatedDecision ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
           .map(output => externalOutputDirectory(output, opts.projectDir, undefined,
             { runDir: opts.runDir, inputPaths: briefContract.inputs.map(input => input.path) }));
+        for (const directory of externalDirectories) mkdirSync(directory, { recursive: true });
         const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
           runDir: opts.runDir, stageId: opts.stageId, scope: opts.scope, artifacts: writableArtifacts, externalDirectories,
           home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };

@@ -135,17 +135,15 @@ const cleanGit: GitAdapter = {
 };
 
 function recoveryFixture(options: { maxRetries?: number; attempt?: number } = {}) {
-  const brief = '# Resume only this run';
-  const created = createRun(projectDir, 'recovery', 'name: recovery\nstages: []\n', []);
+  const brief = '---\nterminal_states: {ceiling_hit: {paths: [terminal_ceiling_report.md]}}\n---\n# Resume only this run';
+  const created = createRun(projectDir, 'recovery', 'name: recovery\nstages: []\n', [], brief, admitted(brief).brief_admission);
   const run = readRunState(projectDir, created.runId);
   const recordedTick = recordedEvidence('item5_nonterminal_state_before_crash').toString('utf-8');
   const stagesOffset = recordedTick.indexOf(' stages=');
   expect(stagesOffset).toBeGreaterThan(0);
   run.status = 'running';
   run.stages = JSON.parse(recordedTick.slice(stagesOffset + ' stages='.length).trim()) as StoreState['stages'];
-  run.terminalStates = { ceiling_hit: { paths: ['terminal_ceiling_report.md'] } };
   run.taskDescription = brief;
-  run.briefAdmission = admitted(brief).brief_admission;
   writeRunState(projectDir, created.runId, run);
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief, 'utf-8');
   writeFileSync(

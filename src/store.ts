@@ -1167,11 +1167,11 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
   };
 }
 
-/** Runtime caches never override a frozen declaration. Historical records remain readable. */
+/** Project the frozen record without rehashing on every state read/write.
+ * Active continuation/contract consumers own validation; writers fence replacement. */
 function projectAdmittedConfiguration(state: StoreState): void {
   if (!state.briefAdmission?.contract) return;
-  const { declaration } = admittedContract(state.briefAdmission);
-  if (state.briefContinuationAdmission) admittedContract(state.briefContinuationAdmission);
+  const { declaration } = state.briefAdmission.contract;
   const parsed = declarationConfiguration(declaration);
   state.maxContinuations = parsed.maxContinuations;
   state.terminalStates = parsed.terminalStates;
@@ -1183,10 +1183,10 @@ function projectAdmittedConfiguration(state: StoreState): void {
 
 function assertFrozenAdmission(previous: StoreState | undefined, state: StoreState): void {
   if (!previous?.briefAdmission?.contract) return;
-  admittedContract(previous.briefAdmission);
-  admittedContract(state.briefAdmission);
   if (!isJsonPersistedEqual(previous.briefAdmission, state.briefAdmission)) throw new ContractRefusal('contract_hash_mismatch');
-  if (state.briefContinuationAdmission) admittedContract(state.briefContinuationAdmission);
+  if (state.briefContinuationAdmission && !isJsonPersistedEqual(previous.briefContinuationAdmission, state.briefContinuationAdmission)) {
+    admittedContract(state.briefContinuationAdmission);
+  }
 }
 
 function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): ArchivedStoreState {

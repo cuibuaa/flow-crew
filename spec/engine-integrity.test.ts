@@ -450,6 +450,7 @@ describe('structural engine state protection', () => {
     const output = join(root, 'external');
     const brief = `---\noutputs:\n  - path: ${JSON.stringify(output)}\n    type: directory\n---\n# Goal\nWrite results.\n`;
     run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], brief).runDirPath;
+    mkdirSync(output); // Capability preparation belongs to the caller, outside this storage guard.
     const carrier = runRecordPath(run, 'verdict_previous.json'), alias = join(output, 'late-alias');
     write(carrier); write(runRecordPath(run, 'task_brief.md'), brief);
     await voided(() => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');console.log('ready');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(alias)})){clearInterval(timer);fs.writeFileSync(${JSON.stringify(alias)},'counterfeit');}},5);`], '', {
@@ -707,7 +708,11 @@ describe('structural engine state protection', () => {
     const brief = `---\noutputs:\n  - path: ${output}\n    type: directory\n---\n# Goal\nProduce results.\n`;
     run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], brief).runDirPath;
     write(runRecordPath(run,'task_brief.md'), brief);
-    await expect(withEngineIntegrity(input(),async()=>{})).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
+    const adapter = { run: vi.fn() };
+    await expect(runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId: run.split('/').at(-1)!,
+      role: { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' },
+      dependsOn: [], promptTemplate: 'Do the work.', timeout_ms: 5000, retries: 0, artifactContract: contract, outputSchema: HANDOFF_SCHEMA })).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
+    expect(adapter.run).not.toHaveBeenCalled();
   });
 
   it('rejects a malformed successful typed answer before publishing a handoff', async () => {

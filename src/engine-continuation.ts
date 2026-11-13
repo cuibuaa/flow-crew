@@ -1,4 +1,5 @@
-import { admittedContract, ContractRefusal } from './brief-admission.js';
+import { readAdmittedContract } from './brief-criteria.js';
+import { ContractRefusal } from './brief-admission.js';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { runRecordPath } from './run-layout.js';
@@ -25,8 +26,8 @@ export function recordContinuationRefusal(projectDir: string, runId: string, rea
 
 export function assertContinuationCompatible(projectDir: string, runId: string): StoreState {
   try {
+    readAdmittedContract(runDir(projectDir, runId));
     const state = readRunState(projectDir, runId);
-    admittedContract(state.briefAdmission);
     requireKnownRunStatus(state.status, `continue run ${runId}`);
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('run/project binding mismatch');
     if (state.recovery?.kind === 'blocked') throw new Error(state.recovery.reason);
