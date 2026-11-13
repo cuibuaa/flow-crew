@@ -8,6 +8,7 @@ import { closeSync, mkdirSync, openSync, publishEngineFiles, writeFileSync } fro
 import { stageWorkPath } from './run-layout.js';
 import { literalTreeCapabilityRoot, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
 import { resolveArtifactLocation } from './artifact-location.js';
+import { gitSync } from './git-facts.js';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 import type { ArtifactContract } from './artifact-declarations.js';
 
@@ -213,8 +214,8 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 }
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
-    { cwd, env: gitEnvironment(), encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return gitSync(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
+    { cwd, env: gitEnvironment(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 /** An unborn repository has no commit yet. Git's quiet verification reports
