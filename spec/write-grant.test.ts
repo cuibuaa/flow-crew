@@ -99,6 +99,9 @@ async function linkedWorktree(): Promise<{ common: string; checkout: string }> {
   return { common: join(primary, '.git'), checkout };
 }
 
+// A stage that prints something else must fail with what it printed, not with a parse error.
+const parsed = (output: string): unknown => { try { return JSON.parse(output); } catch { throw new Error(`stage output is not JSON:\n${output}`); } };
+
 describe('stage filesystem write grant through production launch', () => {
   it.each(['plain', 'symlink', 'hardlink', 'rename-out', 'rename-in', 'truncate', 'delete', 'mkdir', 'system-temp', 'child'])(
     'denies the first %s write with an OS error', async kind => {
@@ -123,7 +126,7 @@ describe('stage filesystem write grant through production launch', () => {
         : observe(operations[kind]);
       const result = await launch(script);
       expect(result.exitCode, result.output).toBe(0);
-      expect(JSON.parse(result.output)).toMatchObject({ denied: true, code: expect.stringMatching(/^(EACCES|EPERM|EXDEV)$/) });
+      expect(parsed(result.output)).toMatchObject({ denied: true, code: expect.stringMatching(/^(EACCES|EPERM|EXDEV)$/) });
       expect(result.writeGrantApplied).toEqual({ abi: contract.capability.kind === 'landlock' ? contract.capability.abi : 0, linkedFileCount: 0 });
       expect(readFileSync(outside, 'utf8')).toBe('unchanged');
       expect(readStageStatus(project, runId, 'left').attempts?.at(-1)?.writeGrantApplied).toEqual(result.writeGrantApplied);
@@ -169,7 +172,7 @@ print(json.dumps(result))
     const result = await runStage(agent, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId,
       runDir: directory, retries: 0, timeout_ms: 60_000, artifactContract: artifacts, scope: ['left/'] });
     expect(result.exitCode, result.output).toBe(0);
-    expect(JSON.parse(result.output)).toEqual({ denied: true, errno: 13, reparented: true, detached: true });
+    expect(parsed(result.output)).toEqual({ denied: true, errno: 13, reparented: true, detached: true });
   });
 
   it('keeps the agent pid and process group across exec and permits writes, sockets, spawning and a project test', async () => {
@@ -186,7 +189,7 @@ const server = net.createServer(socket => socket.end('ok'));
 server.listen(sock, () => { const socket=net.connect(sock); let reply=''; socket.on('data',chunk => reply+=chunk); socket.on('end', () => server.close(() => console.log(JSON.stringify({ pid:process.pid, pgid:Number(fs.readFileSync('/proc/self/stat','utf8').split(' ')[4]), testExit:test.status, socket:reply })))); });`;
     const result = await launch(script, { onChild: handles => { supervisedPid = handles.pid; } });
     expect(result.exitCode, result.output).toBe(0);
-    expect(JSON.parse(result.output)).toEqual({ pid: supervisedPid, pgid: supervisedPid, testExit: 0, socket: 'ok' });
+    expect(parsed(result.output)).toEqual({ pid: supervisedPid, pgid: supervisedPid, testExit: 0, socket: 'ok' });
   });
 
   it('holds two simultaneous grants in one worktree and denies both cross-scope writes', async () => {
@@ -244,7 +247,7 @@ git('add','change'); git('-c','user.name=Fixture','-c','user.email=fixture@examp
 const denials = ${JSON.stringify([join(common, 'refs', 'heads', 'base'), join(common, 'config'), join(common, 'hooks', 'post-commit')])}.map(path => { try {fs.writeFileSync(path,'bad'); return null;} catch(error) {return error.code;} });
 console.log(JSON.stringify({branch:git('symbolic-ref','--short','HEAD'), files:git('ls-tree','--name-only','HEAD').split('\\n'), denials}));`], '', { cwd: checkout, timeout_ms: 60_000 }));
     expect(result.exitCode, result.output).toBe(0);
-    expect(JSON.parse(result.output)).toMatchObject({ branch: expect.stringMatching(/^fc\/[^/]+\/left\/head$/), files: ['change', 'seed'], denials: ['EACCES', 'EACCES', 'EACCES'] });
+    expect(parsed(result.output)).toMatchObject({ branch: expect.stringMatching(/^fc\/[^/]+\/left\/head$/), files: ['change', 'seed'], denials: ['EACCES', 'EACCES', 'EACCES'] });
     expect(result.writeGrantApplied?.linkedFileCount).toBe(0);
     expect(git(checkout, ['symbolic-ref', '--short', 'HEAD'])).toBe('fixture');
   });
@@ -263,7 +266,7 @@ git('add','left/first');git('-c','user.name=Fixture','-c','user.email=fixture@ex
 console.log(JSON.stringify({branch:git('symbolic-ref','--short','HEAD'),files:git('ls-tree','--name-only','HEAD')}));`], '', { cwd: project, timeout_ms: 60_000 }));
     expect(result.exitCode, result.output).toBe(0);
     expect(result.writeGrantApplied?.linkedFileCount).toBe(0);
-    expect(JSON.parse(result.output)).toEqual({ branch: expect.stringMatching(/^fc\/[^/]+\/left\/head$/), files: 'left' });
+    expect(parsed(result.output)).toEqual({ branch: expect.stringMatching(/^fc\/[^/]+\/left\/head$/), files: 'left' });
     expect(() => git(project, ['rev-parse', '--verify', 'HEAD'])).toThrow();
     expect(git(project, ['symbolic-ref', '--short', 'HEAD'])).toBe('base');
   });
@@ -413,7 +416,7 @@ return codes;`);
     if (!supported()) return;
     const exact = join(project, 'left', 'exact'); writeFileSync(exact, 'old');
     const result = await launch(observe(`fs.writeFileSync('left/sibling','bad')`), { scope: ['left/exact'] });
-    expect(JSON.parse(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
     for (const scope of [['left/missing'], ['left/*.ts']]) {
       expect((await launch('process.exit(0)', { scope })).writeGrantFailure).toMatchObject({ kind: 'unrepresentable_scope', path: scope[0] });
     }
@@ -492,7 +495,7 @@ return codes;`);
     const result = await withStageWriteGrant({ ...declaration(), scope: [], contract: admitted }, () => execWithStdin(process.execPath, ['-e',
       `require('node:fs').writeFileSync(${JSON.stringify(join(first, 'allowed'))},'ok'); ${observe(`fs.writeFileSync(${JSON.stringify(join(second, 'denied'))},'bad')`)}`], '', { cwd: project, timeout_ms: 60_000 }));
     expect(result.exitCode, result.output).toBe(0);
-    expect(JSON.parse(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
   });
 
   it('surfaces a runtime application error on an admitted capable host as a typed failure, without executing the agent', async () => {
@@ -624,7 +627,7 @@ process.stdin.resume(); process.stdin.on('end', () => {
     } };
     const result = await runStage(outer, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId, runDir: directory,
       retries: 0, timeout_ms: 60_000, artifactContract: artifacts, scope: ['left/'] });
-    expect(JSON.parse(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
   });
 
   it('pins shared Git authority at admission even if an agent rewrites its worktree pointer', async () => {
@@ -756,7 +759,7 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
 {${observe("fs.writeFileSync('right/bad','bad')")}}`], '', { cwd: project, timeout_ms: 60_000, execution: { runDir: alias } }));
     expect(result.exitCode, result.output).toBe(0);
     expect(result.writeGrantApplied?.linkedFileCount).toBe(0);
-    expect(JSON.parse(result.output)).toEqual({ denied: true, code: 'EACCES' });
+    expect(parsed(result.output)).toEqual({ denied: true, code: 'EACCES' });
     expect(readFileSync(join(directory, product), 'utf8')).toBe('new');
   });
 
