@@ -24,6 +24,9 @@ Thumbs.db
 *.tsbuildinfo
 ui/*.d.ts.map
 docs/*
+!docs/append-log/
+docs/append-log/*
+!docs/append-log/report.md
 !docs/git-facts/
 docs/git-facts/*
 !docs/git-facts/report.md
