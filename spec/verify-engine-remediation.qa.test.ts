@@ -26,12 +26,12 @@ import {
   type LandGitRunner,
 } from '../src/cli-land.js';
 import { archiveDeclaredOutputs } from '../src/declared-output-archive.js';
+import { readEvidence } from '../src/evidence-ledger.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import {
   findGateRecoveryStages,
   loadWorkflow,
   readGateEvaluation,
-  recordGateValidationDelta,
   runWorkflow,
   tryTerminateOnTerminalState,
   writeCampaignEntry,
@@ -147,28 +147,29 @@ describe('independent engine-remediation verification', () => {
     };
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     write(readyPath, `${JSON.stringify(ready, null, 2)}\n`);
-    let gatePrompt = '';
+    const stagesRun: string[] = [];
     const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true });
     const final = await runWorkflow(
       { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: [...coveredStages(qa, brief),
         stage({ id: 'repair_qa', role: 'qa', scope: [], depends_on: ['qa'], retry_to: ['qa'], artifact_contract: artifacts([]) })] },
       'name: validation-wire-qa',
       projectDir,
-      { async run(prompt, _role, options) {
+      { async run(_prompt, _role, options) {
         if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        stagesRun.push(options.stageId);
         if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
-        gatePrompt = prompt;
-        write(stageWorkPath(options.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'judgement', evidence: 'engine validation delta' }])) }));
+        write(stageWorkPath(options.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'pass', evidence: 'engine validation delta' }])) }));
         return fixtureResult({ output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    expect(gatePrompt).toContain('evidence-ledger.jsonl');
-    expect(gatePrompt).toContain('change.diff');
+    expect(stagesRun).toEqual(['fixture_work', 'qa']);
+    expect(JSON.parse(readFileSync(runRecordPath(runDirectory, 'verdict_qa.json'), 'utf8'))).toMatchObject({
+      pass: true, criteria: { fixture_1: { status: 'pass' } },
+    });
     expect(existsSync(runRecordPath(runDirectory, 'validation_baseline.json'))).toBe(true);
     const producedByScheduler = existsSync(runRecordPath(runDirectory, 'validation_delta_qa.json'));
-    if (!producedByScheduler) await recordGateValidationDelta(projectDir, final.runId, 'qa');
     expect(existsSync(runRecordPath(runDirectory, 'validation_delta_qa.json'))).toBe(true);
     const delta = JSON.parse(readFileSync(runRecordPath(runDirectory, 'validation_delta_qa.json'), 'utf-8')) as {
       pass: boolean;
@@ -177,6 +178,7 @@ describe('independent engine-remediation verification', () => {
       attemptIndex: number;
       executionId: string;
       immutablePath: string;
+      ledgerSequence: number;
     };
     expect(delta).toMatchObject({
       version: 2,
@@ -184,7 +186,14 @@ describe('independent engine-remediation verification', () => {
       attemptIndex: 1,
       executionId: expect.any(String),
       immutablePath: expect.any(String),
+      ledgerSequence: expect.any(Number),
       delta: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unverified', newFailureIdentifiers: [] })]),
+    });
+    expect(readEvidence(runDirectory).find(entry => entry.sequence === delta.ledgerSequence)).toMatchObject({
+      kind: 'validation',
+      executions: expect.arrayContaining([expect.objectContaining({
+        target: 'attempt', commands: expect.arrayContaining([expect.objectContaining({ role: 'build', exitCode: 1 })]),
+      })]),
     });
     expect(existsSync(runRecordPath(runDirectory, delta.immutablePath))).toBe(true);
     // The probe exits 1 on the reviewed tree: the model's pass cannot stand against the engine's record.

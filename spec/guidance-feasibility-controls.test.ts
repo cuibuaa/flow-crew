@@ -21,6 +21,7 @@ import type {
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { parseStageCommandInterrupt, requestStageCommandInterrupt } from '../src/command-interrupt.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
+import { stageRecordSchema } from '../src/handoff.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
@@ -304,30 +305,54 @@ describe('live guidance and command controls', () => {
 
   it.each(['first', 'passing', 'rejected'] as const)('frames a standalone review from %s history', async history => {
     const created = makeRun(['qa']);
+    const criteria = {
+      repaired: { status: 'fail', evidence: 'The first review found an unmet outcome.' },
+      reexamined: { status: 'pass', evidence: 'The first review accepted this outcome.' },
+    };
+    const audit_findings = { version: 1, findings: [] };
+    writeFileSync(runRecordPath(created.runDirPath, 'brief_criteria.json'), JSON.stringify({
+      version: 1, briefDigest: 'fixture',
+      criteria: Object.keys(criteria).map(id => ({ id, text: id })),
+    }));
     const archive = runRecordPath(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     if (history === 'rejected') {
       mkdirSync(archive, { recursive: true });
-      writeFileSync(join(archive, 'rejected_verdict_qa.json'), '{"pass":false}');
+      writeFileSync(join(archive, 'rejected_verdict_qa.json'), JSON.stringify({ pass: false, criteria, audit_findings }));
     } else if (history === 'passing') {
       writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), '{"pass":true}');
     }
     const prompts: string[] = [];
+    const verdict = {
+      pass: history !== 'rejected', reason: 'Independent evaluation of every brief criterion.',
+      criteria: {
+        repaired: { status: 'pass', evidence: 'The current tree meets this outcome.' },
+        reexamined: { status: history === 'rejected' ? 'fail' : 'pass', evidence: 'Independent current-tree evidence.' },
+      },
+      audit_findings, remaining_work: [],
+      ...(history === 'rejected' ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the newly found defect.' } } : {}),
+    };
     const adapter: Adapter = { async run(prompt) {
       prompts.push(prompt);
-      return { output: 'Captured review contract.', exitCode: 1, duration_ms: 1 };
+      return { output: JSON.stringify(verdict), exitCode: 0, duration_ms: 1 };
     } };
-    const result = await runStage(adapter, { ...stageOptions(created, 'qa'), isGate: true });
-    expect(result.exitCode).toBe(1);
+    const result = await runStage(adapter, { ...stageOptions(created, 'qa'), isGate: true,
+      artifactContract: fixtureArtifactContract('qa', true), criterionRefs: ['repaired'],
+      outputSchema: stageRecordSchema({ isGate: true, criterionRefs: ['repaired'], runDir: created.runDirPath }),
+    });
+    expect(result.exitCode, result.friendlyError).toBe(0);
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('# Gate evaluation facts');
+    const facts = JSON.parse(prompts[0].split('# Gate evaluation facts\n')[1].split('\n')[0]);
+    expect(facts).toMatchObject({ gateId: 'qa', evaluationRound: 1, priorAttemptCount: 0, repairChangedFiles: null });
     if (history === 'rejected') {
-      expect(prompts[0]).toContain(join(archive, 'rejected_verdict_qa.json'));
-      expect(prompts[0]).toContain('Reject again only for a rejected finding the repair did not resolve');
-      expect(prompts[0]).toContain('record any other difference you find as a stated limitation');
+      expect(facts.rejections).toEqual([expect.objectContaining({
+        iteration: 1, round: 1, criteria, audit_findings,
+        verdictPath: join(archive, 'rejected_verdict_qa.json'),
+      })]);
     } else {
-      expect(prompts[0]).toContain('\"rejections\":[]');
-      expect(prompts[0]).toContain('run a complete initial evaluation');
+      expect(facts.rejections).toEqual([]);
     }
+    // Re-review may reject a previously met criterion, while still covering the whole brief.
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8'))).toEqual(verdict);
   });
 
 });
