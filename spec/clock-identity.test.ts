@@ -16,6 +16,9 @@ vi.mock('node:child_process', async original => {
 
 import { NodeSystemd } from '../src/orchestrator.js';
 import { claimLaunchIntent, readLaunchIntent, releaseLaunchIntent } from '../src/run-lock.js';
+import { lockOwnerIdentity } from '../src/lock-publication.js';
+import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
+import { WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { fcGlobalDir, initializeReservedRun, readRunReservation, requireExistingRunArtifactDirectory, reserveRun, setFcGlobalDir } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { cmdPrune } from '../src/run-retention.js';
@@ -57,11 +60,48 @@ describe('pre-publication identities', () => {
     const fast = readLaunchIntent(root);
     await vi.advanceTimersByTimeAsync(longWait);
     expect(readLaunchIntent(root)).toEqual(fast);
-    expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: false, blockingOwnerRunId: 'first' });
+    expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: false, blockingOwnerRunId: 'first', blockingIntentPath: intentPath() });
     releaseLaunchIntent(root, 'second'); expect(readLaunchIntent(root)).toEqual(fast);
     releaseLaunchIntent(root, 'first');
     expect(readLaunchIntent(root)).toBeNull();
     expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: true });
+  });
+
+  function intentPath() {
+    return join(fcGlobalDir(), 'launch-intents', `${createHash('sha256').update(root).digest('hex')}.json`);
+  }
+
+  it('H07 reclaims a proven-dead launcher without advancing time', () => {
+    claimLaunchIntent(root, 'first');
+    const intent = JSON.parse(readFileSync(intentPath(), 'utf8'));
+    expect(intent.owner).toEqual(lockOwnerIdentity());
+    const deadPid = 123456789;
+    intent.owner.pid = deadPid;
+    writeFileSync(intentPath(), JSON.stringify(intent));
+    const kill = process.kill.bind(process);
+    vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === deadPid) throw Object.assign(new Error('owner exited'), { code: 'ESRCH' });
+      return kill(pid, signal);
+    });
+    expect(readLaunchIntent(root)).toBeNull();
+    expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: true });
+    expect(readLaunchIntent(root)).toMatchObject({ ownerRunId: 'second', owner: lockOwnerIdentity() });
+  });
+
+  it('H07 retains an owner when the liveness observation is unavailable', () => {
+    claimLaunchIntent(root, 'first');
+    const intent = JSON.parse(readFileSync(intentPath(), 'utf8'));
+    const unknownPid = 123456789;
+    intent.owner.pid = unknownPid;
+    const raw = JSON.stringify(intent);
+    writeFileSync(intentPath(), raw);
+    const kill = process.kill.bind(process);
+    vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === unknownPid) throw Object.assign(new Error('unavailable'), { code: 'EIO' });
+      return kill(pid, signal);
+    });
+    expect(claimLaunchIntent(root, 'second')).toEqual({ claimed: false, blockingOwnerRunId: 'first', blockingIntentPath: intentPath() });
+    expect(readFileSync(intentPath(), 'utf8')).toBe(raw);
   });
 
   it('H07 retains malformed ownership across age and clock skew', async () => {
@@ -71,8 +111,20 @@ describe('pre-publication identities', () => {
       writeFileSync(path, raw);
       await vi.advanceTimersByTimeAsync(longWait * 2);
       expect(claimLaunchIntent(root, 'second').claimed).toBe(false);
-      if (raw === '{') expect(claimLaunchIntent(root, 'unreadable-launch-intent').claimed).toBe(false);
+      const ownerRunId = raw === '{' ? 'unreadable-launch-intent' : 'first';
+      expect(claimLaunchIntent(root, ownerRunId).claimed).toBe(false);
+      expect(readLaunchIntent(root, ownerRunId)).not.toBeNull();
       expect(readFileSync(path, 'utf8')).toBe(raw);
+      const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'fixture', scope: [] }] });
+      for (const reserved of [false, true]) {
+        const reservation = reserved ? reserveRun(root) : undefined;
+        const refusal = prepareWorkflowLaunch(workflow, '', root, reservation?.runId);
+        expect(refusal.kind).toBe('settled');
+        if (refusal.kind === 'settled') {
+          expect(refusal.state.reasonCode).toBe('launch_conflict');
+          expect(refusal.state.failureReason).toContain(path);
+        }
+      }
     }
   });
 
@@ -135,13 +187,21 @@ describe('supervisor observations wait for evidence', () => {
     expect(settled).toBe(true); expect(commands.run).toHaveBeenCalledTimes(1); expect(commands.spawn).not.toHaveBeenCalled();
   });
 
-  it.each(['ENOENT', 1, 'ETIMEDOUT'])('R05 only spawns a portable shim when manager spawn failed (%s)', async code => {
-    const failure = Object.assign(new Error('manager did not acknowledge'), { code });
+  it.each([
+    { code: 'ENOENT', fallback: true },
+    { code: 1, fallback: true },
+    { code: 'ETIMEDOUT', fallback: false },
+    { code: 1, killed: true, fallback: false },
+    { code: 1, signal: 'SIGTERM', fallback: false },
+    { signal: 'SIGTERM', fallback: false },
+    { fallback: false },
+  ])('R05 fallback requires a completed rejection: %j', async ({ fallback, ...evidence }) => {
+    const failure = Object.assign(new Error('manager did not acknowledge'), evidence);
     commands.run.mockRejectedValue(failure);
     commands.spawn.mockReturnValue(Object.assign(new EventEmitter(), { unref: vi.fn() }));
     const backend = new NodeSystemd(fcGlobalDir());
     const pending = backend.runUnit({ unit: 'failed.service', workingDirectory: root, command: 'finite-work' });
-    if (code === 'ENOENT') { await pending; expect(commands.spawn).toHaveBeenCalledTimes(1); }
+    if (fallback) { await pending; expect(commands.spawn).toHaveBeenCalledTimes(1); }
     else { await expect(pending).rejects.toBe(failure); expect(commands.spawn).not.toHaveBeenCalled(); }
     expect(existsSync(join(fcGlobalDir(), 'supervise', 'failed.service', 'launch.json'))).toBe(true);
   });

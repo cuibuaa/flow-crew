@@ -122,7 +122,16 @@ function cleanHistory(keep: number): number {
     const path = join(root, id);
     try {
       if (JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).runId === id) readable.push(id);
-    } catch { /* Pre-initialization and unknown records retain their durable identity. */ }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue;
+      try {
+        plainDirectory(path);
+        withRunStateLock(path, () => {
+          try { readFileSync(join(path, 'run.json')); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') retireRunScratch(path); else throw error; }
+        });
+      } catch { /* Unknown records and reservations retain their durable identity. */ }
+    }
   }
   let cleaned = 0, skipped = 0;
   for (const id of readable.slice(keep)) {

@@ -1,4 +1,4 @@
-import { readLockWaits } from './lock-publication.js';
+import { lockOwnerIdentity, lockOwnerLiveness, parseLockOwner, readLockWaits, recoverStaleLock, type LockOwner } from './lock-publication.js';
 import { runRecordPath } from './run-layout.js';
 import { atomicWrite, writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
@@ -40,6 +40,7 @@ export interface LaunchIntent {
   projectDir: string;
   ownerRunId: string;
   claimedAt: string;
+  owner?: LockOwner;
 }
 
 function normalizedProjectDir(projectDir: string): string {
@@ -50,7 +51,7 @@ function launchIntentDir(): string {
   return join(fcGlobalDir(), 'launch-intents');
 }
 
-function launchIntentPath(projectDir: string): string {
+export function launchIntentPath(projectDir: string): string {
   const key = createHash('sha256').update(normalizedProjectDir(projectDir)).digest('hex');
   return join(launchIntentDir(), `${key}.json`);
 }
@@ -65,32 +66,42 @@ export function readRunLockWaits(projectDir: string | undefined, directory: stri
     ...(projectDir ? readLockWaits(runRecordPath(projectOwnershipDirectory(projectDir), RUN_STATE_LOCK_FILE)) : [])];
 }
 
-/** A durable admission claim remains occupied until its matching owner releases
- * it. Neither launcher death nor missing scheduler publication proves that a
- * child was never launched. Unknown legacy publications retain ownership. */
-export function readLaunchIntent(
-  projectDir: string,
-  selfOwnerRunId?: string,
-): LaunchIntent | null {
-  if (selfOwnerRunId) selfOwnerRunId = canonicalRunId(runsRoot(), selfOwnerRunId);
+/** Read a publication without changing it. Only complete process identities
+ * authorize dead-owner recovery; malformed and identity-less legacy claims stay. */
+function inspectLaunchIntent(projectDir: string): { intent: LaunchIntent; owner?: LockOwner; signature: string } | undefined {
   const path = launchIntentPath(projectDir);
   let parsed: Partial<LaunchIntent>;
+  let signature = '';
   try {
-    const raw: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    signature = readFileSync(path, 'utf-8');
+    const raw: unknown = JSON.parse(signature);
     parsed = raw && typeof raw === 'object' ? raw as Partial<LaunchIntent> : {};
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     parsed = {};
   }
   if (parsed.version !== 1 || parsed.projectDir !== normalizedProjectDir(projectDir)
     || typeof parsed.ownerRunId !== 'string' || !parsed.ownerRunId
     || typeof parsed.claimedAt !== 'string' || !Number.isFinite(Date.parse(parsed.claimedAt))) {
-    return { version: 1, projectDir: normalizedProjectDir(projectDir),
-      ownerRunId: 'unreadable-launch-intent', claimedAt: '' };
+    return { signature, intent: { version: 1, projectDir: normalizedProjectDir(projectDir),
+      ownerRunId: 'unreadable-launch-intent', claimedAt: '' } };
   }
-  if (canonicalRunId(runsRoot(), parsed.ownerRunId) === selfOwnerRunId) return null;
-  return parsed as LaunchIntent;
+  const owner = parseLockOwner(JSON.stringify(parsed.owner) ?? 'null');
+  return { signature, intent: parsed as LaunchIntent,
+    owner: owner?.startToken && validProcessStartToken(owner.startToken) ? owner : undefined };
 }
+
+export function readLaunchIntent(projectDir: string, selfOwnerRunId?: string): LaunchIntent | null {
+  const observed = inspectLaunchIntent(projectDir);
+  if (!observed) return null;
+  const liveness = observed.owner ? lockOwnerLiveness(observed.owner) : 'unknown';
+  if (liveness === 'dead') return null;
+  if (liveness === 'alive' && selfOwnerRunId
+    && canonicalRunId(runsRoot(), observed.intent.ownerRunId) === canonicalRunId(runsRoot(), selfOwnerRunId)) return null;
+  return observed.intent;
+}
+
+interface LaunchClaim { claimed: boolean; blockingOwnerRunId?: string; blockingIntentPath?: string }
 
 /**
  * Atomically claim the project launch window. Separate per-project files avoid
@@ -100,7 +111,7 @@ export function claimLaunchIntent(
   projectDir: string,
   ownerRunId: string,
   nowMs = Date.now(),
-): { claimed: boolean; blockingOwnerRunId?: string } {
+): LaunchClaim {
   ownerRunId = canonicalRunId(runsRoot(), ownerRunId);
   const ownership = projectOwnershipDirectory(projectDir);
   const claim = () => withRunStateLock(ownership, () => {
@@ -112,7 +123,7 @@ export function claimLaunchIntent(
     return result;
   });
   if (existsSync(runRecordPath(join(runsRoot(), ownerRunId), 'run.json'))) {
-    let result: { claimed: boolean; blockingOwnerRunId?: string } = { claimed: false };
+    let result: LaunchClaim = { claimed: false };
     updateRunState(projectDir, ownerRunId, () => {
       result = claim();
     });
@@ -121,7 +132,7 @@ export function claimLaunchIntent(
   return claim();
 }
 
-function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs: number): { claimed: boolean; blockingOwnerRunId?: string } {
+function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs: number): LaunchClaim {
   const normalized = normalizedProjectDir(projectDir);
   const path = launchIntentPath(normalized);
   mkdirSync(launchIntentDir(), { recursive: true });
@@ -132,19 +143,21 @@ function claimLaunchIntentUnlocked(projectDir: string, ownerRunId: string, nowMs
         projectDir: normalized,
         ownerRunId,
         claimedAt: new Date(nowMs).toISOString(),
+        owner: lockOwnerIdentity(),
       };
       writeFileSync(path, JSON.stringify(intent, null, 2) + '\n', { encoding: 'utf-8', flag: 'wx' });
       return { claimed: true };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const blocking = readLaunchIntent(normalized);
+      const blocking = inspectLaunchIntent(normalized);
       if (!blocking) continue; // The matching owner released while we read.
-      if (Number.isFinite(Date.parse(blocking.claimedAt))
-        && canonicalRunId(runsRoot(), blocking.ownerRunId) === ownerRunId) return { claimed: true };
-      return { claimed: false, blockingOwnerRunId: blocking.ownerRunId };
+      if (recoverStaleLock(blocking, () => inspectLaunchIntent(normalized), () => unlinkSync(path))) continue;
+      if (blocking.owner && lockOwnerLiveness(blocking.owner) === 'alive'
+        && canonicalRunId(runsRoot(), blocking.intent.ownerRunId) === ownerRunId) return { claimed: true };
+      return { claimed: false, blockingOwnerRunId: blocking.intent.ownerRunId, blockingIntentPath: path };
     }
   }
-  return { claimed: false, blockingOwnerRunId: 'launch-intent-race' };
+  return { claimed: false, blockingOwnerRunId: 'launch-intent-race', blockingIntentPath: path };
 }
 
 export function releaseLaunchIntent(projectDir: string, ownerRunId: string): void {
@@ -603,6 +616,6 @@ export function invalidateRunLockCache(): void {
 /** Daemon admission blocker: launch owner id, or live run id plus scheduler PID. */
 export function isProjectBusy(projectDir: string, selfOwnerRunId?: string): string | null {
   const intent = readLaunchIntent(projectDir, selfOwnerRunId);
-  if (intent) return intent.ownerRunId;
+  if (intent) return `${intent.ownerRunId}; launch intent ${launchIntentPath(projectDir)}`;
   return activeRunsByProject().get(normalizedProjectDir(projectDir)) ?? null;
 }

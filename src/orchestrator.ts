@@ -25,6 +25,7 @@ import {
   inspectRunScheduler,
   invalidateRunLockCache,
   isProjectBusy,
+  launchIntentPath,
   processIsAlive,
   readLaunchIntent,
   releaseLaunchIntent,
@@ -170,7 +171,7 @@ export class Orchestrator {
   /** Busy check that also honors launches not yet visible to the run probe. */
   private busyFor(projectDir: string, selfRunId?: string): string | null {
     const intent = readLaunchIntent(projectDir, selfRunId);
-    if (intent) return intent.ownerRunId;
+    if (intent) return `${intent.ownerRunId}; launch intent ${launchIntentPath(projectDir)}`;
     return this.probeBusy(projectDir, selfRunId);
   }
 
@@ -1398,9 +1399,11 @@ export class NodeSystemd implements SupervisorBackend {
         ...shimArgs,
       ]);
     } catch (error) {
-      // Only failure to spawn the manager proves no managed launch occurred.
-      // A rejected/lost acknowledgement retains launch.json for observation.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // A completed rejection, like ENOENT, proves the manager did not start
+      // the unit. A killed command or lost acknowledgement proves no outcome.
+      const failure = error as Error & { code?: string | number; killed?: boolean; signal?: string };
+      if (failure.code !== 'ENOENT' && !(typeof failure.code === 'number'
+        && failure.code !== 0 && !failure.killed && !failure.signal)) throw error;
       try {
         const child = spawn(this.nodePath, shimArgs, {
           cwd: opts.workingDirectory,

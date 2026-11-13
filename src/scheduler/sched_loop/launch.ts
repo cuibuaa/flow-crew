@@ -169,7 +169,7 @@ export function prepareWorkflowLaunch(
         writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
       concludeRun(blocked, { status: 'failed', reasonCode: 'launch_conflict',
-        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.` });
+        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project. Inspect ${launchClaim.blockingIntentPath}.` });
       return { kind: 'settled', state: blocked };
     }
     launchIntentOwned = true;
@@ -259,7 +259,7 @@ export function prepareWorkflowLaunch(
     }
     if (!launchClaim.claimed) {
       concludeRun(state, { status: 'failed', reasonCode: 'launch_conflict',
-        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.` });
+        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project. Inspect ${launchClaim.blockingIntentPath}.` });
       return { kind: 'settled', state };
     }
     state.maxIterations = maxIterations;
