@@ -43,7 +43,7 @@ async function launch(): Promise<{ timeoutMs: number; maxIterations: number; rol
   const adapter: Adapter = {
     async run(_prompt: string, role: AgentConfig, opts: RunOpts) {
       if (opts.stageId === 'work') { observed.timeoutMs = readStageStatus(projectDir, basename(opts.runDir), opts.stageId).timeout!.budgetMs;
-        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(observed.timeoutMs); observed.role = role; }
+        expect(opts.timeout_ms).toBeUndefined(); expect(observed.timeoutMs).toBeUndefined(); observed.role = role; }
       return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     },
   };
@@ -55,7 +55,7 @@ async function launch(): Promise<{ timeoutMs: number; maxIterations: number; rol
 
 function expectEngineValues(observed: Awaited<ReturnType<typeof launch>>): void {
   expect(observed).toMatchObject({
-    timeoutMs: engineRaw.default_timeout_ms,
+    timeoutMs: undefined,
     maxIterations: engineRaw.max_iterations,
     role: { model: engineCoder.model, reasoning_effort: engineCoder.reasoning_effort },
   });
@@ -97,7 +97,7 @@ describe('engine configuration owns execution defaults', () => {
     expect(skill).not.toContain('--timeout');
     expect(skill).not.toContain('--max-iterations');
     const configuration = readFileSync(join(root, 'guide', 'configuration.md'), 'utf8');
-    for (const key of ['default_timeout_ms', 'max_iterations']) {
+    for (const key of ['max_iterations']) {
       expect(skill).toContain('`' + key + '`');
       const row = configuration.split('\n').find(line => line.startsWith('| `' + key + '` |'));
       expect(Number(row?.split('|')[2].trim()), key).toBe(engineRaw[key]);

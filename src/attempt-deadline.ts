@@ -1,35 +1,19 @@
 import { randomBytes } from 'node:crypto';
 
 import { performance } from 'node:perf_hooks';
-import { ATTEMPT_TERMINATION_GRACE_MS } from './adapters/base.js';
-
-/** Extra time for the child close event after a signal or hard escalation. */
-export const ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS = 500;
-/** Five-second group escalation plus close observation; this is not execution time. */
-export const ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS =
-  ATTEMPT_TERMINATION_GRACE_MS + ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS;
-
-/** Reserve a finishing turn, not another authoring budget. Short stages scale
- * the interval; long stages get five minutes, measured after child retirement. */
-export function stageWrapUpTiming(budgetMs: number): { warningAfterMs: number; finishingMs: number; hardLimitMs: number } {
-  positiveSafeInteger(budgetMs, 'stage budget');
-  const finishingMs = Math.min(300_000, Math.max(1, Math.floor(budgetMs / 10)));
-  return { warningAfterMs: Math.max(0, budgetMs - finishingMs - ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS), finishingMs,
-    hardLimitMs: Math.max(budgetMs, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS + finishingMs) };
-}
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export interface AttemptDeadlineSnapshot {
   attemptId: string;
-  budgetMs: number;
+  budgetMs?: number;
   attemptStartedAt: string;
-  deadlineAt: string;
+  deadlineAt?: string;
   budgetDeadlineAt?: string;
   wrapUpAt?: string;
   finishingMs?: number;
   elapsedMs: number;
-  remainingMs: number;
+  remainingMs?: number;
   deadlineReachedAt?: string;
   terminationCause?: 'attempt_timeout';
 }
@@ -72,43 +56,34 @@ function positiveSafeInteger(value: number, label: string): number {
  */
 export class AttemptDeadlineController {
   readonly attemptId: string;
-  readonly budgetMs: number;
+  readonly budgetMs?: number;
   readonly attemptStartedAt: string;
-  readonly deadlineAt: string;
+  readonly deadlineAt?: string;
   readonly signal: AbortSignal;
-  readonly wrapUpSignal: AbortSignal;
-  readonly budgetDeadlineAt: string;
-  readonly wrapUpAt?: string;
-  readonly finishingMs?: number;
+  readonly budgetDeadlineAt?: string;
 
   private readonly clock: AttemptDeadlineClock;
   private readonly startedMono: number;
   private readonly deadlineMono: number;
   private readonly controller = new AbortController();
-  private readonly wrapUpController = new AbortController();
   private cancelTimer?: () => void;
   private deadlineReachedWall?: number;
 
   constructor(input: {
-    budgetMs: number;
-    wrapUp?: boolean;
+    budgetMs?: number;
     attemptId?: string;
     clock?: AttemptDeadlineClock;
   }) {
-    this.budgetMs = positiveSafeInteger(input.budgetMs, 'attempt timeout');
+    this.budgetMs = input.budgetMs === undefined ? undefined : positiveSafeInteger(input.budgetMs, 'attempt allowance');
     this.clock = input.clock ?? SYSTEM_CLOCK;
     this.attemptId = input.attemptId ?? randomBytes(16).toString('hex');
     this.startedMono = this.clock.monotonicNow();
     const wallStarted = this.clock.wallNow();
-    const timing = input.wrapUp ? stageWrapUpTiming(this.budgetMs) : undefined;
-    const hardLimitMs = timing?.hardLimitMs ?? this.budgetMs;
-    this.deadlineMono = this.startedMono + hardLimitMs;
-    this.budgetDeadlineAt = new Date(wallStarted + this.budgetMs).toISOString();
-    this.finishingMs = timing?.finishingMs;
-    this.wrapUpAt = timing ? new Date(wallStarted + timing.warningAfterMs).toISOString() : undefined;
-    this.wrapUpSignal = this.wrapUpController.signal;
+    this.deadlineMono = this.budgetMs === undefined ? Infinity : this.startedMono + this.budgetMs;
+    const wallDeadline = this.budgetMs === undefined ? undefined : new Date(wallStarted + this.budgetMs);
+    this.budgetDeadlineAt = wallDeadline && Number.isFinite(wallDeadline.getTime()) ? wallDeadline.toISOString() : undefined;
     this.attemptStartedAt = new Date(wallStarted).toISOString();
-    this.deadlineAt = new Date(wallStarted + hardLimitMs).toISOString();
+    this.deadlineAt = this.budgetDeadlineAt;
     this.signal = this.controller.signal;
     this.scheduleDeadlineCheck();
   }
@@ -148,9 +123,8 @@ export class AttemptDeadlineController {
       budgetMs: this.budgetMs,
       attemptStartedAt: this.attemptStartedAt,
       deadlineAt: this.deadlineAt,
-      ...(this.finishingMs ? { budgetDeadlineAt: this.budgetDeadlineAt, wrapUpAt: this.wrapUpAt, finishingMs: this.finishingMs } : {}),
       elapsedMs: Math.round(this.elapsedMs()),
-      remainingMs: Math.max(0, Math.floor(this.remainingMs())),
+      remainingMs: this.budgetMs === undefined ? undefined : Math.max(0, Math.floor(this.remainingMs())),
       deadlineReachedAt: this.deadlineReachedAt(),
       terminationCause: this.terminationCause(),
     };
@@ -178,7 +152,6 @@ export class AttemptDeadlineController {
 
   /** Observe monotonic expiry even when the timer callback was starved. */
   observeSettlement(): boolean {
-    this.observeWrapUp();
     if (!this.signal.aborted && this.remainingMs() <= 0) this.abortAtDeadline();
     return this.signal.aborted;
   }
@@ -187,28 +160,9 @@ export class AttemptDeadlineController {
     this.cancelTimer?.();
   }
 
-  private observeWrapUp(): void {
-    if (this.wrapUpAt && !this.wrapUpSignal.aborted
-      && this.clock.monotonicNow() - this.startedMono >= stageWrapUpTiming(this.budgetMs).warningAfterMs) {
-      this.wrapUpController.abort('stage_budget_wrap_up');
-    }
-  }
-
   private scheduleDeadlineCheck(): void {
-    this.observeWrapUp();
-    const remaining = this.remainingMs();
-    if (remaining <= 0) {
-      this.abortAtDeadline();
-      return;
-    }
-    const untilWarning = this.wrapUpAt && !this.wrapUpSignal.aborted
-      ? stageWrapUpTiming(this.budgetMs).warningAfterMs - this.elapsedMs() : remaining;
-    const nextCheck = this.clock.monotonicNow() + Math.min(remaining, untilWarning);
-    this.cancelTimer = scheduleDeadline(() => {
-      this.observeWrapUp();
-      if (this.remainingMs() > 0) this.scheduleDeadlineCheck();
-      else this.abortAtDeadline();
-    }, () => nextCheck - this.clock.monotonicNow(), this.clock);
+    if (this.budgetMs === undefined) return;
+    this.cancelTimer = scheduleDeadline(() => this.abortAtDeadline(), () => this.remainingMs(), this.clock);
   }
 
   private abortAtDeadline(): void {
@@ -221,35 +175,35 @@ export class AttemptDeadlineController {
 export type TechnicalRetryTerminalDecision = 'attempt_timeout';
 
 export interface TechnicalRetryBudgetState {
-  initialBudgetMs: number;
+  initialBudgetMs?: number;
   previousEffectiveBudgetMs?: number;
   timedOut: boolean;
   attemptsStarted: number;
 }
 
 export interface TechnicalRetryContext {
-  previousBudgetMs: number;
-  nextBudgetMs: number;
+  previousBudgetMs?: number;
+  nextBudgetMs?: number;
 }
 
 export type TechnicalRetryBudgetEvent =
   | { type: 'prepare_attempt' }
-  | { type: 'attempt_finished'; effectiveBudgetMs: number }
-  | { type: 'attempt_timed_out'; effectiveBudgetMs: number }
+  | { type: 'attempt_finished'; effectiveBudgetMs?: number }
+  | { type: 'attempt_timed_out'; effectiveBudgetMs?: number }
   | { type: 'retry_exhausted' };
 
 export type TechnicalRetryBudgetTransition =
-  | { type: 'attempt_prepared'; budgetMs: number; retryContext?: TechnicalRetryContext }
+  | { type: 'attempt_prepared'; budgetMs?: number; retryContext?: TechnicalRetryContext }
   | { type: 'state_updated' }
   | { type: 'terminal'; terminalDecision: TechnicalRetryTerminalDecision };
 
 export function createTechnicalRetryBudgetState(input: {
-  initialBudgetMs: number;
+  initialBudgetMs?: number;
   previousEffectiveBudgetMs?: number;
   timedOut?: boolean;
   attemptsStarted?: number;
 }): TechnicalRetryBudgetState {
-  const initialBudgetMs = positiveSafeInteger(input.initialBudgetMs, 'initial attempt timeout');
+  const initialBudgetMs = input.initialBudgetMs === undefined ? undefined : positiveSafeInteger(input.initialBudgetMs, 'initial attempt allowance');
   return {
     initialBudgetMs,
     previousEffectiveBudgetMs: input.previousEffectiveBudgetMs,
@@ -264,7 +218,7 @@ export function transitionTechnicalRetryBudget(
   event: TechnicalRetryBudgetEvent,
 ): TechnicalRetryBudgetTransition {
   if (event.type === 'attempt_finished' || event.type === 'attempt_timed_out') {
-    state.previousEffectiveBudgetMs = positiveSafeInteger(event.effectiveBudgetMs, 'effective attempt timeout');
+    state.previousEffectiveBudgetMs = event.effectiveBudgetMs === undefined ? undefined : positiveSafeInteger(event.effectiveBudgetMs, 'effective attempt allowance');
     state.timedOut = event.type === 'attempt_timed_out';
     return { type: 'state_updated' };
   }

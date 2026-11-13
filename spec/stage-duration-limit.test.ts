@@ -72,26 +72,26 @@ function numericRefusal(result: Awaited<ReturnType<typeof runStage>>, requested 
 }
 
 describe('stage duration admission and recorded contract', () => {
-  it.each([undefined, 40_000, 20_000])('records the engine number or the declared lower number (%s)', declared => {
+  it.each([undefined, 40_000, 20_000])('records only an author-declared allowance (%s)', declared => {
     const brief = declared === undefined ? 'Task' : `---\nstage_duration_ms: ${declared}\n---\nTask`;
-    expect(admitStageDuration(brief)).toBe(declared ?? 40_000);
+    expect(admitStageDuration(brief)).toBe(declared);
     const launch = prepareWorkflowLaunch(workflow(), '', project, undefined, brief);
     try { expect(launch.kind).toBe('ready'); if (launch.kind === 'ready')
-      expect(readRunState(project, launch.runId).stageDurationLimitMs).toBe(declared ?? 40_000);
+      expect(readRunState(project, launch.runId).stageDurationLimitMs).toBe(declared);
     } finally { if (launch.kind === 'ready') { rmSync(launch.schedulerPidPath, { force: true }); releaseLaunchIntent(project, launch.runId); } }
   });
-  it.each([0, -1, 1.5, '100', null, {}, [], true, 40_001].map(declared => ({ declared })))('refuses $declared before reserving a run with both values', ({ declared }) => {
+  it.each([0, -1, 1.5, '100', null, {}, [], true].map(declared => ({ declared })))('refuses $declared before reserving a run with both values', ({ declared }) => {
     const before = listRuns(project);
     expect(() => prepareWorkflowLaunch(workflow(), '', project, undefined, `---\nstage_duration_ms: ${JSON.stringify(declared)}\n---\nTask`))
       .toThrow(StageDurationDeclarationError);
     try { admitStageDuration(`---\nstage_duration_ms: ${JSON.stringify(declared)}\n---\nTask`); }
-    catch (error) { expect(error).toMatchObject({ code: 'stage_duration_declaration', declaredLimit: declared, engineLimit: 40_000 }); }
+    catch (error) { expect(error).toMatchObject({ code: 'stage_duration_declaration', declaredLimit: declared }); }
     expect(listRuns(project)).toEqual(before);
   });
   it.each(['.nan', '.inf', '-.inf', '9007199254740992', '&cycle {value: *cycle}'])('retains a typed refusal for nonnumeric/unsafe declaration %s', yaml => {
     expect(() => admitStageDuration(`---\nstage_duration_ms: ${yaml}\n---\nTask`)).toThrow(StageDurationDeclarationError);
   });
-  it.each(['failed', 'cancelled', 'parked'] as const)('resumes %s from the recorded number or engine fallback without re-admitting old text', status => {
+  it.each(['failed', 'cancelled', 'parked'] as const)('resumes %s from the recorded allowance or without a default without re-admitting old text', status => {
     for (const legacy of [false, true]) {
       const config = workflow(), created = createdRun(JSON.stringify(config));
       updateRunState(project, created.runId, state => {
@@ -103,7 +103,7 @@ describe('stage duration admission and recorded contract', () => {
       const launch = prepareWorkflowLaunch(config, '', project, created.runId);
       try {
         expect(launch.kind).toBe('ready');
-        expect(readRunState(project, created.runId).stageDurationLimitMs).toBe(legacy ? limit - 1 : limit);
+        expect(readRunState(project, created.runId).stageDurationLimitMs).toBe(legacy ? undefined : limit);
       } finally { if (launch.kind === 'ready') { rmSync(launch.schedulerPidPath, { force: true }); releaseLaunchIntent(project, launch.runId); } }
     }
   });
@@ -237,8 +237,8 @@ describe('brief writer through the real adapter entry', () => {
     gitProject(); const run = vi.fn<Adapter['run']>();
     const directory = join(fcGlobalDir(), 'brief-writing');
     const existed = existsSync(directory);
-    await expect(writeTaskBrief('---\nstage_duration_ms: 40001\n---\nTask', { projectDir: project, adapter: 'mock', role, adapterInstance: { run } }))
-      .rejects.toMatchObject({ declaredLimit: 40_001, engineLimit: 40_000 });
+    await expect(writeTaskBrief('---\nstage_duration_ms: -1\n---\nTask', { projectDir: project, adapter: 'mock', role, adapterInstance: { run } }))
+      .rejects.toMatchObject({ declaredLimit: -1 });
     expect(run).not.toHaveBeenCalled(); expect(existsSync(directory)).toBe(existed);
   });
 });

@@ -43,7 +43,7 @@ export function adapterInputLength(system: string, user: string): number { retur
 export async function runAdapter(
   adapter: Adapter, prompt: string, role: AgentConfig, options: RunOpts,
   admittedLimit?: number, beforeSend?: () => void,
-  duration?: { limit: number; attemptBudgetMs?: number },
+  duration?: { limit?: number; attemptBudgetMs?: number },
 ): Promise<RunResult> {
   const refusal = refuseStageDuration(duration?.attemptBudgetMs ?? options.timeout_ms, duration?.limit ?? stageDurationLimit());
   if (refusal) return refusal;

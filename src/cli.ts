@@ -1015,10 +1015,11 @@ async function cmdQuick(preview = false) {
     console.error(written.outcome === 'blocking_questions'
       ? `Brief needs answers:\n${written.questions.map(q => `- ${q}`).join('\n')}`
       : written.outcome === 'provider_error' ? `Brief provider call failed; rerun to try again:\n${written.reasons.join('\n')}`
-      : ['input_too_large', 'duration_limit'].includes(written.outcome) ? written.reasons.join('\n')
+      : ['input_too_large', 'duration_limit', 'unfinished'].includes(written.outcome) ? written.reasons.join('\n')
       : `Brief writing stopped after at most two retries:\n${written.reasons.join('\n')}`);
     process.exitCode = written.outcome === 'blocking_questions' ? EXIT_CODE.briefQuestions
-      : written.outcome === 'provider_error' ? EXIT_CODE.briefProviderFailure : EXIT_CODE.failed;
+      : written.outcome === 'provider_error' ? EXIT_CODE.briefProviderFailure
+      : written.outcome === 'unfinished' ? EXIT_CODE.inProgress : EXIT_CODE.failed;
     return;
   }
   if (written) task = written.brief;
@@ -1311,7 +1312,7 @@ async function cmdQuick(preview = false) {
   console.log(`Project: ${projectDir}`);
   console.log(`Adapter: ${adapter}`);
   console.log(`Max iterations: ${config.defaults.max_iterations ?? defaults.max_iterations}`);
-  console.log(`Stage timeout: ${defaults.default_timeout_ms}ms (engine config/defaults.yaml::default_timeout_ms)`);
+  console.log('Stage allowance: only an author-declared stage_duration_ms bounds execution.');
   // Resolve campaign id: explicit --campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);

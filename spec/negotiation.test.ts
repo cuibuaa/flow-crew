@@ -50,10 +50,10 @@ const role: AgentConfig = {
   name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'fixture',
 };
 
-// Pin the engine input; historical retries keep their old clocks, new slices do not grow.
+// Declare the fixture allowance; historical retries keep their old clocks, new slices do not grow.
 const OWNED_STAGE_TIMEOUT_MS = 3_600_000;
 function seedEngineDefaults(): void {
-  setEngineDefaults({ default_timeout_ms: OWNED_STAGE_TIMEOUT_MS });
+  setEngineDefaults({});
 }
 
 beforeEach(() => {
@@ -83,7 +83,10 @@ function writeRoles(...names: string[]): string {
 }
 
 function prepareRun(config: WorkflowConfig, yaml: string) {
-  return prepareFixtureRun(projectDir, config, yaml);
+  const created = prepareFixtureRun(projectDir, config, yaml);
+  const state = readRunState(projectDir, created.runId); state.stageDurationLimitMs = OWNED_STAGE_TIMEOUT_MS;
+  writeRunState(projectDir, created.runId, state);
+  return created;
 }
 
 function summaryResult(opts: RunOpts): RunResult | undefined {
@@ -378,7 +381,7 @@ describe('bounded timeout negotiation', () => {
         const summary = summaryResult(opts);
         if (summary) return fixtureResult(summary, opts);
         const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
-        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
+        expect(opts.timeout_ms).toBeUndefined(); expect(nominal).toBeGreaterThan(0); budgets.push(nominal);
         return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1 }, opts);
       } };
       await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('coder'), created.runId, 'resume timeout', true);
@@ -450,9 +453,9 @@ describe('bounded timeout negotiation', () => {
       const summary = summaryResult(opts);
       if (summary) return fixtureResult(summary, opts);
       const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
-        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
+        expect(opts.timeout_ms).toBeUndefined(); expect(nominal).toBeGreaterThan(0); budgets.push(nominal);
       if (budgets.length === 1) {
-        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
+        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: nominal, timedOut: true }, opts);
       }
       expect(prompt).toContain('Own-stage continuation evidence');
       return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 1 }, opts);
@@ -471,7 +474,7 @@ describe('bounded timeout negotiation', () => {
   });
 
   it('does not let planner-authored max_retries suppress bounded budget continuation', { timeout: 10_000 }, async () => {
-    setEngineDefaults({ default_timeout_ms: OWNED_STAGE_TIMEOUT_MS, stage_technical_retries: 1 });
+    setEngineDefaults({ stage_technical_retries: 1 });
     const yaml = [
       'name: planner-retry-suppression',
       'defaults:',
@@ -503,9 +506,9 @@ describe('bounded timeout negotiation', () => {
       }
       workCalls++;
       const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
-        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
+        expect(opts.timeout_ms).toBeUndefined(); expect(nominal).toBeGreaterThan(0); budgets.push(nominal);
       if (workCalls === 1) {
-        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
+        return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: nominal, timedOut: true }, opts);
       }
       return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 1 }, opts);
     } };

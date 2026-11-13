@@ -274,8 +274,7 @@ a fresh invocation submits the guidance. Delivery checks remain pending until th
 submitted input contains the envelope; the delivered receipt lists retired command IDs.
 `interrupt` stops every active command of the identified invocation and submits its reason
 through the same guidance path. Attempt and invocation identities reject stale requests.
-Neither action resets the attempt deadline. The attempt clock enforces wrap-up and the
-hard stop directly; shell-text timeout forecasts do not create control notices. Changes to admitted criteria or authority need revised brief bytes and admission.
+Neither action resets the attempt deadline. A declared attempt allowance enforces its stop directly; shell-text timeout forecasts do not create control notices. Changes to admitted criteria or authority need revised brief bytes and admission.
 
 Use daemon `task cancel` or the dashboard Cancel control to stop registered work. Cancellation
 records the operator decision and closes active control state before bounded worker cleanup.
@@ -441,9 +440,10 @@ and gate re-evaluation. Scope continuations and technical retries already inside
 use their ordinary bounds. The scheduler then parks before admitting another group or
 iteration. Completed stages and their artifacts, attempt ledgers, admitted plan, rollback
 audits, gate rejection evidence and budgets are retained. This does not checkpoint a live
-process. No attempt is killed to obtain a deployment hold. A stage budget first requests
-wrap-up; its hard stop uses TERM/5-second grace/KILL and retains a continuation with work
-kept. Idle aborts, unsafe writes and unverified child closure keep their refusal semantics.
+process. No attempt is killed to obtain a deployment hold. A declared stage allowance uses TERM/5-second grace/KILL at expiry and waits for real
+child/group closure before retaining an unfinished continuation with work kept. There is
+no automatic duration stop without a declaration. Idle aborts and unsafe writes retain
+their existing policy; missing closure acknowledgement remains under observation.
 
 There is no finite universal successful-hold bound: stage deadlines differ, groups may have
 several bounded attempts, and audit/validation cleanup may itself fail to settle. For a

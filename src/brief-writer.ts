@@ -49,7 +49,7 @@ const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringi
 export interface WrittenBrief {
   brief: string;
   digest: string;
-  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error' | 'input_too_large' | 'duration_limit';
+  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error' | 'input_too_large' | 'duration_limit' | 'unfinished';
   refusal?: InputLimitRefusal | StageDurationRefusal;
   questions: string[];
   reasons: string[];
@@ -135,6 +135,12 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
         brief: original, digest: hash(original), outcome: result.providerFailure.kind, questions: [],
         reasons: [result.providerFailure.reason], refusal: result.providerFailure,
       };
+      if (result.timedOut || result.terminationCause === 'attempt_timeout') {
+        reasons = ['Author-declared brief-writing allowance reached; work is unfinished.'];
+        save(file('unfinished.json'), result);
+        validation({ reasons, outcome: 'unfinished' });
+        return finish(original, 'unfinished', []);
+      }
       if (result.exitCode !== 0) {
         reasons = [`Adapter exit ${result.exitCode}: ${result.friendlyError ?? result.output}`];
         save(file('failure.json'), result);

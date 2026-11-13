@@ -25,7 +25,6 @@ Parser field names are listed exactly.
 
 | Key | Shipped value | Effect |
 |---|---:|---|
-| `default_timeout_ms` | 10800000 | Per-attempt ceiling (positive safe integer); brief `stage_duration_ms` may lower it; includes wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
 | `stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
 | `validation_attempts` | 3 | Executions of an unfinished validation batch; the project's `config/validation.json` or a brief's `validation.attempts` replaces it (brief first) |
 | `validation_concurrency` | 1 | Distinct trees validated at once across daemon scheduler processes; engine-owned, not a brief field |

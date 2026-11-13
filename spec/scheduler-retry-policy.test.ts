@@ -32,14 +32,17 @@ beforeEach(() => {
   agentsDir = join(project, 'config', 'agents'); mkdirSync(agentsDir, { recursive: true });
   writeFileSync(join(agentsDir, 'coder.yaml'), stringify(role));
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  setEngineDefaults({ default_timeout_ms: 50, stage_technical_retries: 1 });
+  setEngineDefaults({ stage_technical_retries: 1 });
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   const workflow = WorkflowConfigSchema.parse({ name: 'retry-policy', defaults: { max_iterations: 1 },
     stages: [{ id: 'work', role: 'coder', scope: [], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
-  return { workflow, ...createRun(project, workflow.name, stringify(workflow), ['work']) };
+  const created = createRun(project, workflow.name, stringify(workflow), ['work']);
+  const state = readRunState(project, created.runId); state.stageDurationLimitMs = 50;
+  writeRunState(project, created.runId, state);
+  return { workflow, ...created };
 }
 
 function workerResults(results: RunResult[]) {
@@ -180,7 +183,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     ] });
     const f = createRun(project, workflow.name, stringify(workflow), ['work', 'review']);
     const state = readRunState(project, f.runId), now = '2026-10-01T00:00:00.000Z';
-    state.status = 'running'; state.currentIteration = 1; state.maxRetries = 2;
+    state.status = 'running'; state.currentIteration = 1; state.maxRetries = 2; state.stageDurationLimitMs = 50;
     state.gateRetryRound = { iteration: 1, round: 2 };
     state.stages.review = completedStageAttemptStatus(state.stages.review, 0, { exitCode: 0, duration_ms: 1 });
     const timedOut = completedStageAttemptStatus(state.stages.work, 0, {

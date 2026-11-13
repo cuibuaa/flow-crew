@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
-import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { readStageStatus } from '../src/store.js';
 import { runStage } from '../src/worker.js';
@@ -51,7 +51,7 @@ describe('each retained execution owns one immutable hard stop', () => {
           expect(status.continuation).toBeUndefined();
           if (execution === 2 || calls++)
             return { exitCode: 0, output: 'Done: retained unit. Remaining: next unit.', duration_ms: 1 };
-          return new Promise<RunResult>(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'retained unit', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); });
+          return new Promise<RunResult>(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'retained unit', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
         } };
       const result = await runStage(adapter, { stageId: 'work', role, dependsOn: [], promptTemplate: 'Continue retained work.', artifactContract: fixtureArtifactContract('work'),
         projectDir: project, runId: created.runId, runDir: created.runDirPath, retries: 0, timeout_ms: budget, deadlineClock: time.clock,
@@ -59,14 +59,14 @@ describe('each retained execution owns one immutable hard stop', () => {
       expect(result.exitCode).toBe(0);
       expect(time.timers.size).toBe(0);
     }
-    expect(observed.map(entry => entry.attempt)).toEqual([1, 1, 2]);
-    expect(observed[0].id).toBe(observed[1].id);
-    expect(observed[2].id).not.toBe(observed[1].id);
-    expect(observed.map(entry => entry.budgetMs)).toEqual([budget, budget, budget]);
-    expect(observed[2].remaining).toBe(budget);
-    expect(observed[2].resume).toBeUndefined();
-    expect(observed[2].prompt).toContain('Own-stage continuation evidence');
-    expect(observed[2].prompt).not.toContain('# Stage budget wrap-up');
+    expect(observed.map(entry => entry.attempt)).toEqual([1, 2]);
+
+    expect(observed[1].id).not.toBe(observed[0].id);
+    expect(observed.map(entry => entry.budgetMs)).toEqual([budget, budget]);
+    expect(observed[1].remaining).toBe(budget);
+    expect(observed[1].resume).toBeUndefined();
+    expect(observed[1].prompt).toContain('Own-stage continuation evidence');
+    expect(observed[1].prompt).not.toContain('# Stage budget wrap-up');
     const status = readStageStatus(project, created.runId, 'work');
     expect(status.attempts?.map(attempt => attempt.exitCode)).toEqual([0, 0]);
   });

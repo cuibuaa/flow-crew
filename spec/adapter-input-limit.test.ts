@@ -8,7 +8,7 @@ import * as inputOwner from '../src/adapter-input.js';
 import { loadEngineDefaults } from '../src/config.js';
 import { runStage, type StageOpts } from '../src/worker.js';
 import { stageRecordSchema } from '../src/handoff.js';
-import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { fcGlobalDir, listRuns, readRunState, readStageOutput, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
@@ -77,7 +77,7 @@ describe('the single adapter input owner', () => {
   });
 });
 
-const paths = ['ordinary', 'gate', 'planner', 'successor', 'isolated-shape', 'isolated-review', 'isolated-successor', 'correction', 'guidance', 'wrap-up'] as const;
+const paths = ['ordinary', 'gate', 'planner', 'successor', 'isolated-shape', 'isolated-review', 'isolated-successor', 'correction', 'guidance'] as const;
 type SendingPath = typeof paths[number];
 
 async function worker(path: SendingPath, limit = 500_000, capturesInvocationInput = false) {
@@ -92,7 +92,6 @@ async function worker(path: SendingPath, limit = 500_000, capturesInvocationInpu
       appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: 'G'.repeat(5000), knownStageIds: ['work'] });
       opts.onCommandLifecycle?.({ phase: 'completed', id: 'tool', timestamp: new Date().toISOString() });
     }
-    if (seen.length === 1 && path === 'wrap-up') time.advanceTo(stageWrapUpTiming(10_000).warningAfterMs);
     return { output: seen.length === 1 && path === 'correction' ? '{"unexpected":true}' : valid,
       exitCode: opts.abortSignal?.aborted ? 137 : path === 'gate' ? 1 : 0, duration_ms: 1 };
   } };
@@ -110,7 +109,7 @@ async function worker(path: SendingPath, limit = 500_000, capturesInvocationInpu
 describe('every worker sending path at the assembled boundary', () => {
   it.each(paths)('%s: just under passes unchanged; just over has no call, capture or replay', async path => {
     const calibration = await worker(path);
-    const target = ['correction', 'guidance', 'wrap-up'].includes(path) ? 1 : 0;
+    const target = ['correction', 'guidance'].includes(path) ? 1 : 0;
     expect(calibration.seen).toHaveLength(target + 1);
     const candidate = calibration.seen[target];
     const measured = inputOwner.adapterInputLength(candidate.system, candidate.prompt);

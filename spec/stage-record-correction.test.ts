@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
-import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { ArtifactPathSchema, resolveArtifactLocation } from '../src/artifact-location.js';
 import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { AuditFindingsSchema } from '../src/scoped-audit-repair.js';
@@ -145,7 +145,7 @@ describe('record correction uses the existing attempt', () => {
       invocations.push(opts);
       expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
       // Even slow host-side setup cannot consume the injected attempt budget.
-      if (invocations.length === 1) time.advanceTo(stageWrapUpTiming(options().timeout_ms).warningAfterMs - 1);
+      if (invocations.length === 1) time.advanceTo((options().timeout_ms - 1) - 1);
       if (invocations.length === 2) {
         expect(prompt).toContain('Stage result correction');
         expect(prompt).toContain(JSON.stringify(original));
@@ -211,9 +211,9 @@ describe('record correction uses the existing attempt', () => {
     expect(structuredFailingGateCriteria(runDir, 'review')).toEqual(['criterion']);
   });
 
-  it('wraps up instead of correcting when a malformed result crosses the warning boundary', async () => {
+  it('corrects a slow malformed result before the declared allowance', async () => {
     const invocations: RunOpts[] = [];
-    const warningAt = stageWrapUpTiming(options().timeout_ms).warningAfterMs;
+    const warningAt = (options().timeout_ms - 1);
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts);
       expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
@@ -221,11 +221,11 @@ describe('record correction uses the existing attempt', () => {
         time.advanceTo(warningAt - 1);
         expect(opts.abortSignal?.aborted).toBe(false);
         time.advanceTo(warningAt);
-        expect(opts.abortSignal?.aborted).toBe(true);
+        expect(opts.abortSignal?.aborted).toBe(false);
         return { output: malformed[0][1](), exitCode: 0, duration_ms: 1 };
       }
-      expect(prompt).toContain('# Stage budget wrap-up');
-      expect(prompt).not.toContain('# Stage result correction');
+      expect(prompt).not.toContain('# Stage budget wrap-up');
+      expect(prompt).toContain('# Stage result correction');
       expect(opts.attemptIndex).toBe(invocations[0].attemptIndex);
       expect(opts.attemptStartedAt).toBe(invocations[0].attemptStartedAt);
       return { output: JSON.stringify(rejected()), exitCode: 0, duration_ms: 1 };
@@ -237,11 +237,12 @@ describe('record correction uses the existing attempt', () => {
     expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
     const status = readStageStatus(projectDir, runId, 'review');
     expect(status.attempts).toHaveLength(1);
-    expect(status.attempts?.[0].disposition).not.toBe('repaired');
+    expect(status.attempts?.[0].disposition).toBe('repaired');
     const requestedAt = new Date(time.clock.wallNow()).toISOString();
-    expect(status.timeout).toMatchObject({ wrapUpRequestedAt: requestedAt, wrapUpDeliveredAt: requestedAt, elapsedMs: warningAt });
+    expect(status.timeout).toMatchObject({ elapsedMs: warningAt });
+    expect(status.timeout?.wrapUpRequestedAt).toBeUndefined();
     expect(readRunEvents(projectDir, runId).filter(event => event.type.startsWith('stage_wrap_up_')).map(event => event.type))
-      .toEqual(['stage_wrap_up_requested', 'stage_wrap_up_delivered']);
+      .toEqual([]);
   });
 
   it.each([false, true])('corrects author and planner reports through the same boundary (planner=%s)', async dynamicDispatch => {

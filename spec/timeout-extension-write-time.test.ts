@@ -9,7 +9,7 @@ import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 import {
   runStage,
 } from '../src/worker.js';
-import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 
@@ -73,7 +73,7 @@ describe('bounded wrap-up settlement accounting', () => {
           if (settleAfterDeadline) clock.advance(50);
           resolve({ output: 'retained progress', exitCode: 137, duration_ms: clock.monotonicNow() });
         }, { once: true });
-        setImmediate(() => clock.advance(stageWrapUpTiming(50).hardLimitMs));
+        setImmediate(() => clock.advance(50));
       });
     } };
 

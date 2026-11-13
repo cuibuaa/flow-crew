@@ -70,16 +70,16 @@ export type AttemptTerminationCause = 'exit' | 'stage_abort' | 'attempt_timeout'
 
 export interface StageAttemptTimeoutSummary {
   attemptId: string;
-  budgetMs: number;
+  budgetMs?: number;
   attemptStartedAt: string;
-  deadlineAt: string;
+  deadlineAt?: string;
   budgetDeadlineAt?: string;
   wrapUpAt?: string;
   finishingMs?: number;
   wrapUpRequestedAt?: string;
   wrapUpDeliveredAt?: string;
   elapsedMs: number;
-  remainingMs: number;
+  remainingMs?: number;
   /** Historical extension receipts; new immutable deadlines never write these. */
   rejectedExtensionCount?: number;
   decisionPaths?: string[];

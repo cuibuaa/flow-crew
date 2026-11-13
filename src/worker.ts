@@ -53,7 +53,6 @@ import {
 } from './store.js';
 import type { AttemptAttribution, StageAttemptTimeoutSummary, StageStatus } from './store.js';
 import {
-  ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS,
   AttemptDeadlineController,
   type AttemptDeadlineClock,
 } from './attempt-deadline.js';
@@ -118,7 +117,7 @@ export interface StageOpts {
   promptTemplate: string;
   /** Planner-authored stage text before scheduler contracts are appended. */
   artifactObligationTemplate?: string;
-  timeout_ms: number;
+  timeout_ms?: number;
   /** Internal dependency injection for deterministic attempt-deadline tests. */
   deadlineClock?: AttemptDeadlineClock;
   /** Internal dependency injection for deterministic attempt-deadline tests. */
@@ -346,8 +345,7 @@ export async function runStage(
   // Every execution enters here, including technical retries, repairs and
   // resumed sessions. Arm and publish one clock before preparing its work.
   const attemptDeadline = new AttemptDeadlineController({
-    budgetMs: opts.timeout_ms,
-    wrapUp: true,
+    budgetMs: opts.timeout_ms ?? durationLimit,
     ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
   });
   const effectiveBudgetMs = attemptDeadline.budgetMs;
@@ -518,10 +516,10 @@ export async function runStage(
     prompt = opts.isolatedInput.user;
   }
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
-  // A wrap-up may suppress publication when the validated work is unfinished.
-  const publicationCarriers = (record?: Record<string, unknown>): string[] => {
+  // The engine owns these result-schema publication carriers.
+  const publicationCarriers = (): string[] => {
     if (!opts.outputSchema) return [];
-    const carriers = opts.isGate && (!record || !wrapUpRequestedAt || finishedStageRecord(record)) ? [`verdict_${opts.stageId}.json`] : [];
+    const carriers = opts.isGate ? [`verdict_${opts.stageId}.json`] : [];
     const handoff = `handoff_${opts.stageId}.md`;
     if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === `work/${handoff}`)) carriers.push(handoff);
     return carriers;
@@ -578,7 +576,7 @@ export async function runStage(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'budget_wrap_up' | 'operator_interrupt';
+    kind: 'guidance' | 'operator_interrupt';
     interrupt?: StageCommandInterruptSignal;
     retiredCommandIds?: string[];
   };
@@ -586,28 +584,6 @@ export async function runStage(
   let stageAborted = false;
   let abortReason = '';
   let terminationCause: RunResult['terminationCause'];
-  let wrapUpRequestedAt: string | undefined;
-  let wrapUpDeliveredAt: string | undefined;
-  let wrapUpGuidanceId: string | undefined;
-  const requestWrapUp = (): void => {
-    if (wrapUpRequestedAt || attemptAbortController.signal.aborted) return;
-    wrapUpRequestedAt = new Date(attemptDeadline.wallNow()).toISOString();
-    const envelope = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId, source: 'scheduler',
-      knownStageIds: [opts.stageId], attemptIndex,
-      body: `# Stage budget wrap-up\nTime is nearly up. Stop starting new work. Keep all admitted files. Finish safely and return your normal result with a concrete done/remaining handoff: what changed, evidence, unfinished duties and the next bounded action. Return remaining_work as a list of unfinished duties/checks, or [] only when all assigned work is complete. Do not claim unfinished work or unrun checks passed. If work remains, the next iteration continues these files. Hard stop: ${attemptDeadline.deadlineAt}; finishing interval: at least ${attemptDeadline.finishingMs} ms after the current child retires within its bounded closure window.` });
-    wrapUpGuidanceId = envelope.id;
-    consumeNewGuidance('adapter_invocation', activeInvocationIndex);
-    if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
-      commandBoundaryControl = { kind: 'budget_wrap_up' };
-      activeInvocationAbortController.abort('guidance_delivery_for_budget_wrap_up');
-    }
-
-    recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_requested', runId: opts.runId,
-      timestamp: wrapUpRequestedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt,
-      guidanceId: envelope.id, finishingMs: attemptDeadline.finishingMs, deadlineAt: attemptDeadline.deadlineAt, source: 'worker' });
-  };
-  attemptDeadline.wrapUpSignal.addEventListener('abort', requestWrapUp, { once: true });
-  if (attemptDeadline.wrapUpSignal.aborted) requestWrapUp();
   const attemptElapsedMs = (): number => attemptDeadline.elapsedMs();
 
   const removeAbortSignal = (): void => {
@@ -776,7 +752,7 @@ export async function runStage(
       : undefined;
     const timedOut = !stageAborted && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
     return {
-      output: '',
+      output: telemetry?.output ?? '',
       exitCode: timedOut ? 124 : 137,
       ...(telemetry?.processExitCode !== undefined ? { processExitCode: telemetry.processExitCode } : {}),
       ...(telemetry?.processSignal !== undefined ? { processSignal: telemetry.processSignal } : {}),
@@ -796,14 +772,15 @@ export async function runStage(
     if (!stageAborted) attemptDeadline.observeSettlement();
   };
   let lastChildClosedAt: string | undefined;
-  let childCloseUnverified = false;
   let invocationIndex = 0;
   let inputRecordIndex = 0;
   // No live-session exceptions: all continuation state is reconstructible from
   // the ledger, current files, delivered guidance and the last final record.
   let previousInvocation: object | undefined;
 
-  const deadlineContext = (): string => `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; stage budget ends ${attemptDeadline.budgetDeadlineAt}; wrap-up warning ${attemptDeadline.wrapUpAt}; absolute deadline (hard stop) ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Retries, backoff and fallback consume that same budget; corrections share this hard stop. Query UTC time with node -e "console.log(new Date().toISOString())".`;
+  const deadlineContext = (): string => effectiveBudgetMs !== undefined
+    ? `# Execution clock\nExecution ${attemptIndex}: author-declared allowance ${effectiveBudgetMs} ms, hard stop ${attemptDeadline.deadlineAt ?? 'beyond calendar representation'}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms. Retries, backoff and corrections share this allowance. Expiry hands unfinished work onward.`
+    : `# Execution clock\nExecution ${attemptIndex} has no declared duration allowance. Wait for its result or an explicit stop.`;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
@@ -851,15 +828,7 @@ export async function runStage(
           retiredCommandIds: [...new Set(newlySubmitted.flatMap(entry => retiredForGuidance.get(entry.id) ?? []))],
           detail: 'Guidance delivered in submitted invocation input', source: 'worker' });
       }
-      // Record submitted input at the adapter's existing input boundary. Merely
-      // preparing a prompt does not establish that a native call received it.
-      if (wrapUpRequestedAt && !wrapUpDeliveredAt && submitted.some(entry => entry.id === wrapUpGuidanceId)) {
-        wrapUpDeliveredAt = new Date(attemptDeadline.wallNow()).toISOString();
 
-        recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_delivered', runId: opts.runId,
-          timestamp: wrapUpDeliveredAt, stageId: opts.stageId, attemptIndex, attemptStartedAt, invocationIndex,
-          remainingMs: attemptDeadline.remainingMs(), source: 'worker' });
-      }
     };
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
@@ -917,40 +886,9 @@ export async function runStage(
       }
     };
     let recordedCommandIndex = 0;
-    const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
-      let settled = false;
-      let closeObservationTimer: ReturnType<typeof setTimeout> | undefined;
-      const finish = (value: RunResult): void => {
-        if (settled) return;
-        settled = true;
-        if (closeObservationTimer) clearTimeout(closeObservationTimer);
-        invocationAbortSignal.removeEventListener('abort', onAbort);
-        resolvePromise(value);
-      };
-      const fail = (error: unknown): void => {
-        if (settled) return;
-        settled = true;
-        if (closeObservationTimer) clearTimeout(closeObservationTimer);
-        invocationAbortSignal.removeEventListener('abort', onAbort);
-        rejectPromise(error);
-      };
-      const onAbort = (): void => {
-        if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
-        if (commandBoundaryControl) commandBoundaryControl.retiredCommandIds ??= [...activeCommands.keys()];
-        // The signal initiates cancellation; the adapter promise is the child
-        // lifecycle acknowledgement. Wait for it before claiming childClosedAt.
-        // A broken adapter is bounded by the observation tolerance and is then
-        // recorded without a child-close timestamp instead of hanging forever.
-        if (!closeObservationTimer) {
-          closeObservationTimer = setTimeout(() => {
-            childCloseUnverified = true;
-            finish({ ...cancelledResult(), exitCode: 125, timedOut: false, engineVoid: true, terminationCause: 'engine_void',
-              friendlyError: 'ENGINE_STATE_REFUSED: adapter child closure is unverified; preserve its ownership evidence and exclude live consumers before continuing' });
-          }, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
-        }
-      };
-      invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
-      withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
+    // The adapter promise owns child/group retirement; cancellation alone is
+    // not closure evidence and cannot settle or void this invocation.
+    const invocation = withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
         stageId: opts.stageId, artifactContract: opts.artifactContract!,
         },
       async () => {
@@ -995,7 +933,8 @@ export async function runStage(
         const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
         try {
         return await withStageWriteGrant(grant, () => runAdapter(selectedAdapter, recordedPrompt, invocationRole, {
-          timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
+          // The attempt owner already enforces the declared allowance across all phases.
+          // No second native clock may cut it short.
           workDir: opts.projectDir,
           runDir: opts.runDir,
           stageId: opts.stageId,
@@ -1022,22 +961,19 @@ export async function runStage(
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
           // parsed while the adapter was closing its child process.
-          finish(value.engineVoid
-            ? value : aggregateAbortSignal.aborted ? cancelledResult(value) : value);
+          return value.engineVoid ? value : aggregateAbortSignal.aborted ? cancelledResult(value) : value;
         },
         (error) => {
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           if (error instanceof WriteGrantError) {
-            finish({ writeGrantFailure: error.outcome, output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
+            return { writeGrantFailure: error.outcome, output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) };
           } else if (error instanceof EngineStateError) {
-            finish({ engineVoid: true, terminationCause: 'engine_void', output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
-          } else if (aggregateAbortSignal.aborted) finish(cancelledResult());
-          else if (invocationAbortController.signal.aborted) finish(cancelledResult());
-          else fail(error);
+            return { engineVoid: true, terminationCause: 'engine_void' as const, output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) };
+          } else if (aggregateAbortSignal.aborted || invocationAbortController.signal.aborted) return cancelledResult();
+          throw error;
         },
       );
-    });
     try {
       return await invocation;
     } finally {
@@ -1089,14 +1025,6 @@ export async function runStage(
     }
     return record;
   };
-  const finishedStageRecord = (record: Record<string, unknown>): boolean => {
-    // A completed rejection keeps its existing authority. Otherwise require an
-    // explicit empty list: delivered/pass alone can also describe partial work.
-    return Boolean(opts.decisionResult) || record.status === 'environment_gap' || opts.isGate && record.pass === false
-      || Array.isArray(record.remaining_work) && record.remaining_work.length === 0
-        && (opts.isGate ? record.pass === true : record.status === 'delivered');
-  };
-  let stageWorkFinished = false;
   let validatedStageRecord: Record<string, unknown> | undefined;
   let unreviewedGap = false;
   let correctionReinvocations = 0;
@@ -1112,16 +1040,9 @@ export async function runStage(
       const commandControl = commandBoundaryControl;
       // No correction may launch another child until the prior child is known
       // closed before another child is started.
-      if (childCloseUnverified) return combined;
       if (!isRetryableAdapterFailure(current.providerFailure?.kind)) return combined;
       if (commandControl && !aggregateAbortSignal.aborted) {
         for (const entry of collectedGuidance.filter(entry => !submittedGuidanceIds.has(entry.id))) retiredForGuidance.set(entry.id, commandControl.retiredCommandIds ?? []);
-        // A valid completed result needs no replacement finishing turn, even
-        // when the warning arrived before the child's result was observed.
-        if (commandControl.kind === 'budget_wrap_up' && current.exitCode === 0 && opts.outputSchema) {
-          try { if (finishedStageRecord(stageRecord(current.output))) return combined; }
-          catch { /* malformed results still need the bounded finishing turn */ }
-        }
         if (commandControl.kind === 'operator_interrupt' && commandControl.interrupt) {
           recordRunEvent(opts.projectDir, opts.runId, {
             type: 'stage_command_interrupted',
@@ -1143,7 +1064,7 @@ export async function runStage(
             source: 'worker',
           });
         }
-        const label = commandControl.kind === 'budget_wrap_up' ? 'Stage budget wrap-up' : commandControl.kind === 'operator_interrupt'
+        const label = commandControl.kind === 'operator_interrupt'
           ? 'Operator command interrupt'
           : 'Live guidance delivered at tool completion';
         invocationPrompt = `# ${label}`;
@@ -1188,12 +1109,8 @@ export async function runStage(
   const waitForRetry = async (delayMs: number): Promise<boolean> => {
     const canInvoke = () => !aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0;
     if (!canInvoke()) return false;
-    // Backoff cannot spend the finishing interval before its instruction gets
-    // a native turn. The warning wakes the existing finite retry loop.
-    if (delayMs <= 0 || attemptDeadline.wrapUpSignal.aborted) return true;
-    const completed = await attemptDeadline.boundedSleep(delayMs,
-      AbortSignal.any([aggregateAbortSignal, attemptDeadline.wrapUpSignal]));
-    return (completed || attemptDeadline.wrapUpSignal.aborted) && canInvoke();
+    if (delayMs <= 0) return true;
+    return await attemptDeadline.boundedSleep(delayMs, aggregateAbortSignal) && canInvoke();
   };
 
   let result: RunResult;
@@ -1244,12 +1161,11 @@ export async function runStage(
       const record = stageRecord(readFileSync(resultPath, 'utf8'));
       validatedStageRecord = record;
       blockedStageResult = record.status === 'blocked' || record.status === 'environment_gap';
-      stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && blockedStageResult) {
         unreviewedGap = record.status === 'environment_gap';
         throw new Error(`Blocked: ${record.summary}`);
       }
-      const destinations = publicationCarriers(record).map(carrier => ({ carrier, work: stageWritePath(opts.runDir, carrier) }));
+      const destinations = publicationCarriers().map(carrier => ({ carrier, work: stageWritePath(opts.runDir, carrier) }));
       for (const { carrier, work } of destinations) {
         atomicWrite(runRecordPath(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
         atomicWrite(work, `${JSON.stringify(record)}\n`);
@@ -1260,7 +1176,7 @@ export async function runStage(
       result.friendlyError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
-  if (result.exitCode === 0 || (production && invocationIndex > 0 && !childCloseUnverified)) {
+  if (result.exitCode === 0 || (production && invocationIndex > 0)) {
     try {
       const artifactInput = {
         attemptIndex,
@@ -1273,12 +1189,12 @@ export async function runStage(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || result.exitCode !== 0);
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || result.exitCode !== 0);
       const productFacts = existsSync(runRecordPath(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
       const authors = runState?.planControl?.stages.filter(stage => !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length);
-      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && (!wrapUpRequestedAt || stageWorkFinished) && result.exitCode === 0 ? productFacts : [];
+      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && result.exitCode === 0 ? productFacts : [];
       const requiredProducts = new Map([...dueProducts, ...availableProductsAtStart].map(product => [product.path, product]));
       for (const product of requiredProducts.values()) {
         const current = productFacts.find(output => output.path === product.path);
@@ -1289,7 +1205,7 @@ export async function runStage(
           reason: `${product.available ? 'DECLARED_OUTPUT_REMOVED' : 'DECLARED_OUTPUT_REQUIRED'}: ${product.path}; ${current?.reason ?? 'required product declaration disappeared'}`,
         });
       }
-      if (production && !childCloseUnverified) audit.production = production;
+      if (production) audit.production = production;
       if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
       if (audit.violations.length && result.exitCode === 0) {
         result.exitCode = 1;
@@ -1306,7 +1222,6 @@ export async function runStage(
     pollAbortSignal();
     clearInterval(requestPollTimer);
     for (const watcher of requestWatchers) watcher.close();
-    attemptDeadline.wrapUpSignal.removeEventListener('abort', requestWrapUp);
     cleanupAbortSignalAtExit();
     cleanupCommandInterruptSignalAtExit();
     // The execution attempt ends after adapter settlement.
@@ -1325,7 +1240,6 @@ export async function runStage(
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
-    || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
   if (result.engineVoid) {
     terminationCause = 'engine_void';
@@ -1344,21 +1258,20 @@ export async function runStage(
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir);
   if (!result.engineVoid && !stageAborted && !environmentGap && result.providerFailure?.kind !== 'quota'
-    && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
-    const forced = timedOut;
+    && timedOut) {
     const retainedPaths = artifacts;
-    const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: ${JSON.stringify(validatedStageRecord?.remaining_work ?? ["Complete declared duties and unfinished checks; verify retained work before continuing."])}. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
-    result.continuation = { reason: 'stage_budget', forced, summary,
+    const summary = `Declared allowance unfinished handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: ${JSON.stringify(validatedStageRecord?.remaining_work ?? ["Complete declared duties and unfinished checks; verify retained work before continuing."])}. Disposition: declared allowance reached; child closure acknowledged with work kept.`;
+    result.continuation = { reason: 'stage_budget', forced: true, summary,
       handoff: `stages/${opts.stageId}/output_attempt_${attemptIndex}.md` };
     result.exitCode = 0;
     result.timedOut = false;
     result.friendlyError = undefined;
     terminationCause = 'exit';
-    // Keep authored JSON intact. A forced stop has no authored result; publish
-    // a typed control handoff rather than inventing a gate verdict or checks.
-    if (forced) result.output = JSON.stringify({ status: 'delivered', summary, checks: [],
+    // Keep any final output received during closure. Without authored bytes,
+    // publish a control handoff rather than a gate verdict or completed checks.
+    if (!result.output) result.output = JSON.stringify({ status: 'delivered', summary, checks: [],
       caveats: ['Engine-retained partial work; no authored completion or gate acceptance is inferred.'] });
-    recordRunEvent(opts.projectDir, opts.runId, { type: forced ? 'stage_wrap_up_forced' : 'stage_wrap_up_completed',
+    recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_forced',
       runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt,
       handoff: result.continuation.handoff, source: 'worker' });
   }
@@ -1374,7 +1287,7 @@ export async function runStage(
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
   // If no adapter child was started, reaching settlement itself proves there is
   // no live child. Otherwise only an adapter promise settlement may certify it.
-  const childClosedAt = childCloseUnverified ? undefined : (lastChildClosedAt ?? new Date().toISOString());
+  const childClosedAt = lastChildClosedAt ?? new Date().toISOString();
   const deadlineSnapshot = attemptDeadline.snapshot();
   const timeoutSummary: StageAttemptTimeoutSummary = {
     attemptId: attemptDeadline.attemptId,
@@ -1382,9 +1295,6 @@ export async function runStage(
     attemptStartedAt: attemptDeadline.attemptStartedAt,
     deadlineAt: attemptDeadline.deadlineAt,
     budgetDeadlineAt: attemptDeadline.budgetDeadlineAt,
-    wrapUpAt: attemptDeadline.wrapUpAt,
-    finishingMs: attemptDeadline.finishingMs,
-    wrapUpRequestedAt, wrapUpDeliveredAt,
     elapsedMs: deadlineSnapshot.elapsedMs,
     remainingMs: deadlineSnapshot.remainingMs,
     deadlineReachedAt: deadlineSnapshot.deadlineReachedAt,
@@ -1408,7 +1318,7 @@ export async function runStage(
         stageAborted
           ? (abortReason ? `aborted by engine: ${abortReason}` : 'aborted by engine')
           : result.providerFailure ? providerFailureDetail(result.exitCode, result.providerFailure)
-          : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
+          : result.timedOut ? `timed out after ${Math.round((effectiveBudgetMs ?? 0) / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
           // instead of leaving the operator with a bare exit code.
           : result.friendlyError ? `Exit code ${result.exitCode} — ${result.friendlyError}`
@@ -1438,7 +1348,7 @@ export async function runStage(
       { exitCode: 1, error: error instanceof Error ? error.message : String(error) });
   }
   if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length
-    && attemptValidationPlan.source !== 'model-selection' && final.status === STAGE_STATUS.COMPLETE && result.exitCode === 0 && !result.engineVoid && !childCloseUnverified && !result.continuation) {
+    && attemptValidationPlan.source !== 'model-selection' && final.status === STAGE_STATUS.COMPLETE && result.exitCode === 0 && !result.engineVoid && !result.continuation) {
     let selection: unknown;
     try { selection = JSON.parse(result.output).validation; } catch { /* unavailable stays unknown */ }
     recordValidationSelection(opts.projectDir, opts.runId, selection);

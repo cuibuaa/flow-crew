@@ -23,7 +23,7 @@ import { buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-ar
 import { isGateReviewed, gateReviewedAuthorIds } from './gate-recovery.js';
 
 export function createSchedulerTechnicalRetryState(
-  initialBudgetMs: number,
+  initialBudgetMs: number | undefined,
   priorStatus?: StageStatus,
   recover = false,
 ): TechnicalRetryBudgetState {
@@ -48,8 +48,8 @@ export function createSchedulerTechnicalRetryState(
 }
 
 export function prepareSchedulerTechnicalAttempt(chain: TechnicalRetryBudgetState): {
-  budgetMs: number;
-  retryContext?: { previousBudgetMs: number; nextBudgetMs: number };
+  budgetMs?: number;
+  retryContext?: { previousBudgetMs?: number; nextBudgetMs?: number };
 } {
   const transition = transitionTechnicalRetryBudget(chain, { type: 'prepare_attempt' });
   if (transition.type !== 'attempt_prepared') throw new Error('technical retry state did not prepare an attempt');
@@ -59,7 +59,7 @@ export function prepareSchedulerTechnicalAttempt(chain: TechnicalRetryBudgetStat
 export function recordSchedulerTechnicalAttemptResult(
   chain: TechnicalRetryBudgetState,
   result: Pick<RunResult, 'effectiveTimeoutMs' | 'terminationCause'>,
-  preparedBudgetMs: number,
+  preparedBudgetMs: number | undefined,
 ): void {
   const effectiveBudgetMs = result.effectiveTimeoutMs ?? preparedBudgetMs;
   const retryableTimeout = result.terminationCause === 'attempt_timeout';
@@ -169,7 +169,7 @@ export async function executeSingleStage(
     const retries = state.stages[stage.id]?.retries ?? 0;
     const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
     const researchWall = state.research?.budget?.wall_seconds;
-    if (researchWall !== undefined) prepared.budgetMs = Math.max(1, Math.min(prepared.budgetMs,
+    if (researchWall !== undefined) prepared.budgetMs = Math.max(1, Math.min(prepared.budgetMs ?? Infinity,
       Math.floor(Date.parse(state.startedAt) + researchWall * 1000 - Date.now())));
     // Read the failure cause before the running projection clears latest error.
     const retryPreamble = retries > 0

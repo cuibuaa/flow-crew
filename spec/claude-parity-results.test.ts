@@ -56,10 +56,7 @@ describe('Claude native result parity (zero provider tokens)', () => {
     expect(await invocation).toMatchObject({ exitCode: 137 });
   });
 
-  it('G05 recovers only its own hung-stdio SIGKILL and keeps the raw close facts', async () => {
-    const result = await invoke(jsonl(terminal('done')) + '\n', { hang: true });
-    expect(result).toMatchObject({ exitCode: 0, processExitCode: null, processSignal: 'SIGKILL', output: 'done' });
-  }, 12_000);
+
 
   it.each([
     { type: 'result', is_error: true, errors: ['429 Too Many Requests', 'retry later'] },

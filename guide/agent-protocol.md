@@ -77,33 +77,26 @@ to old candidate records. Unknown historical consumer ownership still blocks rec
 
 ## Stage budgets and retained continuation
 
-Each execution has one monotonic clock, shared by provider retries, parameter repairs,
-guidance continuations and backoff. For a normal budget `B`, the finishing interval is
-`W = min(300000, max(1, floor(B / 10)))` milliseconds. The warning is due at
-`max(0, B - W - 5500)`. The immutable hard stop is `max(B, W + 5500)`; very short
-budgets therefore start in finishing mode and still reserve child retirement.
-No numeric default changed: the three-hour default now includes the finishing turn.
+An execution has a duration allowance only when its author declares `stage_duration_ms`
+(or a research wall allowance bounds the invocation). The exact monotonic allowance is
+shared by preparation, provider retries, parameter repairs, guidance continuations and
+backoff. No engine default, early warning, finishing interval or minimum duration applies.
+Without a declaration the engine awaits the result or explicit stop.
 
-The worker persists an attempt-bound guidance envelope, retires the current invocation
-through its existing control path and invokes the same adapter with the actionable
-wrap-up instruction. Both Codex and Claude start a fresh provider session with the full
-current contract, ledger and diff, the predecessor’s structured final record (when
-available), its validation fact and delivered guidance IDs. Same-attempt corrections
-and guidance interruptions also start fresh and receive the preceding invocation’s
-structured final record and delivery IDs. No situation retains a live-session exception. The 5.5-second closure window reserves the
-existing five-second process-group escalation plus observation. Once that child retires
-within the window, at least `W` remains for the finishing turn under a responsive scheduler.
-An unresponsive scheduler cannot deliver a timely warning; monotonic settlement still
-recognizes expiry, retains the files and records missing delivery rather than inventing it.
+At a declared allowance an unfinished child receives SIGTERM, followed by SIGKILL after
+five seconds if needed. The worker awaits the adapter's actual child/group closure
+acknowledgement; a slow acknowledgement cannot produce engine-void. Explicit ownership
+or integrity violations still refuse settlement. After closure, admitted files, output
+and live log are retained with a typed `work_unfinished` continuation. The engine does
+not invent an authored result or gate acceptance. A completed rejection remains a
+rejection. An independent gate receives its own declared allowance.
 
-A cooperative wrap settles normally. At the hard stop an uncooperative child receives
-SIGTERM, followed by SIGKILL after five seconds if needed. Child closure must be verified;
-unknown closure refuses further execution. Both outcomes keep admitted files, the output
-and live log, with an immutable done/remaining handoff in continuation metadata. Cooperative
-authored JSON stays intact; a forced stop publishes a typed partial-work control handoff
-instead of inventing an authored result or gate verdict. Unsafe writes and genuine gate
-rejections remain refusals. The idle watchdog independently stops lack of verified progress;
-a wrap-up does not reset its progress clock.
+Corrections and operator guidance use fresh provider sessions with the full current
+contract, ledger and diff, the predecessor's structured final record, validation fact
+and delivered guidance IDs. Claude also awaits real process closure after its native
+result; there is no post-result kill timer or success normalization from such a kill.
+The independent idle watchdog remains a separate policy: sampled silence is not proof
+of remote job death, and removing that automatic protection requires an operator decision.
 
 A completed budget slice is not completed duty or gate acceptance. It cannot release
 consumers or publish a passing gate verdict. The next workflow iteration preserves the
@@ -118,8 +111,7 @@ declaration is persisted with the admitted brief and cannot be renewed by a rest
 Neither research progress nor lack of a product diff changes this allowance. Exhaustion is
 `incomplete` with retained work, without timeout retry growth. A configured research wall
 ceiling also prevents another slice at a budget boundary. Cancel/resume preserves spent
-iterations. Gates have independent stage budgets. Validation settlement uses the remaining author
-budget, capped by its whole-batch bound; it cannot consume the gate budget.
+iterations. Gates have independent stage budgets. Validation uses its separately declared command/batch allowances; it cannot consume the gate allowance.
 
 ## Ending causes and resource waits
 

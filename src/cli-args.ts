@@ -41,7 +41,7 @@ export const CLI_COMMANDS: Record<string, Command> = {
     'max-iterations': { integer: 1 },
     'campaign-context': { equalsOnly: true, choices: ['inherit', 'skip'] },
     'acknowledge-brief-warnings': { optional: true },
-    timeout: { refusal: 'The --timeout run override was removed; edit the engine config/defaults.yaml::default_timeout_ms instead.' },
+    timeout: { refusal: 'The --timeout run override was removed; declare stage_duration_ms in the work brief instead.' },
   }, '<task-text|->'),
   status: command({ ...flags('all details'), ...values('project') }),
   list: command({ limit: count('10') }),

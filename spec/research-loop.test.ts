@@ -28,7 +28,7 @@ import * as researchOwner from '../src/scheduler/sched_policy/research.js';
 import { readRunEvents } from '../src/run-events.js';
 import { runLand } from '../src/cli-land.js';
 import { renderRunSummary } from '../src/run-summary.js';
-import { scheduleDeadline, stageWrapUpTiming } from '../src/attempt-deadline.js';
+import { scheduleDeadline } from '../src/attempt-deadline.js';
 import { controlResearchTime, manualResearchClock as manualClock } from './test-support/research-clock.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { spawn } from 'node:child_process';
@@ -395,9 +395,9 @@ describe('versioned declaration-owned research loop', () => {
   });
 });
 
-it.each([false, true])('settles real warning handoffs without measuring unfinished author work (exhausted=%s)', async exhausted => {
-  setEngineDefaults({ default_timeout_ms: 20000, max_iterations: 3, max_retries: 0, stage_technical_retries: 0, gate_retry_loops: 0 });
-  let text = brief(config => { config.budget.max_rounds = 3; });
+it.each([false, true])('settles declared allowance handoffs without measuring unfinished author work (exhausted=%s)', async exhausted => {
+  setEngineDefaults({ max_iterations: 3, max_retries: 0, stage_technical_retries: 0, gate_retry_loops: 0 });
+  let text = brief(config => { config.budget.max_rounds = 3; }).replace('---\n', '---\nstage_duration_ms: 20000\n');
   if (exhausted) text = text.replace('---\n', '---\nmax_continuations: 0\n');
   let time = manualClock(); const calls: string[] = [];
   const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -405,7 +405,7 @@ it.each([false, true])('settles real warning handoffs without measuring unfinish
     if (opts.attemptIndex === 1) {
       if (!prompt.includes('# Stage budget wrap-up')) {
         writeFileSync(join(project, 'candidate.json'), '{"value":80}');
-        time.advanceTo(stageWrapUpTiming(20000).warningAfterMs);
+        time.advanceTo(20000);
         return { exitCode: 137, output: 'Closed at warning.', duration_ms: 1 };
       }
       return { exitCode: 0, output: JSON.stringify({ ...JSON.parse(delivered), remaining_work: ['Finish the candidate.'] }), duration_ms: 1 };
@@ -418,7 +418,7 @@ it.each([false, true])('settles real warning handoffs without measuring unfinish
     () => { time = manualClock(); return time.clock; });
   const journal = researchInstrumentState(runDir(project, result.runId));
   expect(result.status).toBe(exhausted ? 'incomplete' : 'complete');
-  expect(calls).toEqual(exhausted ? ['1:ordinary', '1:wrap'] : ['1:ordinary', '1:wrap', '2:ordinary']);
+  expect(calls).toEqual(exhausted ? ['1:ordinary'] : ['1:ordinary', '2:ordinary']);
   expect(journal.history.map(h => h.outcome)).toEqual(exhausted ? ['baseline', 'finalized'] : ['baseline', 'keep', 'finalized']);
   expect(result.stages.produce.attempts?.[0].continuation).toBeDefined();
   expect(read(join(project, 'candidate.json')).value).toBe(exhausted ? 100 : 50);

@@ -31,19 +31,16 @@ Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
 
 ## Deadlines and idle progress
 
-Each scheduled execution receives one budget and an immutable hard stop, shared by
-adapter retries, backoff, correction and guidance continuations. Before the budget ends,
-the worker delivers actionable wrap-up guidance through the existing invocation control
-path on both adapters. A finishing interval and child-retirement reserve keep orderly
-handoff separate from forced termination; [the protocol](agent-protocol.md#stage-budgets-and-retained-continuation)
-states the exact timing formula and very-short-budget behavior.
-
-Cooperative and bounded forced wrap-ups retain admitted files and a done/remaining
-handoff, and continue the same DAG in the next finite iteration. They are not technical
-failures and do not grow the budget. Each later gate has its own clock. Legacy timeout
-retry history remains readable; an older interrupted technical chain retains its recorded
-budget on continuation. Settlement synchronously checks monotonic expiry when timers were
-starved. Current-execution abort authority still wins.
+Each scheduled execution has only its author-declared allowance, shared by setup,
+adapter retries, backoff, corrections and operator guidance. There is no engine duration
+default or earlier wrap-up cut. At expiry, the worker stops its owned child and waits for
+the actual child/group close event. Slow closure alone never voids the attempt.
+[The protocol](agent-protocol.md#stage-budgets-and-retained-continuation) describes the
+result: typed unfinished work retains admitted files and follows the ordinary continuation
+path in the same DAG. It is not a technical failure and does not grow the allowance.
+Settlement checks monotonic expiry even when timers were starved. Explicit cancellation
+and integrity refusal retain their authority. Claude waits for actual closure after its
+native result, and native home helpers wait for their exit/error events.
 
 The always-used deterministic watchdog polls at a default 30 seconds and binds observations
 to the active execution index/start. Changed output, artifact or command CPU/I/O evidence

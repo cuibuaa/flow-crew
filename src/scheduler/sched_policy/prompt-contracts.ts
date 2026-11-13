@@ -69,10 +69,11 @@ export function appendPlannerAdmissionContract(
 
 export function appendAttemptDeadlineContract(
   prompt: string,
-  attemptBudgetMs: number,
+  attemptBudgetMs: number | undefined,
 ): string {
-  return `${prompt}\n\nStage budget: ${attemptBudgetMs}ms. The engine delivers a live wrap-up instruction before it expires, then allows a bounded finishing interval. Keep admitted files and report done/remaining work. `
-    + `Retries, backoff and fallback share this execution's hard stop; budget handoffs spend the next finite workflow iteration. Independent gates have separate stage budgets.`;
+  if (attemptBudgetMs === undefined) return `${prompt}\n\nStage budget: undeclared; there is no duration hard stop.`;
+  return `${prompt}\n\nStage budget: ${attemptBudgetMs}ms, declared by the author. Keep admitted files and report done/remaining work. `
+    + `Retries, backoff and fallback share this execution's allowance; expiry hands typed unfinished work to the ordinary continuation path. Independent gates have separate stage allowances.`;
 }
 
 export function appendGateConstraintAuditContext(

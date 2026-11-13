@@ -8,7 +8,6 @@ import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { appendEvidence, captureProjectTree, readEvidence, stagePredecessor } from '../src/evidence-ledger.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { decisionInput } from '../src/decision-context.js';
 import { decisionSchema } from '../src/decision-graph.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
@@ -61,7 +60,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     }
   });
 
-  it.each(['correction', 'guidance', 'wrapup'] as const)('refreshes facts and the full immutable diff for a cold %s child, keeping the attempt predecessor', async mode => {
+  it.each(['correction', 'guidance'] as const)('refreshes facts and the full immutable diff for a cold %s child, keeping the attempt predecessor', async mode => {
     writeFileSync(join(project, 'value.txt'), 'BASE_VALUE\n');
     isolatedProjectCommand('git', ['add', 'value.txt'], project, root);
     isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base value'], project, root);
@@ -95,9 +94,6 @@ describe('ledger handoff at the rendered adapter boundary', () => {
         if (mode === 'guidance') {
           appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: 'Inspect new bytes independently.', knownStageIds: ['work'] });
           opts.onCommandLifecycle?.({ phase: 'completed', id: 'work', timestamp: new Date().toISOString() });
-        } else {
-          elapsed = stageWrapUpTiming(options.timeout_ms).warningAfterMs;
-          for (const [key, timer] of [...timers]) if (timer.at <= elapsed) { timers.delete(key); timer.fn(); }
         }
         return { output: '', exitCode: 137, duration_ms: 1, sessionId: uuid };
       }
@@ -243,7 +239,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     const first = delivered('OWN_PREDECESSOR_RECORD', kind === 'continuation' ? ['Deliver the greeting.'] : []);
     const adapter: Adapter = { async run(user, _role, opts) {
       calls.push({ user, opts });
-      if (kind === 'continuation' && opts.attemptIndex === 1) elapsedOffset = 50_000;
+      if (kind === 'continuation' && opts.attemptIndex === 1) elapsedOffset = 70_000;
       return { output: opts.attemptIndex === 1 ? first : delivered('Complete.'), exitCode: kind === 'retry' && opts.attemptIndex === 1 ? 1 : 0, duration_ms: 1, sessionId: uuid };
     } };
     const opts = { stageId: 'work', role: { name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'Unique role contract.' }, dependsOn: [], promptTemplate: 'Deliver the greeting.',

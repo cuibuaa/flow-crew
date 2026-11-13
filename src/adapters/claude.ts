@@ -159,9 +159,6 @@ export class ClaudeAdapter implements Adapter {
       let carry = '';
       let eventCount = 0;
       let rejected: NativeParameterRejection | undefined;
-      let childKill: (() => void) | undefined;
-      let killTimer: ReturnType<typeof setTimeout> | undefined;
-      let cleanupKill = false;
       const consume = (line: string): void => {
         let event: Record<string, any>;
         try { event = JSON.parse(line); } catch { return; }
@@ -193,7 +190,6 @@ export class ClaudeAdapter implements Adapter {
             costUsd: cumulativeCostUsd !== undefined && previousCost !== undefined && cumulativeCostUsd >= previousCost
               && (!resumeSessionId || sessionId === resumeSessionId) ? cumulativeCostUsd - previousCost : undefined,
             models: resumeSessionId ? undefined : event.modelUsage });
-          killTimer ??= setTimeout(() => { if (childKill) { cleanupKill = true; childKill(); } }, 5000);
         }
         if (normalized.terminal !== undefined) {
           rejected = normalized.terminal === false
@@ -204,10 +200,10 @@ export class ClaudeAdapter implements Adapter {
       let execution: ExecResult;
       try {
         execution = await withAdapterCredentials(nativeHome, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), () => execWithStdin('claude', args, invocationPrompt, {
-          cwd: opts.workDir, timeout_ms: Math.max(1, opts.timeout_ms - (Date.now() - started)),
+          cwd: opts.workDir, timeout_ms: opts.timeout_ms === undefined ? undefined : Math.max(1, opts.timeout_ms - (Date.now() - started)),
           liveLogPath: stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt), captureStreams: true, execution: opts,
           unsetEnv, env: { CLAUDE_CONFIG_DIR: nativeHome },
-          onChild: ({ kill }) => { childKill = kill; }, abortSignal: opts.abortSignal,
+          abortSignal: opts.abortSignal,
           onStdout: (chunk, activity) => {
             activity?.feed(chunk);
             carry += chunk;
@@ -218,7 +214,6 @@ export class ClaudeAdapter implements Adapter {
         }), ['.credentials.json']);
         if (carry.trim()) consume(carry);
       } finally {
-        if (killTimer) clearTimeout(killTimer);
         captureInput();
       }
       opts.onRequestEvidence?.({ source: 'claude_stream', request_count: requests.size,
@@ -229,11 +224,7 @@ export class ClaudeAdapter implements Adapter {
       });
       if (inputCaptureError !== undefined) throw inputCaptureError;
 
-      // Only our own post-result SIGKILL can turn a failed close into success.
-      // Executor timeout/abort outcomes always win, and close facts stay intact.
-      const recovered = cleanupKill && summary.completed && execution.processSignal === 'SIGKILL'
-        && execution.exitCode !== 124 && execution.exitCode !== 137;
-      const exitCode = recovered ? 0 : execution.exitCode === 0 && summary.terminal === false ? 1 : execution.exitCode;
+      const exitCode = execution.exitCode === 0 && summary.terminal === false ? 1 : execution.exitCode;
       const counters = usage.settle(exitCode === 0 && summary.completed);
       if (isSessionUuid(sessionId)) {
         mkdirSync(costDir, { recursive: true });
@@ -257,7 +248,7 @@ export class ClaudeAdapter implements Adapter {
         writes: [...summary.writes].sort(), writeAttribution: summary.writes.size ? 'structured' : 'unknown' };
       delete (result as ExecResult).stdout;
       delete (result as ExecResult).stderr;
-      if ([124, 125, 137].includes(exitCode) || Date.now() - started >= opts.timeout_ms) break;
+      if ([124, 125, 137].includes(exitCode) || opts.timeout_ms !== undefined && Date.now() - started >= opts.timeout_ms) break;
       if (!isRetryableAdapterFailure(providerFailure?.kind)) break;
       if (!repair.apply(diagnosis)) {
         if (!shouldStartFreshSession(result, resumeSessionId, sessionId)) break;

@@ -1,3 +1,4 @@
+import { scheduleDeadline } from '../attempt-deadline.js';
 import { GitNotAnswered } from '../git-facts.js';
 import type { EndingCause } from '../attempt-ending.js';
 import { appendFileSync, mkdirSync } from '../engine-fs.js';
@@ -241,7 +242,7 @@ export interface RunOpts {
   /** Complete duties and delivered guidance if an explicit resume is unavailable. */
   freshSessionPrompt?: string;
   /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
-  timeout_ms: number;
+  timeout_ms?: number;
   workDir: string;
   runDir: string;
   stageId: string;
@@ -429,7 +430,7 @@ export function execWithStdin(
   stdin: string,
   opts: {
     cwd: string;
-    timeout_ms: number;
+    timeout_ms?: number;
     liveLogPath?: string;
     env?: NodeJS.ProcessEnv;
     /** Remove native nesting markers without suppressing provider authentication. */
@@ -478,15 +479,13 @@ export function execWithStdin(
       throw error;
     }
     const terminator = createChildTerminator(child, opts.terminationTiming);
-    // This handle is used after Claude's separate post-result grace, so it
-    // intentionally remains an immediate hard stop rather than adding another.
-    const timer = setTimeout(() => {
+    const cancelDeadline = opts.timeout_ms === undefined ? undefined : scheduleDeadline(() => {
       timedOut = true;
       terminator.terminateGracefully();
-    }, Math.max(1, opts.timeout_ms - (Date.now() - start)));
+    }, () => opts.timeout_ms! - (Date.now() - start));
     const onAbort = () => {
       aborted = true;
-      clearTimeout(timer);
+      cancelDeadline?.();
       terminator.terminateGracefully();
     };
     let abortedBeforeWrite = false;
@@ -515,7 +514,7 @@ export function execWithStdin(
       settled = true;
       void terminator.settleAfterChildClose().then(() => {
         // The deadline and command evidence cover group retirement after close.
-        clearTimeout(timer);
+        cancelDeadline?.();
         if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
         try { activity?.close(); } finally { environment?.cleanup(); }
         if (executionError !== undefined) throw executionError;

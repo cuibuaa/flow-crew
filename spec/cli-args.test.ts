@@ -124,7 +124,7 @@ describe('declarative command grammar', () => {
       expect(() => parseCommandArgs('clean', [`--keep=${value}`])).toThrow(/integer/);
     }
     expect(parseCommandArgs('clean', ['--keep=0']).values.get('--keep')).toBe('0');
-    expect(() => parseCommandArgs('quick', ['--timeout=100'])).toThrow(/removed.*default_timeout_ms/);
+    expect(() => parseCommandArgs('quick', ['--timeout=100'])).toThrow(/removed.*stage_duration_ms/);
     expect(() => parseCommandArgs('quick', ['--campaign-context', 'skip'])).toThrow(/syntax/);
     expect(parseCommandArgs('quick', ['--campaign-context=skip']).values.get('--campaign-context')).toBe('skip');
   });

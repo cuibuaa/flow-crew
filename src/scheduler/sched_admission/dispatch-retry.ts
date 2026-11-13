@@ -33,10 +33,10 @@ export function promoteAdmittedRealityChecks(runDirPath: string, state: StoreSta
 
 export function buildRetryPreamble(
   retries: number,
-  timeoutMs: number,
+  timeoutMs: number | undefined,
   runDirPath: string,
   stageId: string,
-  timeoutContext?: { previousBudgetMs: number; nextBudgetMs: number },
+  timeoutContext?: { previousBudgetMs?: number; nextBudgetMs?: number },
 ): string {
   const partialPath = runRecordPath(runDirPath, 'evidence-ledger.jsonl');
   let prevError: string | undefined;

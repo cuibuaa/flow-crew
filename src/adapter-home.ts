@@ -151,7 +151,7 @@ export function prepareAdapterHome(input: {
     input: JSON.stringify({ ...input,
       plugins: input.plugins ? resolve(input.plugins) : undefined,
       skills: input.skills ? resolve(input.skills) : undefined }),
-    encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
+    encoding: 'utf8', maxBuffer: 64 * 1024,
   }));
   if (result.error || result.status !== 0) {
     throw new Error(result.stderr.trim() || `ADAPTER_HOME_REFUSED: home preparation did not complete (${result.error?.message ?? result.status})`);
@@ -181,7 +181,7 @@ export async function withAdapterCredentials<T>(home: string, sourceHome: string
   try {
     const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', PREPARE_HOME], {
       input: JSON.stringify({ credentials: true, sourceHome: resolve(sourceHome), credentialNames }),
-      stdio: ['pipe', 'pipe', 'pipe', fd], encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe', fd], encoding: 'utf8', maxBuffer: 64 * 1024,
     });
     if (result.error || result.status !== 0) {
       throw new Error(result.stderr.trim() || 'ADAPTER_HOME_REFUSED: credential preparation did not complete');

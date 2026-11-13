@@ -1,6 +1,5 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
-import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';
 import {
@@ -31,7 +30,7 @@ import {
   setFcGlobalDir,
 } from '../src/store.js';
 import { runStage } from '../src/worker.js';
-import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.js';
+import { manualResearchClock } from './test-support/research-clock.js';
 
 const CLEANUP_TRIALS = 1;
 // Leave room for the child to install its signal handler under full-suite load.
@@ -407,7 +406,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('records forced wrap-up and child cleanup without moving the immutable hard stop', { timeout: 30_000 }, async () => {
+  it('records declared expiry and real child cleanup using controlled attempt time', { timeout: 30_000 }, async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-project-'));
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-state-'));
     const previousStateRoot = fcGlobalDir();
@@ -416,6 +415,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       const budgetMs = 2_000;
       const observations: DeadlineObservation[] = [];
       for (let trial = 1; trial <= CLEANUP_TRIALS; trial++) {
+        const time = manualResearchClock();
         const stageId = `deadline_${trial}`;
         const created = createRun(projectRoot, 'graceful-deadline', 'name: graceful-deadline', [stageId]);
         const cleanupPath = join(projectRoot, `deadline-cleanup-${trial}`);
@@ -430,6 +430,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
           '});',
           "fs.writeFileSync(pidPath, String(process.pid));",
           "fs.writeFileSync(readyPath, 'ready');",
+          "process.stdout.write('deadline-ready\\n');",
           'setInterval(() => {}, 1000);',
         ].join('\n');
         let adapterExecution: Promise<RunResult> | undefined;
@@ -441,12 +442,15 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
               cwd: projectRoot,
               timeout_ms: opts.timeout_ms,
               abortSignal: opts.abortSignal,
+              onStdout: chunk => { if (chunk.includes('deadline-ready')) time.advanceTo(budgetMs); },
               env: {
                 HOME: projectRoot,
                 FC_HOME: stateRoot,
               },
             });
-            return adapterExecution;
+            const result = await adapterExecution;
+            time.advanceTo(budgetMs + 120);
+            return result;
           },
         };
 
@@ -458,7 +462,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
             dependsOn: [],
             promptTemplate: 'deadline fixture',
 
-            timeout_ms: budgetMs,
+            timeout_ms: budgetMs, deadlineClock: time.clock,
             projectDir: projectRoot,
             runId: created.runId,
             runDir: created.runDirPath,
@@ -490,12 +494,11 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
       expect(observations.every(({ exitCode }) => exitCode === 0)).toBe(true);
       expect(observations.every(({ budgetMs, deadlineSpanMs }) => (
-        budgetMs === 2_000 && deadlineSpanMs === stageWrapUpTiming(budgetMs).hardLimitMs
+        budgetMs === 2_000 && deadlineSpanMs === budgetMs
       ))).toBe(true);
-      expect(observations.every(({ elapsedMs, budgetMs }) => elapsedMs >= budgetMs)).toBe(true);
+      expect(observations.every(({ elapsedMs, budgetMs }) => elapsedMs === budgetMs + 120)).toBe(true);
       expect(observations.every(({ deadlineOverrunMs }) => (
         deadlineOverrunMs > 0
-        && deadlineOverrunMs <= ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS
       ))).toBe(true);
       expect(observations.every(({ childClosed, cleanupWritten }) => childClosed && cleanupWritten)).toBe(true);
     } finally {

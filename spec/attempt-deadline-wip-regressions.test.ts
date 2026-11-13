@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
@@ -80,7 +80,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
         mkdirSync(home, { recursive: true });
         writeFileSync(join(home, 'fixture-thread.json'), '{"messages":["needed thread context"]}');
         // Advance past the deadline while leaving its callback pending.
-        advance(stageWrapUpTiming(budgetMs).hardLimitMs + 80);
+        advance(budgetMs + 80);
         return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
@@ -123,7 +123,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(stageWrapUpTiming(budgetMs).hardLimitMs + 80);
+        advance(budgetMs + 80);
         throw new Error('late adapter rejection');
       },
     };
@@ -163,7 +163,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(stageWrapUpTiming(40).hardLimitMs + 80);
+        advance(40 + 80);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
@@ -211,7 +211,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(stageWrapUpTiming(40).hardLimitMs + 80, true);
+        advance(40 + 80, true);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
