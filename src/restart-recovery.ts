@@ -1,3 +1,4 @@
+import { admittedContract } from './brief-admission.js';
 import { RESEARCH_PROTOCOL } from './research-instrument.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 export { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
@@ -105,6 +106,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
+  admittedContract(readRunState(projectDir, runId).briefAdmission);
   withRunStateLock(join(runsRoot(projectDir), runId), () => {});
   let state = readRunState(projectDir, runId);
   if (state.status !== RUN_STATUS.RUNNING) return state.research?.protocol === RESEARCH_PROTOCOL ? reconcileResearchConclusion(projectDir, runId) : state;

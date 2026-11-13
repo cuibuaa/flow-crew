@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { inspect } from 'node:util';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './adapters/base.js';
 import { loadEngineDefaults } from './config.js';
-import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
+import { parseBriefDeclarations } from './brief-declarations.js';
 import type { InputLimitRefusal } from './provider-result.js';
 
 /** Space for sections added after inline evidence/review routing is selected. */
@@ -26,11 +26,8 @@ export class InputLimitDeclarationError extends Error {
 
 /** New admissions only. Resume reads the recorded ceiling, never reparses a brief. */
 export function admitInputLimit(brief: string, engineLimit: number): number {
-  const document = parseBriefFrontmatterDocument(brief);
-  if (document?.error) throw new Error(document.error);
-  const metadata = document?.value;
-  if (!metadata || typeof metadata !== 'object' || !Object.hasOwn(metadata, 'input_limit_chars')) return engineLimit;
-  const declared = (metadata as Record<string, unknown>).input_limit_chars;
+  const declared = parseBriefDeclarations(brief).input_limit_chars;
+  if (declared === undefined) return engineLimit;
   if (!Number.isSafeInteger(declared) || Number(declared) <= 0 || Number(declared) > engineLimit) {
     throw new InputLimitDeclarationError(declared, engineLimit);
   }

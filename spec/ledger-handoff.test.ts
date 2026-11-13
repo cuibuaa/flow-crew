@@ -39,7 +39,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
   it.each(['qa', 'planner'])('gives %s gates and repairs criterion IDs and paths without reprinting the request', async roleName => {
     const refs = extractBriefCriteria(task).criteria.map(criterion => criterion.id);
     for (const kind of ['gate', 'repair']) {
-      const created = createRun(project, 'fixture', 'name: fixture', [kind]);
+      const created = createRun(project, 'fixture', 'name: fixture', [kind], task);
       writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
       const criteriaPath = runRecordPath(created.runDirPath, 'brief_criteria.json');
       writeFileSync(criteriaPath, JSON.stringify(extractBriefCriteria(task)));

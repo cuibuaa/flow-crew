@@ -73,7 +73,7 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
           produces: index ? [{ id: 'verdict', root: 'run', path: 'verdict_work.json', kind: 'file' }] : [], reads: [] } })),
         { id: 'repair', role: 'coder', depends_on: ['work'], retry_to: ['work'], scope: [],
           prompt_template: 'Repair the fixture work.', artifact_contract: { version: 1, produces: [], reads: [] } }] });
-    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
+    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id), brief, admission);
     writeBriefCriteriaArtifact(created.runDirPath, brief);
     beginStageAttempt(project, created.runId, 'done', 0);
     completeStageAttempt(project, created.runId, 'done', 0, { exitCode: 0, duration_ms: 1 });

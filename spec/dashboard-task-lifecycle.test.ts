@@ -321,7 +321,7 @@ describe('dashboard registered task continuation', () => {
     registry.create({ projectDir: join(fixtureRoot, 'other-project'), run_id: runId });
     const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
     expect(response.statusCode).toBe(200);
-    expect(resumeTask).toHaveBeenCalledWith(latest.id);
+    expect(resumeTask).toHaveBeenCalledWith(latest.id, undefined);
   });
 
   it.each([RUN_STATUS.CANCELLED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE])('delegates a %s run to its registered task without rewriting run state', async status => {
@@ -414,7 +414,7 @@ describe('dashboard daemon-backed task creation', () => {
     expect(existsSync(runsRoot())).toBe(false);
   });
 
-  it('derives task titles through the shared extractor for complete, absent, and incomplete frontmatter', async () => {
+  it('derives task titles for complete/absent declarations and refuses incomplete frontmatter', async () => {
     const cases = [
       {
         expected: 'Complete frontmatter title',
@@ -436,8 +436,14 @@ describe('dashboard daemon-backed task creation', () => {
         url: '/api/tasks',
         payload: await admittedTaskPayload(fixture.brief, { projectDir }),
       });
-      expect(response.statusCode).toBe(201);
-      expect(registry.get(index + 1)?.name).toBe(fixture.expected);
+      if (index === 2) {
+        expect(response.statusCode).toBeGreaterThanOrEqual(400);
+        expect(response.json().message).toContain('DECLARATION_INVALID: $');
+        expect(registry.list({ status: 'all' })).toHaveLength(2);
+      } else {
+        expect(response.statusCode).toBe(201);
+        expect(registry.get(index + 1)?.name).toBe(fixture.expected);
+      }
     }
   });
 

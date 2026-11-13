@@ -9,7 +9,7 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { verifyDeclaredBriefInputs } from '../../ship-inputs.js';
 import { parseBriefDeclarations } from '../../brief-declarations.js';
 import { writeBriefCriteriaArtifact } from '../../brief-criteria.js';
-import { BriefAdmissionRecord, verifyBriefAdmission } from '../../brief-preflight.js';
+import { BriefAdmissionRecord, verifyBriefAdmission, admittedContract, createBriefAdmission, inspectBrief } from '../../brief-preflight.js';
 import { resolveRunIdentity } from '../../cancellation-policy.js';
 import { reconcileHostInterruptedRun } from '../../restart-recovery.js';
 import { claimLaunchIntent, describeLiveRunOwner, findLiveRunOwnerForProject, inspectRunScheduler, invalidateRunLockCache, releaseLaunchIntent } from '../../run-lock.js';
@@ -17,7 +17,6 @@ import { StageConfig, WorkflowConfig, loadDefaults, normalizeStageContracts, Rec
 import { topoSort } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
-import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, isTerminalRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState, importRunLifecycleForResume } from '../../store.js';
@@ -52,7 +51,10 @@ export function prepareWorkflowLaunch(
   maxIterations: number; baseStages: StageConfig[]; workflowYaml: string;
   resumingExistingRun: boolean; briefWasAdmitted: boolean; resumeAtIteration: number; schedulerPidPath: string;
 } {
-  let briefWasAdmitted = false;
+  const initialReservation = existingRunId ? readRunReservation(projectDir, existingRunId) : undefined;
+  const reservedAdmission = initialReservation?.briefAdmission;
+  if (reservedAdmission) admittedContract(reservedAdmission);
+  let briefWasAdmitted = Boolean(reservedAdmission);
   let launchState: StoreState | undefined;
   const launchUnchanged = (state: StoreState): boolean => !launchState
     || (state.status === launchState.status && state.completedAt === launchState.completedAt);
@@ -61,10 +63,8 @@ export function prepareWorkflowLaunch(
     requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
     assertSeparatedRunLayout(runDir(projectDir, existingRunId));
     launchState = archived;
-    const directory = runDir(projectDir, existingRunId);
-    briefWasAdmitted = Boolean(archived.taskDescription || archived.briefAdmission
-      || existsSync(runRecordPath(directory, 'task_brief.md'))
-      || existsSync(runRecordPath(directory, 'brief_criteria.json')));
+    admittedContract(archived.briefAdmission);
+    briefWasAdmitted = true;
     if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
@@ -74,6 +74,13 @@ export function prepareWorkflowLaunch(
       Object.assign(workflow, admitted);
     }
   }
+  if (reservedAdmission && !briefAdmission) {
+    briefAdmission = reservedAdmission;
+    taskDescription = admittedContract(reservedAdmission).brief;
+  }
+  if (reservedAdmission && taskDescription === undefined) taskDescription = admittedContract(reservedAdmission).brief;
+  if (!briefWasAdmitted) parseBriefDeclarations(taskDescription ?? '');
+  if (!briefWasAdmitted) briefAdmission ??= createBriefAdmission(inspectBrief(taskDescription ?? ''), { kind: 'not_required' });
   // First admission validates declarations before claiming resources; execution
   // resumption and its recovery/cancellation fences retain their existing path.
   const stageDurationLimitMs = launchState?.stageDurationLimitMs ?? (briefWasAdmitted
@@ -90,10 +97,10 @@ export function prepareWorkflowLaunch(
   if (workflow.name === 'default') workflow.name = 'planner';
   normalizeStageContracts(workflow.stages);
   if (briefAdmission) {
-    if (taskDescription === undefined) {
+    if (taskDescription === undefined && briefAdmission.contract?.brief !== '') {
       throw new Error('A brief admission record was supplied without the exact brief text');
     }
-    const verification = verifyBriefAdmission(taskDescription, briefAdmission);
+    const verification = verifyBriefAdmission(taskDescription ?? '', briefAdmission);
     if (verification.status !== 'valid') {
       throw new Error(
         `Brief admission ${verification.status}; scheduler launch stopped before run creation `
@@ -159,12 +166,12 @@ export function prepareWorkflowLaunch(
     const launchClaim = claimLaunchIntent(projectDir, runId);
     if (!launchClaim.claimed) {
       if (hasRunState) return { kind: 'settled', state: readRunState(projectDir, runId) };
-      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
+      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds, reservedAdmission ?? briefAdmission);
       const blocked = readRunState(projectDir, runId);
       blocked.inputLimitChars = inputLimitChars;
       blocked.stageDurationLimitMs = stageDurationLimitMs;
       if (taskDescription) blocked.taskDescription = taskDescription;
-      if (briefAdmission) blocked.briefAdmission = briefAdmission;
+      if (briefAdmission) blocked.briefAdmission = reservedAdmission ?? briefAdmission;
       if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
         writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
@@ -175,7 +182,7 @@ export function prepareWorkflowLaunch(
     launchIntentOwned = true;
     if (hasRunState) importRunLifecycleForResume(projectDir, runId);
     if (reservation) {
-      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
+      initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds, reservedAdmission ?? briefAdmission);
       const state = readRunState(projectDir, runId);
       state.briefConfigured = false;
       state.inputLimitChars = inputLimitChars;
@@ -184,7 +191,7 @@ export function prepareWorkflowLaunch(
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
       if (taskDescription) state.taskDescription = taskDescription;
-      if (briefAdmission) state.briefAdmission = briefAdmission;
+      if (briefAdmission) state.briefAdmission = reservedAdmission ?? briefAdmission;
       if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
         writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
@@ -208,8 +215,10 @@ export function prepareWorkflowLaunch(
     if (!resumingExistingRun) for (const s of baseStages) {
       if (!state.stages[s.id]) state.stages[s.id] = { status: 'pending', retries: 0 };
     }
-    if (briefAdmission && !resumingExistingRun) {
-      state.briefAdmission = briefAdmission;
+    if (briefAdmission && !briefWasAdmitted) state.briefAdmission = briefAdmission;
+    else if (briefAdmission && (state.briefContinuationAdmission ?? state.briefAdmission)?.digest !== briefAdmission.digest) {
+      if (briefAdmission.acknowledgement.kind !== 'explicit') throw new Error('Changed brief requires an explicit digest acknowledgement');
+      state.briefContinuationAdmission = briefAdmission;
     }
     if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
       writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
@@ -246,14 +255,14 @@ export function prepareWorkflowLaunch(
     runDirPath = reserved.runDirPath;
     const launchClaim = claimLaunchIntent(projectDir, runId);
     launchIntentOwned = launchClaim.claimed;
-    initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds);
+    initializeReservedRun(projectDir, runId, workflow.name, workflowYaml, stageIds, reservedAdmission ?? briefAdmission);
     const state = readRunState(projectDir, runId);
     state.briefConfigured = false;
     state.inputLimitChars = inputLimitChars;
     state.stageDurationLimitMs = stageDurationLimitMs;
     writeRunState(projectDir, runId, state);
     if (taskDescription) state.taskDescription = taskDescription;
-    if (briefAdmission) state.briefAdmission = briefAdmission;
+    if (briefAdmission) state.briefAdmission = reservedAdmission ?? briefAdmission;
     if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
       writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
     }
@@ -271,21 +280,12 @@ export function prepareWorkflowLaunch(
   // Criterion transport is tied to the exact admitted brief bytes and exists
   // before a planner can emit dynamic stages.
   try {
-    const briefPath = runRecordPath(runDirPath, 'task_brief.md');
-    const exactBrief = existsSync(briefPath)
-      ? readFileSync(briefPath, 'utf-8')
-      : (taskDescription ?? '');
-    if (exactBrief) {
+    const exactBrief = admittedContract(readRunState(projectDir, runId).briefAdmission).brief;
+    if (!briefWasAdmitted) {
       attachBriefWritingEvidence(projectDir, exactBrief, runDirPath);
-      // Stored bytes can precede snapshot publication. Finish new-format
-      // preparation; archives without the marker keep their admitted semantics.
-      if ((!briefWasAdmitted || readRunState(projectDir, runId).briefConfigured === false)
-        && !existsSync(runRecordPath(runDirPath, 'brief_criteria.json'))) writeBriefCriteriaArtifact(runDirPath, exactBrief);
-      if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
-        snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
-      }
+      writeBriefCriteriaArtifact(runDirPath, exactBrief);
+      snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
     }
-    if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
   } catch (error) {
     rethrowGitNotAnswered(error);
     throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -357,7 +357,7 @@ export function prepareWorkflowLaunch(
       current.workflowName = workflow.name;
       current.maxIterations = maxIterations;
       current.currentIteration = resumeAtIteration;
-      if (briefAdmission) current.briefAdmission = briefAdmission;
+      if (briefAdmission && !briefWasAdmitted) current.briefAdmission = briefAdmission;
       for (const stage of baseStages) {
         if (!current.stages[stage.id]) current.stages[stage.id] = { status: 'pending', retries: 0 };
       }

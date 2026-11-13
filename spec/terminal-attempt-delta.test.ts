@@ -64,7 +64,7 @@ it.each([false, true])('direct author keeps shell writes with ignored=%s', async
 });
 
 it('worker publishes the complete shell delta before scheduler reconciliation', async () => {
-  const created = createRun(project, 'direct', 'name: direct', ['implement']);
+  const created = createRun(project, 'direct', 'name: direct', ['implement'], `---\nterminal_states: {complete: ${JSON.stringify(terminalPath)}}\n---\n`);
   const state = readRunState(project, created.runId);
   state.terminalStates = { complete: { paths: [terminalPath] } };
   writeRunState(project, created.runId, state);

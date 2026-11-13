@@ -92,15 +92,14 @@ describe('durable attempt attribution on every publisher', () => {
     expect(events(created)).toHaveLength(2);
   });
 
-  it('attributes a standalone worker without a run-state projection', async () => {
+  it('refuses a standalone worker without its admitted run record before publishing attribution', async () => {
     const created = fixture();
     rmSync(runRecordPath(created.runDirPath, 'run.json'));
     const { attribution: _unused, ...opts } = workerOpts(created);
-    await runStage({ run: async () => result() }, opts);
-    expect(events(created)).toEqual([
-      expect.objectContaining({ role: 'reviewer', iteration: 1, disposition: 'pending' }),
-      expect.objectContaining({ role: 'reviewer', iteration: 1, disposition: 'accepted' }),
-    ]);
+    let calls = 0;
+    await expect(runStage({ run: async () => { calls++; return result(); } }, opts)).rejects.toThrow();
+    expect(calls).toBe(0);
+    expect(events(created)).toEqual([]);
   });
 
   it.each(['watchdog'] as const)('attributes the worker control signal from %s', async source => {

@@ -342,7 +342,7 @@ describe('versioned declaration-owned research loop', () => {
   it('replays finalizer settlement and its stop intent without restarting an author after a manifest crash', async () => {
     const text = brief(config => { config.budget.max_rounds = 3; }); const rc = parseBriefFrontmatter(text).research!;
     const stages = researchStages(rc), { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml')); config.stages = stages;
-    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id));
+    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id), text);
     const state = readRunState(project, created.runId); state.research = rc; writeRunState(project, state.runId, state);
     const write = engineFiles.atomicWrite;
     const crash = vi.spyOn(engineFiles, 'atomicWrite').mockImplementation((path, data, options) => {
@@ -360,7 +360,7 @@ describe('versioned declaration-owned research loop', () => {
   it('preserves retained author work across continuation and measures only its completed submission', async () => {
     const text = brief(config => { config.budget.max_rounds = 3; }); const rc = parseBriefFrontmatter(text).research!;
     const stages = researchStages(rc); const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml')); config.stages = stages;
-    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id));
+    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id), text);
     await initializeResearchInstrument(project, created.runDirPath, rc);
     const state = readRunState(project, created.runId); state.research = rc; state.currentIteration = 1;
     state.stages.produce = { status: 'complete', retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'work/stages/produce/output_attempt_1.md' } };
@@ -378,7 +378,7 @@ describe('versioned declaration-owned research loop', () => {
     const text = brief(config => { config.review = { role: 'qa', criteria: ['Preserve the declared project property.'] }; });
     const rc = parseBriefFrontmatter(text).research!, stages = researchStages(rc);
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml')); config.stages = stages;
-    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id));
+    const created = createRun(project, 'research', stringify(config), stages.map(s => s.id), text);
     await initializeResearchInstrument(project, created.runDirPath, rc);
     const state = readRunState(project, created.runId); state.research = rc; state.currentIteration = 1;
     state.stages.produce = { status: 'complete', retries: 0 };
@@ -457,7 +457,7 @@ it('retires author work at the absolute wall cap even inside an attempt finishin
   } };
   const rc = parseBriefFrontmatter(text).research!, stages = researchStages(rc);
   const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml')); config.stages = stages;
-  const created = createRun(project, 'research', stringify(config), stages.map(s => s.id));
+  const created = createRun(project, 'research', stringify(config), stages.map(s => s.id), text);
   await initializeResearchInstrument(project, created.runDirPath, rc);
   // A resumed fixture has already spent 55 seconds. Freeze/setup is complete
   // before advancing its last five logical seconds after child readiness.
@@ -829,7 +829,7 @@ it('cannot release protocol-frozen instrument roots through ordinary output decl
   expect(firstImmutableEvidenceConflict(['instrument/config.json'], bindings, project)).toMatchObject({ inputPath: 'instrument' });
 });
 it.each(['baseline: 100', 'measurement: {replicates: 2}', 'protocol: research-instrument/v2'])('refuses legacy or unknown research declaration %s', field => {
-  expect(parseBriefFrontmatter(`---\nresearch:\n  ${field}\n---\nTask`).researchPolicyError).toContain('research-instrument/v1');
+  expect(parseBriefFrontmatter(`---\nresearch:\n  ${field}\n---\nTask`).frontmatterError).toContain('research');
 });
 it('preserves literal root membership through protocol construction and admission', () => {
   for (const path of ['src', 'a b/file.json', 'src/[a].json', 'src/a?file.json', 'src/a*file', 'src/{one,two}', 'src/@(one|two)', 'src/[!]', 'src/[*]', 'src/one]two']) {
@@ -847,7 +847,7 @@ it('refuses nonportable roots, overlapping authority, duplicate declarations and
   const drive = 'C:';
   for (const path of [drive + '/candidate.json', drive + '\\candidate.json', drive, drive + 'candidate.json', 'src/../candidate', 'src//candidate', 'src/./candidate', 'src/.git/config', ' src/file']) {
     const parsed = parseBriefFrontmatter(brief(rc => { rc.candidate = [path]; }));
-    expect(parsed.research, path).toBeUndefined(); expect(parsed.workflowError, path).toContain('research-instrument/v1');
+    expect(parsed.research, path).toBeUndefined(); expect(parsed.frontmatterError, path).toContain('research.candidate.0');
   }
   for (const edit of [(rc: ResearchConfig) => { rc.candidate = ['instrument/config.json']; },
     (rc: ResearchConfig) => { rc.publication = 'instrument/result.md'; },
@@ -858,5 +858,5 @@ it('refuses nonportable roots, overlapping authority, duplicate declarations and
   }
   const text = brief().replace('---\n', '---\nobjective: {}\n');
   expect(parseBriefFrontmatter(text).research).toBeUndefined();
-  expect(parseBriefFrontmatter(text).workflowError).toContain('research-instrument/v1');
+  expect(parseBriefFrontmatter(text).frontmatterError).toContain('objective');
 });

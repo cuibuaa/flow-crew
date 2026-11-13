@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -89,6 +90,7 @@ describe('unknown archived run status boundary', () => {
     mkdirSync(runDir(projectDir, runId), { recursive: true });
     writeFileSync(runRecordPath(runDir(projectDir, runId), 'run.json'), JSON.stringify({
       runId,
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }),
       workflowName: 'future-writer-fixture',
       projectDir,
       status: 'future_archived_state',

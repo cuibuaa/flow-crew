@@ -62,7 +62,7 @@ export function readRunSnapshot(directory: string, read: (path: string) => strin
     const admission = JSON.parse(read(join(engineDirectory(directory), '.run-reservation.json')));
     if (!hasLifecycleAuthority(admission)) throw error;
     return { runId: admission.runId, projectDir: admission.projectDir, storageLayout: 2,
-      lifecycleAuthority: admission.lifecycleAuthority, workflowName: admission.workflowName,
+      lifecycleAuthority: admission.lifecycleAuthority, briefAdmission: admission.briefAdmission, workflowName: admission.workflowName,
       startedAt: admission.startedAt, stages: {}, status: undefined };
   }
 }

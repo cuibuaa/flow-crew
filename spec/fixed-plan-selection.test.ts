@@ -9,8 +9,8 @@ describe('one entry, with model-owned shape selection', () => {
   it.each(['', 'inputs: [docs/notes.md]\noutputs: [docs/a.md, docs/b.md]', 'research:\n  baseline: 0.5\n  policy: greedy_stack\n  stop:\n    max_rounds: 2'])('admits the same entry independently of declarations: %s', declaration => {
     expect(entryWorkflow(parseBriefFrontmatter(declaration ? `---\n${declaration}\n---\n${body}` : body)).workflow).toBe('entry');
   });
-  it.each(['direct', 'planner', 'default', 'typo', 'null', '[direct]'])('ignores legacy metadata %s instead of routing', value => {
-    expect(entryWorkflow(parseBriefFrontmatter(`---\nworkflow: ${value}\n---\n${body}`))).toEqual({ workflow: 'entry', reason: expect.any(String) });
+  it.each(['direct', 'planner', 'default', 'typo', 'null', '[direct]'])('refuses legacy workflow metadata %s', value => {
+    expect(entryWorkflow(parseBriefFrontmatter(`---\nworkflow: ${value}\n---\n${body}`))).toMatchObject({ workflow: 'entry', error: expect.stringContaining('workflow') });
   });
   it('refuses the CLI override as unknown', () => {
     expect(() => parseCommandArgs('quick', ['--workflow', 'planner'])).toThrow(/unknown/i);

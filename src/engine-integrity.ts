@@ -267,9 +267,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       if (artifact.root !== 'run') continue;
       publishEngineFile(artifact.kind === 'directory' ? output : dirname(output), () => mkdirSync(artifact.kind === 'directory' ? output : dirname(output), { recursive: true }));
     }
-    const briefPath = runRecordPath(run, 'task_brief.md');
-    const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : '';
-    const contract = brief ? readAdmittedBriefContract(run, brief) : { inputs: [], outputs: [] };
+    const contract = readAdmittedBriefContract(run);
     for (const output of contract.outputs.filter(o => isAbsolute(o.path))) {
       const directory = externalOutputDirectory(output, project, undefined, { runDir: run, inputPaths: contract.inputs.map(input => input.path) });
       publishEngineFile(directory, () => mkdirSync(directory, { recursive: true }));

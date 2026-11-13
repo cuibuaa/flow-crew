@@ -234,7 +234,7 @@ describe('engine behaviour contracts', () => {
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
     setFcGlobalDir(join(root, 'fc-home'));
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize', 'review']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize', 'review'], '---\nterminal_states: {complete: docs/final.md}\noutputs: [docs/report.md]\n---\n');
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
     write(join(projectDir, terminalPath), '# final\n');

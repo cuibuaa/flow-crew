@@ -20,7 +20,7 @@ import { CommandActivityTracker } from '../src/command-activity.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
 import type { StoreState, StageStatus } from '../src/store.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
@@ -207,7 +207,7 @@ describe('gate settlement and research evidence', () => {
 
   it('quarantines ambiguous terminal outcomes without selecting a stage to repeat', async () => {
     const projectDir = temporaryRoot();
-    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finalize']);
+    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finalize'], '---\nterminal_states: {complete: docs/final.md, escalated: docs/escalation.md}\n---\n');
     const startedAt = new Date(Date.now() - 1000).toISOString();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     mkdirSync(taskRunDir, { recursive: true });
@@ -218,6 +218,7 @@ describe('gate settlement and research evidence', () => {
       terminalOwners: { 'docs/final.md': 'finalize', 'docs/escalation.md': 'finalize' },
     }));
     const state = {
+      ...readRunState(projectDir, runId),
       runId, workflowName: 'test', projectDir, status: 'running', startedAt,
       terminalArtifactBaselines: {},
       terminalStates: {
@@ -248,7 +249,7 @@ describe('gate settlement and research evidence', () => {
 
   it('reports conflicting outcomes to the run without repeating particular writers', async () => {
     const projectDir = temporaryRoot();
-    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finish', 'escalate']);
+    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finish', 'escalate'], '---\nterminal_states: {complete: docs/final.md, escalated: docs/escalation.md}\n---\n');
     const startedAt = new Date(Date.now() - 1000).toISOString();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     mkdirSync(runRecordPath(taskRunDir, 'stages', 'finish', 'placeholder'), { recursive: true });
@@ -264,6 +265,7 @@ describe('gate settlement and research evidence', () => {
       attempts: [{ index: 1, status: 'complete', startedAt, writes: [path] }],
     });
     const state = {
+      ...readRunState(projectDir, runId),
       runId, workflowName: 'test', projectDir, status: 'running', startedAt,
       terminalArtifactBaselines: {},
       terminalStates: {

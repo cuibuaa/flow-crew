@@ -1,7 +1,8 @@
+import { sha256, declarationHash, type FrozenBriefContract, type BriefAdmissionAcknowledgement, type BriefAdmissionRecord } from './brief-admission.js';
+export { admittedContract, canonicalDeclaration, declarationHash, ContractRefusal, verifyBriefAdmission, type FrozenBriefContract, type BriefAdmissionRecord, type BriefAdmissionAcknowledgement, type BriefAdmissionVerification } from './brief-admission.js';
+import { BRIEF_DECLARATION_VERSION, DeclarationRefusal, parseBriefDeclarations } from './brief-declarations.js';
 import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
-import { createHash } from 'node:crypto';
-import { parseBriefFrontmatter } from './scheduler.js';
-import { entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
+import { parseBriefFrontmatter, entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
 
 export interface BriefPreflightFinding {
   code: string;
@@ -9,6 +10,7 @@ export interface BriefPreflightFinding {
   level: 'ok' | 'warn' | 'fail';
   message: string;
   consequential: boolean;
+  keyPath?: string;
   line?: number;
   excerpt?: string;
   risk?: string;
@@ -25,30 +27,8 @@ export interface BriefPreflightReport {
     error?: string;
   };
   contractReady: boolean;
+  contract?: FrozenBriefContract;
   findings: BriefPreflightFinding[];
-}
-
-export type BriefAdmissionAcknowledgement =
-  | { kind: 'not_required' }
-  | {
-      kind: 'explicit';
-      source: 'cli_current_input_flag' | 'cli_digest_flag' | 'dashboard_receipt';
-      at: string;
-    };
-
-export interface BriefAdmissionRecord {
-  version: 1;
-  digest: string;
-  acknowledgement: BriefAdmissionAcknowledgement;
-}
-
-export interface BriefAdmissionVerification {
-  digest: string;
-  status: 'valid' | 'missing' | 'digest_mismatch';
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function findingFingerprint(input: Pick<BriefPreflightFinding, 'code' | 'level' | 'line' | 'excerpt'>): string {
@@ -82,6 +62,11 @@ export function inspectBrief(
       : { status: 'absent' };
   const findings: BriefPreflightFinding[] = [];
   const add = (finding: Omit<BriefPreflightFinding, 'fingerprint'>) => findings.push(makeFinding(finding));
+  let contract: FrozenBriefContract | undefined;
+  if (!parsed.frontmatterError) {
+    const declaration = parseBriefDeclarations(brief);
+    contract = { schemaVersion: BRIEF_DECLARATION_VERSION, declaration, contractHash: declarationHash(declaration), brief };
+  }
   const route = entryWorkflow(parsed);
   add({
     code: 'brief_workflow', level: route.error ? 'fail' : 'ok',
@@ -92,6 +77,7 @@ export function inspectBrief(
   if (frontmatter.status === 'invalid') {
     add({
       code: 'frontmatter_invalid',
+      keyPath: parsed.declarationRefusal?.keyPath ?? '$',
       level: 'fail',
       message: `Frontmatter parsing failed: ${frontmatter.error}`,
       consequential: true,
@@ -173,6 +159,7 @@ export function inspectBrief(
     digest,
     inputKind,
     frontmatter,
+    ...(contract ? { contract } : {}),
     contractReady: !findings.some((finding) => finding.level === 'fail'),
     findings,
   };
@@ -182,22 +169,16 @@ export function createBriefAdmission(
   report: BriefPreflightReport,
   acknowledgement: BriefAdmissionAcknowledgement,
 ): BriefAdmissionRecord {
+  if (!report.contract) {
+    const finding = report.findings.find(f => f.code === 'frontmatter_invalid');
+    throw new DeclarationRefusal(finding?.keyPath ?? '$', finding?.message ?? 'Cannot admit an invalid declaration');
+  }
   return {
     version: 1,
+    contract: report.contract,
     digest: report.digest,
     acknowledgement,
   };
-}
-
-export function verifyBriefAdmission(
-  brief: string,
-  record: BriefAdmissionRecord | undefined,
-): BriefAdmissionVerification {
-  const digest = sha256(brief);
-  const status = !record || record.version !== 1
-    ? 'missing'
-    : record.digest === digest ? 'valid' : 'digest_mismatch';
-  return { digest, status };
 }
 
 export function formatBriefPreflightReport(report: BriefPreflightReport): string {

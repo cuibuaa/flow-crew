@@ -36,7 +36,7 @@ function setup(candidate = rejected) {
   const rolesPath = join(project, 'config/agents'); mkdirSync(rolesPath, { recursive: true });
   for (const role of ['planner', 'coder', 'qa']) writeFileSync(join(rolesPath, `${role}.yaml`), `name: ${role}\ndescription: Fixture role\n`);
   const workflow = 'name: fixture\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: []}\n';
-  const { runId } = createRun(project, 'fixture', workflow, ['plan']);
+  const { runId } = createRun(project, 'fixture', workflow, ['plan'], brief);
   const directory = runDir(project, runId);
   writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   writeFileSync(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));

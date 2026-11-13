@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 /**
  * Regression tests for codex adapter config generation:
  * 1. Unpinned model/effort INHERIT the user's global ~/.codex/config.toml
@@ -34,7 +35,7 @@ beforeEach(() => {
 
 describe('codex capability executable selection', () => {
   async function identity(): Promise<string> {
-    writeFileSync(join(stageHome, 'run.json'), JSON.stringify({ storageLayout: 2 }));
+    writeFileSync(join(stageHome, 'run.json'), JSON.stringify({ storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     return withEngineIntegrity({ projectDir: globalHome, runDir: stageHome, stageId: 'work',
       artifactContract: { version: 1, produces: [], reads: [], groups: [] } },
     async () => resolveCodexCapabilityIdentity(role('fixture', 'low'), { cwd: globalHome }).version);

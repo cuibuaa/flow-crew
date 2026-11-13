@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -35,7 +36,7 @@ function fixture(first: Record<string, unknown>, later: Record<string, unknown>)
   const runId = 'fixture'; const base = runDir(projectDir, runId); mkdirSync(runRecordPath(base, 'stages', 'gate'), { recursive: true });
   const stage = parseDispatchedStageConfig({ id: 'gate', role: 'qa', is_gate: true, scope: [],
     artifact_contract: { ...emptyArtifactContract(), produces: [{ id: 'verdict', root: 'run', path: 'verdict_gate.json', kind: 'file' }] } });
-  const state: StoreState = { runId, projectDir, workflowName: 'fixture', status: 'running', startedAt: '2026-01-01T00:00:00Z',
+  const state: StoreState = { briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }), runId, projectDir, workflowName: 'fixture', status: 'running', startedAt: '2026-01-01T00:00:00Z',
     stages: { gate: { status: 'complete', retries: 0, attempts: [{ index: 1, status: 'complete', startedAt: '2026-01-01T00:00:01Z', completedAt: '2026-01-01T00:00:02Z' }] } } };
   writeRunState(projectDir, runId, state);
   Object.assign(carrier, { path: runRecordPath(base, 'verdict_gate.json'), reads: 0, first: JSON.stringify(first), later: JSON.stringify(later) });

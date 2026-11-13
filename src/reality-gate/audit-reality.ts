@@ -1,3 +1,4 @@
+import { readRunSnapshot } from '../run-lifecycle.js';
 import { runRecordPath } from '../run-layout.js';
 import { parseCommandArgs, commandUsage } from '../cli-args.js';
 import { writeFileSync } from '../engine-fs.js';
@@ -5,7 +6,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TaskRegistry, type TaskEntry } from '../task-registry.js';
 import { runsRoot } from '../store.js';
-import { parseChecksFromBrief, runAllChecks } from './index.js';
+import { parseRealityChecks, runAllChecks } from './index.js';
+import { admittedContract, ContractRefusal, type BriefAdmissionRecord } from '../brief-admission.js';
 import type { CheckDecl, RealityGateReport } from './types.js';
 
 interface AuditRow {
@@ -66,15 +68,16 @@ async function auditRunMatches(id: number): Promise<AuditRow[]> {
 
 async function auditRunState(name: string, runPath: string, state: Record<string, unknown>): Promise<AuditRow> {
   const projectDir = typeof state.projectDir === 'string' ? state.projectDir : process.cwd();
-  const briefPath = existsSync(runRecordPath(runPath, 'task_brief.md')) ? runRecordPath(runPath, 'task_brief.md') : undefined;
+  const briefPath = runRecordPath(runPath, 'task_brief.md');
   const label = `#${String(state.taskId ?? state.task_id ?? state.campaignSeq ?? state.campaignIteration ?? name)} ${name}`;
   const base = {
     task: escapeCell(label),
     project: escapeCell(projectDir.split(/[\\/]/).filter(Boolean).pop() ?? projectDir),
     claimedStatus: escapeCell(typeof state.status === 'string' ? state.status : 'unknown'),
   };
-  if (!briefPath) return { ...base, checksRun: '(no checks declared)', realStatus: 'UNVERIFIABLE', mismatch: '—' };
-  const decls = parseChecksFromBrief(briefPath);
+  const declaration = auditDeclarations(state.briefAdmission as BriefAdmissionRecord | undefined);
+  if (typeof declaration === 'string') return { ...base, checksRun: declaration, realStatus: 'UNVERIFIABLE', mismatch: '—' };
+  const decls = declaration;
   if (decls.length === 0) return { ...base, checksRun: '(no checks declared)', realStatus: 'UNVERIFIABLE', mismatch: '—' };
   const report = await runAllChecks(decls, { taskDir: runPath, projectDir, briefPath });
   return {
@@ -86,13 +89,12 @@ async function auditRunState(name: string, runPath: string, state: Record<string
 
 async function auditTask(task: TaskEntry): Promise<AuditRow> {
   const runPath = task.run_id ? join(runsRoot(), task.run_id) : undefined;
-  const runJson = runPath && existsSync(runRecordPath(runPath, 'run.json')) ? JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as Record<string, unknown> : {};
+  const runJson = runPath ? readRunSnapshot(runPath) : {};
   const projectDir = typeof runJson.projectDir === 'string' ? runJson.projectDir : task.projectDir;
-  const briefPath = resolveBriefPath(task, runPath);
-  if (!briefPath) {
-    return baseRow(task, projectDir, '(no checks declared)', 'UNVERIFIABLE', '—');
-  }
-  const decls = parseChecksFromBrief(briefPath);
+  const briefPath = runPath ? runRecordPath(runPath, 'task_brief.md') : task.brief_path;
+  const declaration = auditDeclarations(runPath ? runJson.briefAdmission as BriefAdmissionRecord | undefined : task.brief_admission);
+  if (typeof declaration === 'string') return baseRow(task, projectDir, declaration, 'UNVERIFIABLE', '—');
+  const decls = declaration;
   if (decls.length === 0) return baseRow(task, projectDir, '(no checks declared)', 'UNVERIFIABLE', '—');
   const report = await runAllChecks(decls, { taskDir: runPath ?? projectDir, projectDir, briefPath });
   const checks = formatChecks(decls, report.results);
@@ -111,12 +113,13 @@ function baseRow(task: TaskEntry, projectDir: string, checksRun: string, realSta
   };
 }
 
-function resolveBriefPath(task: TaskEntry, runPath?: string): string | undefined {
-  const candidates = [
-    runPath ? runRecordPath(runPath, 'task_brief.md') : undefined,
-    task.brief_path,
-  ].filter((item): item is string => Boolean(item));
-  return candidates.find((candidate) => existsSync(candidate));
+/** A historical audit remains visible without inventing an execution contract. */
+function auditDeclarations(record: BriefAdmissionRecord | undefined): CheckDecl[] | string {
+  try { return parseRealityChecks(admittedContract(record).declaration.reality_checks ?? []); }
+  catch (error) {
+    if (error instanceof ContractRefusal) return error.code;
+    throw error;
+  }
 }
 
 function auditOutcome(report: RealityGateReport) {

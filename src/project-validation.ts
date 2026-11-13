@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { rethrowGitNotAnswered } from './git-facts.js';
-import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
+import { parseBriefDeclarations, argument, commandDeclaration, commandsDeclaration, limitFields, validationDeclaration } from './brief-declarations.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { errorMessage } from './source_services/cli-inputs.js';
@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir, cpus, loadavg } from 'node:os';
 import { validationEnvironment } from './validation-environment.js';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { decodeRunnerReport, identityFacts, type IdentityFacts } from './validation-identity.js';
 import { prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
 import { statSync } from 'node:fs';
@@ -77,28 +77,6 @@ export interface ValidationParseResult {
 }
 
 const ROLES = ['build', 'test', 'lint'] as const;
-const argument = z.string().refine(value => ![...value].some(character => {
-  const code = character.codePointAt(0)!;
-  return code <= 0x1f || code >= 0x7f && code <= 0x9f;
-}), 'must not contain a control character');
-const commandDeclaration = z.object({
-  command: argument.refine(value => value.trim().length > 0, 'must be a non-empty string'),
-  args: z.array(argument),
-  env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), argument).optional(),
-  report: z.object({ format: z.literal('vitest-json'), path: argument.refine(value => value.length > 0
-    && !isAbsolute(value) && !value.split('/').includes('..'), 'must be a project-relative file').optional() }).strict().optional(),
-}).strict();
-const commandsDeclaration = z.object({ commands: z.object({
-  build: commandDeclaration.optional(), test: commandDeclaration.optional(), lint: commandDeclaration.optional(),
-}).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') }).strict();
-// A brief and the project's declaration file state limits alike; a brief's replace the project's field by field.
-// The timeout bound is the largest delay a timer can carry. A brief may state limits alone.
-const limitFields = {
-  timeoutMs: z.number().int().positive().max(2 ** 31 - 1).optional(),
-  attempts: z.number().int().positive().optional(),
-};
-const validationDeclaration = commandsDeclaration.extend({ commands: commandsDeclaration.shape.commands.optional(), ...limitFields });
-
 const projectCommandDeclaration = commandDeclaration.extend({ rerun: z.object({
   command: argument.refine(value => value.trim().length > 0), args: z.array(argument),
   timeoutMs: z.number().int().positive().optional(),
@@ -132,10 +110,8 @@ export function parseValidationCommands(validation: unknown, evidencePathRoot: s
 
 /** The same declaration parser serves setup and low-level author entry points. */
 export function parseBriefValidationCommands(brief: string, briefPath: string): ValidationParseResult {
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (frontmatter?.error) return { commands: [], error: frontmatter.error };
-  return parseValidationCommands(frontmatter?.value && typeof frontmatter.value === 'object'
-    ? (frontmatter.value as Record<string, unknown>).validation : undefined, briefPath);
+  try { return parseValidationCommands(parseBriefDeclarations(brief).validation, briefPath); }
+  catch (error) { return { commands: [], error: error instanceof Error ? error.message : String(error) }; }
 }
 
 export interface ValidationDiscovery {

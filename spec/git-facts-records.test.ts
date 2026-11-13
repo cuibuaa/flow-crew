@@ -82,7 +82,7 @@ it('reads a literal pre-change record through status, watch, listing and the UI 
   expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(bytes);
 });
 
-it('resumes a literal pre-change admitted separated run through the scheduler and a stub author', async () => {
+it('reads a literal pre-change separated run and refuses hashless execution through a stub author', async () => {
   const runId = 'baseline-admitted', directory = join(runsRoot(), runId);
   const brief = '---\ncriteria: [{id: result, text: Complete the admitted work.}]\n---\n# Goal\nComplete the work.\n';
   const workflow = WorkflowConfigSchema.parse({ name: 'baseline-admission', defaults: { max_iterations: 3, max_retries: 0 },
@@ -100,14 +100,14 @@ it('resumes a literal pre-change admitted separated run through the scheduler an
   writeFileSync(runRecordPath(directory, 'stages', 'work', 'status.json'), JSON.stringify(stage));
   const calls: string[] = [];
   const role = { name: 'coder', description: '', model: 'fixture', reasoning_effort: 'low', tools: [], prompt: 'Fixture' };
-  const result = await runWorkflow(workflow, yaml, project, { capturesInvocationInput: true, async run(_prompt, _role, opts) {
+  await expect(runWorkflow(workflow, yaml, project, { capturesInvocationInput: true, async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
     return { output: JSON.stringify({ status: 'delivered', summary: 'Admitted work completed.', caveats: [], remaining_work: [], blocks: null }), exitCode: 0, duration_ms: 0 };
-  } }, new Map([['coder', role]]), undefined, undefined, runId);
-  expect(calls).toEqual(['work']);
-  expect(result.runId).toBe(runId); expect(readRunState(project, runId).taskDescription).toBe(brief);
+  } }, new Map([['coder', role]]), undefined, undefined, runId)).rejects.toMatchObject({ code: 'contract_hash_missing' });
+  expect(calls).toEqual([]);
+  expect(readRunState(project, runId).taskDescription).toBe(brief);
   expect(readStageStatus(project, runId, 'work').attempts).toMatchObject([
-    { index: 1, status: 'failed', exitCode: 1 }, { index: 2, status: 'complete', exitCode: 0 },
+    { index: 1, status: 'failed', exitCode: 1 },
   ]);
   expect(readFileSync(runRecordPath(directory, 'workflow.yaml'), 'utf8')).toBe(yaml);
   expect(readFileSync(runRecordPath(directory, 'task_brief.md'), 'utf8')).toBe(brief);

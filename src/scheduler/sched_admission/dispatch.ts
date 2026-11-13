@@ -1,13 +1,13 @@
 import { runRecordPath } from '../../run-layout.js';
 /** Whole-proposal admission, criterion topology and role/workflow loaders. Declared-input conflict policy is supplied by its owner. */
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { parseCondition } from '../../condition.js';
 import { join } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type ResearchConfig } from '../../store.js';
-import { readBriefCriteriaArtifact, type BriefCriteriaArtifact } from '../../brief-criteria.js';
+import { readAdmittedContract, readBriefCriteriaArtifact, type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
@@ -161,13 +161,9 @@ export interface DispatchAdmissionReport {
 }
 
 export function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
+  readAdmittedContract(runDirPath);
   const parsed = readBriefCriteriaArtifact(runDirPath);
   if (!parsed) return;
-  const briefPath = runRecordPath(runDirPath, 'task_brief.md');
-  if (existsSync(briefPath)) {
-    const currentDigest = createHash('sha256').update(readFileSync(briefPath, 'utf-8'), 'utf8').digest('hex');
-    if (currentDigest !== parsed.briefDigest) throw new Error('brief_criteria.json digest does not match task_brief.md');
-  }
   return parsed;
 }
 

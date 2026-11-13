@@ -8,6 +8,7 @@ import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { drainDueTimers } from './test-support/engine-fixtures.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -83,7 +84,7 @@ function writeRoles(...names: string[]): string {
 }
 
 function prepareRun(config: WorkflowConfig, yaml: string) {
-  const created = prepareFixtureRun(projectDir, config, yaml);
+  const created = prepareFixtureRun(projectDir, config, yaml, `---\nstage_duration_ms: ${OWNED_STAGE_TIMEOUT_MS}\n---\n`);
   const state = readRunState(projectDir, created.runId); state.stageDurationLimitMs = OWNED_STAGE_TIMEOUT_MS;
   writeRunState(projectDir, created.runId, state);
   return created;
@@ -184,6 +185,8 @@ describe('gate verdict facts and repair eligibility', () => {
         legacy_gate: { status: 'complete', retries: 0 }, repair: { status: 'pending', retries: 0 }, downstream: { status: 'pending', retries: 0 },
       },
     };
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify({ ...state,
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     // Even if a legacy producer loses the normalized marker, the verdict fact wins.
     gate.is_gate = false;
     expect(findAllReady([gate, repair, downstream], state)).toEqual([]);
@@ -214,6 +217,8 @@ describe('gate verdict facts and repair eligibility', () => {
         after: { status: 'pending', retries: 0 },
       },
     };
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify({ ...state,
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     // The accepted gate releases its ordinary dependent and nothing else.
     expect(findAllReady([gate, repair, downstream], state).map((stage) => stage.id)).toEqual(['after']);
   });

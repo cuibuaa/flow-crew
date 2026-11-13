@@ -6,8 +6,8 @@ import { createRun } from '../test-support/create-run.js';
 import { readRunState, writeRunState } from '../../src/store.js';
 
 /** Shared run setup only; each consumer owns its adapter and assertions. */
-export function prepareFixtureRun(projectDir: string, config: WorkflowConfig, yaml: string) {
-  const created = createRun(projectDir, config.name, yaml, config.stages.map((stage) => stage.id));
+export function prepareFixtureRun(projectDir: string, config: WorkflowConfig, yaml: string, brief = '') {
+  const created = createRun(projectDir, config.name, yaml, config.stages.map((stage) => stage.id), brief);
   writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;

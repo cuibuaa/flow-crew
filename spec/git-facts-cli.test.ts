@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -104,10 +105,11 @@ it('foreground scheduler termination preserves the running task and never sends 
   const directory = join(store.runsRoot(), 'prior');
   mkdirSync(join(directory, 'engine', 'stages', 'work'), { recursive: true });
   mkdirSync(join(directory, 'work'), { recursive: true });
-  const brief = '---\ncriteria: [{id: done, text: Complete the work.}]\n---\n# Goal\nComplete the work.\n';
+  // This control interrupts Git before author dispatch; no independent review criterion is assigned.
+  const brief = '# Goal\nComplete the work.\n';
   const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 3, max_retries: 0 },
     stages: [{ id: 'work', role: 'coder', depends_on: [], scope: [], artifact_contract: { version: 1, produces: [], reads: [] } }] });
-  writeFileSync(join(directory, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'prior', projectDir: project,
+  writeFileSync(join(directory, 'run.json'), JSON.stringify({ storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief(brief), { kind: 'not_required' }), runId: 'prior', projectDir: project,
     workflowName: workflow.name, status: 'incomplete', startedAt: '2000-01-01T00:00:00Z', currentIteration: 1,
     maxIterations: 3, maxRetries: 0, baseCommit: 'a'.repeat(40), taskDescription: brief, briefConfigured: true,
     stages: { work: { status: 'pending', retries: 0 } } }));

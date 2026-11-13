@@ -31,6 +31,10 @@ beforeEach(() => {
   ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+function admitProducts(outputs: Array<string | { path: string; type: 'directory' }>) {
+  const brief = `---\noutputs: ${JSON.stringify(outputs)}\n---\n`;
+  ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], brief));
+}
 const role = { name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver the declared result.' };
 const contract = (produces: ArtifactContractInput['produces'], extra: Partial<ArtifactContractInput> = {}) =>
   ArtifactContractSchema.parse({ version: 1, produces, reads: [], ...extra });
@@ -102,7 +106,7 @@ describe('deterministic product settlement', () => {
     expect(audit().violations).toEqual([]);
   });
   it.each(['deleted', 'wrong-type', 'retained'] as const)('checks a previously valid declared run product when %s by an ordinary stage', async kind => {
-    updateRunState(project, runId, state => { state.declaredOutputs = [{ path: 'report.md', expectedType: 'file', line: 1, source: 'outputs', disposition: 'create' }]; });
+    admitProducts(['report.md']);
     writeFileSync(join(project, 'report.md'), 'required run product');
     const result = await settle(contract([]), () => {
       if (kind !== 'retained') rmSync(join(project, 'report.md'));
@@ -115,7 +119,7 @@ describe('deterministic product settlement', () => {
     }
   });
   it('leaves a declared run product assigned to later work undemanded', async () => {
-    updateRunState(project, runId, state => { state.declaredOutputs = [{ path: 'report.md', expectedType: 'file', line: 1, source: 'outputs', disposition: 'create' }]; });
+    admitProducts(['report.md']);
     expect((await settle(contract([]))).exitCode).toBe(0);
     expect(audit().violations).toEqual([]);
   });
@@ -123,10 +127,8 @@ describe('deterministic product settlement', () => {
 
 describe('direct author product settlement', () => {
   it.each(['delivered', 'blocked'] as const)('checks whole-brief products when the direct author reports %s', async status => {
-    updateRunState(project, runId, state => {
-      state.workflowName = 'direct';
-      state.declaredOutputs = [{ path: 'report.md', expectedType: 'file', line: 1, source: 'outputs', disposition: 'create' }];
-    });
+    admitProducts(['report.md']);
+    updateRunState(project, runId, state => { state.workflowName = 'direct'; });
     const result = await runStage({ async run() { return {
       output: JSON.stringify({ status, summary: 'Result', files_modified: [], checks: [], caveats: [] }), exitCode: 0, duration_ms: 1,
     }; } }, {
@@ -142,18 +144,14 @@ describe('direct author product settlement', () => {
 
 it('refuses removal of an authorized external product and records its absolute locator', async () => {
   const output = join(root, 'external-results'); mkdirSync(output);
-  updateRunState(project, runId, state => {
-    state.declaredOutputs = [{ path: output, expectedType: 'directory', line: 1, source: 'outputs', disposition: 'create' }];
-  });
+  admitProducts([{ path: output, type: 'directory' }]);
   const result = await settle(contract([]), () => rmSync(output, { recursive: true }));
   expect(result.exitCode).toBe(1);
   expect(audit().violations).toEqual([expect.objectContaining({ path: output, reason: expect.stringContaining('DECLARED_OUTPUT_REMOVED') })]);
 });
 
 it('records product removal even when the adapter already failed', async () => {
-  updateRunState(project, runId, state => {
-    state.declaredOutputs = [{ path: 'report.md', expectedType: 'file', line: 1, source: 'outputs', disposition: 'create' }];
-  });
+  admitProducts(['report.md']);
   writeFileSync(join(project, 'report.md'), 'required product');
   const result = await settle(contract([]), () => rmSync(join(project, 'report.md')), 9);
   expect(result.exitCode).toBe(9);

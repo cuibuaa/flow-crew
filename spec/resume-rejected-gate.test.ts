@@ -64,7 +64,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
   const seedPrematureIncomplete = async () => {
     // Build settled execution evidence with one iteration, then explicitly
     // seed the premature incomplete projection produced by older schedulers.
-    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
+    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id), brief);
     updateRunState(project, created.runId, state => {
       state.maxIterations = 1;
       // Old admitted static plans may lack the repair route now required at admission.

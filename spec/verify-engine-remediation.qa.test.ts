@@ -329,7 +329,7 @@ describe('independent engine-remediation verification', () => {
     mkdirSync(projectDir);
     mkdirSync(primaryDir);
     setFcGlobalDir(globalRoot);
-    const created = createRun(projectDir, 'fixture', 'name: fixture', []);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', [], '---\nterminal_states: {complete: docs/final.md}\noutputs: [docs/report.md]\n---\n');
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
     write(join(projectDir, terminalPath), '# final\n');
@@ -367,7 +367,7 @@ describe('independent engine-remediation verification', () => {
     mkdirSync(projectDir);
     mkdirSync(primaryDir);
     setFcGlobalDir(globalRoot);
-    const created = createRun(projectDir, 'fixture', 'name: fixture', []);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', [], '---\nterminal_states: {complete: docs/final.md}\noutputs: [docs/report.md]\n---\n');
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
     write(join(projectDir, terminalPath), '# final\n');
@@ -417,7 +417,7 @@ describe('independent engine-remediation verification', () => {
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
     setFcGlobalDir(join(root, 'fc-home'));
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer'], '---\nterminal_states: {complete: docs/final.md}\n---\n');
     const terminalPath = 'docs/final.md';
     const startedAt = new Date(Date.now() - 1_000).toISOString();
     write(join(projectDir, terminalPath), '# final round terminal\n');

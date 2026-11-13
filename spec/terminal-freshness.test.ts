@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createRun } from './test-support/create-run.js';
@@ -112,6 +113,7 @@ describe('terminal artifact freshness', () => {
     // Literal pre-deploy carriers: initialization never observes the owner's existing result.
     const legacyState = {
       storageLayout: 2, runId: created.runId, workflowName: workflow.name, projectDir, status: 'incomplete',
+      briefAdmission: createBriefAdmission(inspectBrief(`---\nterminal_states: {shipped: ${path}}\n---\n`), { kind: 'not_required' }), briefConfigured: true,
       startedAt, completedAt: writtenAt, currentIteration: 1, maxIterations: 1,
       stages: { deliver: owner }, terminalStates: { shipped: { paths: [path] } },
     };
@@ -149,7 +151,8 @@ describe('terminal artifact freshness', () => {
     const projectDir = project();
     const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'planner.yaml'));
     config.defaults.max_iterations = 3;
-    const created = createRun(projectDir, config.name, raw, ['plan']);
+    const brief = '---\nterminal_states: {shipped: {paths: [docs/task_summary.md]}}\n---\n# Resume the admitted run\n';
+    const created = createRun(projectDir, config.name, raw, ['plan'], brief);
     store.beginStageAttempt(projectDir, created.runId, 'plan', 0);
     store.completeStageAttempt(projectDir, created.runId, 'plan', 0, {
       exitCode: 1, duration_ms: 1, error: 'The old engine stopped before producing its plan.',
@@ -160,6 +163,7 @@ describe('terminal artifact freshness', () => {
     delete legacyState.lifecycleAuthority;
     delete legacyState.lifecycleCursor;
     delete legacyState.terminalArtifactBaselines;
+    legacyState.briefConfigured = true;
     legacyState.status = 'failed';
     legacyState.completedAt = new Date().toISOString();
     writeFileSync(legacyRunPath, JSON.stringify(legacyState));

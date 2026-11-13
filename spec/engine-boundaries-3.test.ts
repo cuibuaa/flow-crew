@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { changedProjectPathsSinceSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
 import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
@@ -56,6 +57,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
   it('captures an unfiltered clean tree by object identity and detects changed bytes', async () => {
     const project = root();
     const run = root();
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     mkdirSync(join(project, 'data'), { recursive: true });
     for (let index = 0; index < 8; index++) write(join(project, 'data', `${index}.bin`), randomBytes(128 * 1024));
     git(project, ['init', '-q']);
@@ -76,6 +78,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
   it('restores dirty and attribute-filtered frozen worktree bytes at settlement', () => {
     const project = root();
     const run = root();
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     write(join(project, '.gitattributes'), 'data/filtered.bin filter=copy\n');
     write(join(project, 'data/filtered.bin'), 'filtered-old');
     write(join(project, 'data/dirty.bin'), 'dirty-old');
@@ -84,6 +87,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     write(join(project, 'data/dirty.bin'), 'dirty-now');
     write(join(project, 'data/filtered.bin'), 'filtered-now');
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief('---\ninputs: [{path: data/dirty.bin, frozen: true}, {path: data/filtered.bin, frozen: true}]\n---\n'), { kind: 'not_required' }) }));
     write(runRecordPath(run, 'task_brief.md'), '---\ninputs: [{path: data/dirty.bin, frozen: true}, {path: data/filtered.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
@@ -107,12 +111,14 @@ describe('A — tracked Git identities and frozen preimages', () => {
   it('restores frozen local bytes hidden by assume-unchanged at settlement', () => {
     const project = root();
     const run = root();
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     write(join(project, 'data/local.txt'), 'committed\n');
     git(project, ['init', '-q']);
     git(project, ['add', '.']);
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     git(project, ['update-index', '--assume-unchanged', 'data/local.txt']);
     write(join(project, 'data/local.txt'), 'operator-local\n');
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief('---\ninputs: [{path: data/local.txt, frozen: true}]\n---\n'), { kind: 'not_required' }) }));
     write(runRecordPath(run, 'task_brief.md'), '---\ninputs: [{path: data/local.txt, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
@@ -130,6 +136,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
 describe('C — retry context', () => {
   it('still describes a real budget timeout as a timeout and retains its larger retry budget', () => {
     const run = root();
+    write(runRecordPath(run, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
     write(runRecordPath(run, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'attempt timeout exceeded' }));
     const preamble = buildRetryPreamble(1, 1000, run, 'work', { previousBudgetMs: 1000, nextBudgetMs: 2000 });
     expect(preamble).toContain('\"previousError\":\"attempt timeout exceeded\"');

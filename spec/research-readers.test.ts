@@ -30,6 +30,9 @@ it.each(['legacy', 'measurement'] as const)('keeps historical %s records readabl
     metrics: { cost: { direction: 'min', scale: 'fraction' } }, primary: ['cost'], development: { command: process.execPath, args: [] } }) }) as any;
   state.researchReportPaths = ['retired-reports/result.md']; state.terminalArtifact = 'retired-reports/result.md';
   writeRunState(project, state.runId, state);
+  const archive = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
+  delete archive.briefAdmission;
+  writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(archive));
   mkdirSync(join(project, 'retired-reports')); writeFileSync(join(project, 'retired-reports/result.md'), '# Published historical report');
   rmSync(join(project, 'retired-reports'), { recursive: true });
   writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'historical round', result: 90 }] }));
@@ -43,7 +46,7 @@ it.each(['legacy', 'measurement'] as const)('keeps historical %s records readabl
   writeFileSync(runRecordPath(directory, 'research_confirm.json'), '{"status":"not_run"}');
   const files = ['run.json', 'events.jsonl', 'research_journal.json', 'research_confirm.json', 'research_measurement/state.json'].filter(p => { try { statSync(runRecordPath(directory, p)); return true; } catch { return false; } });
   const before = files.map(p => ({ bytes: readFileSync(runRecordPath(directory, p)), mtime: statSync(runRecordPath(directory, p)).mtimeMs }));
-  expect(reconcileHostInterruptedRun(project, state.runId).status).toBe('ceiling_hit');
+  expect(() => reconcileHostInterruptedRun(project, state.runId)).toThrow('contract_hash_missing');
   expect(reconcileResearchConclusion(project, state.runId).status).toBe('ceiling_hit');
   expect(() => statSync(join(project, 'retired-reports'))).toThrow();
   expect(readRunState(project, state.runId).research).toEqual(state.research);
@@ -79,7 +82,7 @@ it('never decodes a protocol record as a scientific legacy record', () => {
 
 it('protocol readers use committed results without repairing a crashed state projection or dropping diagnostics', async () => {
   const config = makeInstrument(project);
-  const created = createRun(project, 'research', 'name: research\nstages: []\n', []);
+  const created = createRun(project, 'research', 'name: research\nstages: []\n', [], `---\n${JSON.stringify({ research: config })}\n---\n`);
   const directory = created.runDirPath;
   const state = readRunState(project, created.runId); state.research = config; writeRunState(project, state.runId, state);
   await initializeResearchInstrument(project, directory, config);

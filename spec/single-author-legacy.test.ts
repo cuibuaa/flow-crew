@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { PLAN_SCHEMA, RECORDED_PLAN_SCHEMA, renderPlanInterface } from '../src/plan-interface.js';
 import { parseStageRecord } from '../src/handoff.js';
+import { parseBriefDeclarations } from '../src/brief-declarations.js';
 import { StageConfigSchema, RecordedStageConfigSchema, RecordedWorkflowConfigSchema, WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { loadWorkflow } from '../src/scheduler/sched_admission/dispatch.js';
 import { readRunEvents } from '../src/run-events.js';
@@ -79,7 +80,8 @@ describe('single-author admission and historical competition records', () => {
       { id: 'repair', role: 'coder', scope: [], depends_on: ['review'], retry_to: ['review'] },
     ] });
     normalizeStageContracts(workflow.stages);
-    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
+    const legacyBrief = '---\ncriteria: [{id: criterion_acceptance_criteria_1_b3246557, text: Both configured stages return their completed result.}]\n---\n# Goal\nComplete the deterministic recovery demonstration.';
+    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id), legacyBrief);
     beginStageAttempt(project, created.runId, 'done', 0);
     completeStageAttempt(project, created.runId, 'done', 0, { exitCode: 0, duration_ms: 1 });
     const done = readStageStatus(project, created.runId, 'done');
@@ -89,9 +91,8 @@ describe('single-author admission and historical competition records', () => {
       recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Recorded CLI fixture');
       state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: deadPid, processStart: undefined, processes: [] };
       state.currentIteration = 1; state.maxIterations = 2;
-      state.taskDescription = "# Goal\nComplete the deterministic recovery demonstration.\n\n# Acceptance criteria\n1. Both configured stages return their completed result.";
+      state.taskDescription = legacyBrief;
     });
-    const legacyBrief = readRunState(project, created.runId).taskDescription!;
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), legacyBrief);
     const legacyCriteria = { version: 1, briefDigest: createHash('sha256').update(legacyBrief).digest('hex'),
       criteria: [{ id: 'criterion_acceptance_criteria_1_b3246557', text: 'Both configured stages return their completed result.', line: 5, section: 'Acceptance criteria' }] };
@@ -114,7 +115,7 @@ describe('single-author admission and historical competition records', () => {
     expect(resumed.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
     expect(resumed.planControl?.stages.find(stage => stage.id === 'work')?.race).toBe(true);
   });
-  it.each(['Run a race between two implementations.', '---\nrace: true\n---\nRun two competing implementations.'])('S03 gives a visible single-author notice for brief requests and runs one author followed by its independent gate (%s)', async (brief) => {
+  it.each(['Run a race between two implementations.', 'Run two competing implementations. Historical request: race: true.'])('S03 gives a visible single-author notice for brief requests and runs one author followed by its independent gate (%s)', async (brief) => {
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 1 }, stages: [{ id: 'work', role: 'coder', scope: [] }, { id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], scope: [] }, { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: [] }] });
     const roles = join(root, 'roles');
     mkdirSync(roles);
@@ -127,6 +128,9 @@ describe('single-author admission and historical competition records', () => {
     expect(readRunEvents(project, result.runId).find(event => event.type === 'execution_notice')?.detail).toContain('every authoring stage runs one author');
     expect(result.stages.work.attempts).toHaveLength(1);
     expect(result.stages.review.attempts).toHaveLength(1);
+  });
+  it('refuses the retired race declaration instead of treating it as a competition request', () => {
+    expect(() => parseBriefDeclarations('---\nrace: true\n---\nRun two competing implementations.')).toThrow('DECLARATION_INVALID: race');
   });
   it('S04 continues a serialized mid-competition plan after cancellation without erasing artifacts, ownership, gate provenance or completed work', async () => {
     // The deployed record format, with synthetic identities and no provider or personal history.

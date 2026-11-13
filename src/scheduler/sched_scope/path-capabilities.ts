@@ -1,5 +1,4 @@
-import { ResearchInstrumentSchema } from '../../research-instrument.js';
-import { parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
+import { parseBriefDeclarations } from '../../brief-declarations.js';
 // Bind task-frozen identities once; inventory ordinary output through Git and retain planner matching for reporting.
 import { gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { basename, dirname, join, isAbsolute, relative, resolve } from "node:path";
@@ -94,8 +93,7 @@ export function resolveImmutableEvidenceBindings(projectDir: string, brief: stri
  * hash-only author protection, and generic outputs cannot release the instrument.
  * The research block is its own frontmatter contract, never prose. */
 export function researchFrozenRoots(brief: string): string[] {
-  const research = ResearchInstrumentSchema.safeParse((parseBriefFrontmatterDocument(brief)?.value as Record<string, unknown> | undefined)?.research);
-  return research.success ? research.data.frozen : [];
+  return parseBriefDeclarations(brief).research?.frozen ?? [];
 }
 
 /** Runtime consumes admitted declarations; it never reinterprets task prose. */

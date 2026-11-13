@@ -1,3 +1,4 @@
+import { createRun } from './test-support/create-run.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -115,8 +116,9 @@ describe('declarations or one repository-reading model choose commands', () => {
   it('refuses conflicting declarations before an undeclared model-selection fallback', () => {
     const root = project(); mkdirSync(join(root, 'config'));
     writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: 'declared', args: ['project'] } } }));
-    expect(() => snapshotShipSetupValidationBaseline(root,
-      '---\nvalidation: {commands: {test: {command: declared, args: [brief]}}}\n---\n# Goal', project())).toThrow('Validation command conflict');
+    const exactBrief = '---\nvalidation: {commands: {test: {command: declared, args: [brief]}}}\n---\n# Goal';
+    const created = createRun(root, 'fixture', 'name: fixture\nstages: []\n', [], exactBrief);
+    expect(() => snapshotShipSetupValidationBaseline(root, exactBrief, created.runDirPath)).toThrow('Validation command conflict');
   });
 
   it.each(['selected', 'empty', 'omitted', 'invalid'] as const)('settles %s selection in the author result without another model call', async shape => {

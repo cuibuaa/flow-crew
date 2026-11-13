@@ -365,7 +365,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.sourceOutputInventory.blocking).toHaveLength(inPlace ? 1 : 0);
     expect(git).toHaveBeenCalledTimes(inPlace ? 0 : 1);
     expect(existsSync(path)).toBe(false);
-    const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work']);
+    const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work'], readFileSync(fixture.brief, 'utf8'));
     writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
     const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work',
       artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } };
@@ -826,8 +826,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
   });
 
-  it('treats valid empty frontmatter as no validation declaration for a configured project', async () => {
-    writeBrief(['---', '---', '# Goal', 'Validate the configured project.']);
+  it('treats an explicit empty mapping as no validation declaration for a configured project', async () => {
+    writeBrief(['---', '{}', '---', '# Goal', 'Validate the configured project.']);
     const runner = validationRunner();
 
     const report = await runShipSetup(setupArgs(), {
@@ -873,12 +873,12 @@ describe('ship-setup fail-closed worktree transaction', () => {
       {
         name: 'unknown role',
         lines: ['---', 'validation:', '  commands:', '    deploy:', '      command: release', '      args: []', '---', '# Goal'],
-        diagnostic: 'unknown role',
+        diagnostic: 'validation.commands.deploy',
       },
       {
         name: 'unknown command field',
         lines: ['---', 'validation:', '  commands:', '    test:', '      command: check', '      args: []', '      shell: true', '---', '# Goal'],
-        diagnostic: 'unknown field',
+        diagnostic: 'validation.commands.test.shell',
       },
       {
         name: 'missing argv array',

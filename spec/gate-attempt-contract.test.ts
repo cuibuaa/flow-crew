@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { readGateEvaluation, runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
+import { readGateVerdictDocument } from '../src/scheduler/sched_settlement/gate-evidence.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -267,6 +269,10 @@ beforeEach(() => {
   projectDir = join(root, 'project');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
   setFcGlobalDir(join(root, 'fc-home'));
+  const directory = runDir(projectDir, UNIT_RUN_ID); mkdirSync(directory, { recursive: true });
+  writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify({ runId: UNIT_RUN_ID,
+    workflowName: 'unit', projectDir, status: 'running', startedAt: new Date().toISOString(), stages: {},
+    briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
 });
 
 afterEach(() => {
@@ -331,14 +337,15 @@ describe('gate verdict and score contracts', () => {
 });
 
 describe('verdict authority and binding score consistency', () => {
-  it.each(['malformed', 'unreadable'])('reads a rejected authored verdict with %s run state', (kind) => {
+  it.each(['malformed', 'unreadable'])('keeps raw rejected verdict readable but refuses effective evaluation with %s run state', (kind) => {
     const verdict = { pass: false, reason: 'The authored rejection remains readable.' };
     writeGateVerdict(verdict);
     const statePath = runRecordPath(runDir(projectDir, UNIT_RUN_ID), 'run.json');
     if (kind === 'malformed') writeFileSync(statePath, '{');
-    else mkdirSync(statePath);
+    else { rmSync(statePath); mkdirSync(statePath); }
 
-    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual(verdict);
+    expect(readGateVerdictDocument(runDir(projectDir, UNIT_RUN_ID), GATE_ID)?.value).toEqual(verdict);
+    expect(() => readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toThrow();
     rmSync(runRecordPath(runDir(projectDir, UNIT_RUN_ID), `verdict_${GATE_ID}.json`));
     expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
   });

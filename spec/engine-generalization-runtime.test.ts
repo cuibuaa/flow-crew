@@ -155,6 +155,7 @@ function terminalState(
   completedAt: string,
 ): StoreState {
   return {
+    ...readRunState(projectDir, runId),
     runId,
     workflowName: 'terminal-validation-fixture',
     projectDir,
@@ -374,7 +375,7 @@ describe('engine generalization runtime bindings', () => {
     const terminalPath = 'docs/final.md';
     mkdirSync(dirname(join(projectDir, terminalPath)), { recursive: true });
     writeFileSync(join(projectDir, terminalPath), '# delivered bytes\n');
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer'], `---\nterminal_states: {complete: ${terminalPath}}\n---\n`);
     const state = terminalState(projectDir, created.runId, terminalPath, new Date(Date.now() - 200).toISOString());
     writeRunState(projectDir, created.runId, state);
     writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({

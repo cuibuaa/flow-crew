@@ -1,5 +1,5 @@
 import { runRecordPath } from '../../run-layout.js';
-import { parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
+import { readAdmittedContract } from '../../brief-criteria.js';
 // Validation execution belongs to the engine. Gates bind record references.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -44,9 +44,7 @@ export interface GateValidationDeltaArtifact extends Partial<GateValidationExecu
   ledgerSequence?: number;
 }
 
-function briefAt(base: string): string {
-  try { return readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { return ''; }
-}
+function briefAt(base: string): string { return readAdmittedContract(base).brief; }
 export function validationExecutionId(runId: string, stageId: string, index: number, start: string, end: string): string {
   return createHash('sha256').update([runId, stageId, String(index), start, end].join('\0')).digest('hex');
 }
@@ -82,11 +80,7 @@ export function readRunValidationBaseline(base: string): RunValidationBaselineAr
 }
 export function snapshotShipSetupValidationBaseline(projectDir: string, exactBrief: string, base: string): RunValidationBaselineArtifact {
   const admitted = readShipSetupReadyValidationBaseline(projectDir, exactBrief);
-  // Ordinary launch already owns metadata warnings. Validate a decoded
-  // declaration here without turning unrelated malformed YAML into admission.
-  const metadata = parseBriefFrontmatterDocument(exactBrief)?.value;
-  const declaration = parseValidationCommands(metadata && typeof metadata === 'object'
-    ? (metadata as Record<string, unknown>).validation : undefined, runRecordPath(base, 'task_brief.md'));
+  const declaration = parseValidationCommands(readAdmittedContract(base).declaration.validation, runRecordPath(base, 'task_brief.md'));
   if (declaration.error) throw new Error(declaration.error);
   const baseline: ProjectValidationBaseline = admitted ?? { version: 1, execution: 'skipped', projectDir,
     discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [] };
@@ -103,6 +97,7 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
 /** Called before an author can write, including low-level runStage callers. */
 export function ensureAttemptValidationPlan(projectDir: string, runId: string): RunValidationBaselineArtifact {
   const base = runDir(projectDir, runId);
+  readAdmittedContract(base);
   const prior = readRunValidationBaseline(base);
   if (prior) return prior;
   return snapshotShipSetupValidationBaseline(projectDir, briefAt(base), base);

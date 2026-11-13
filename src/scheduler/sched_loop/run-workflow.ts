@@ -1,12 +1,13 @@
+import { readAdmittedContract } from '../../brief-criteria.js';
 import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
 import { adapterInputLimit } from '../../adapter-input.js';
-import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { parseBriefFrontmatter, declarationConfiguration } from '../sched_admission/brief-contract.js';
 import { runResearchLoop, researchStages } from '../sched_policy/research.js';
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
-import { BriefAdmissionRecord } from '../../brief-preflight.js';
+import { admittedContract, type BriefAdmissionRecord } from '../../brief-preflight.js';
 import { captureEngineCheckpoint } from '../../restart-recovery.js';
 import { invalidateRunLockCache, releaseLaunchIntent } from '../../run-lock.js';
 import { SchedulerHeartbeatHandle, startSchedulerHeartbeat } from '../../scheduler-heartbeat.js';
@@ -15,7 +16,7 @@ import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, readStageStatus, updateRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, readStageStatus, readRunReservation, runDir, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
@@ -44,7 +45,11 @@ export async function runWorkflow(
   briefAdmission?: BriefAdmissionRecord,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
-  const declared = taskDescription ? parseBriefFrontmatter(taskDescription) : undefined;
+  const reservation = existingRunId ? readRunReservation(projectDir, existingRunId) : undefined;
+  const frozen = existingRunId && (!reservation || reservation.briefAdmission)
+    ? reservation?.briefAdmission ? admittedContract(reservation.briefAdmission) : readAdmittedContract(runDir(projectDir, existingRunId)) : undefined;
+  const declared = frozen ? declarationConfiguration(frozen.declaration)
+    : parseBriefFrontmatter(taskDescription ?? '');
   if (declared?.research) workflow = { ...workflow, name: 'research', stages: researchStages(declared.research), dispatch: undefined };
   let launch;
   try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission, adapterInputLimit(adapter)); }

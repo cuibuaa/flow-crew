@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -86,7 +87,7 @@ function commandChild() {
 function priorRun() {
   const directory = join(runsRoot(), 'prior');
   mkdirSync(join(directory, 'engine'), { recursive: true }); mkdirSync(join(directory, 'work'));
-  writeFileSync(join(directory, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'prior', projectDir: project,
+  writeFileSync(join(directory, 'run.json'), JSON.stringify({ storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }), runId: 'prior', projectDir: project,
     workflowName: 'fixture', status: 'running', startedAt: '2000-01-01T00:00:00Z', baseCommit: oid, stages: {} }));
   const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
   const task = registry.create({ kind: 'quick', projectDir: project, name: 'Fixture', status: 'running', run_id: 'prior', started_at: '2000-01-01T00:00:00Z' });
@@ -143,7 +144,7 @@ it('directory watcher events nominate physical descendants without acquiring Git
 
 it('process identity publication joins the owning operation and retires its child before rejecting the original non-answer', async () => {
   const { runId } = reserveRun(project);
-  initializeReservedRun(project, runId, 'fixture', '', []);
+  initializeReservedRun(project, runId, 'fixture', '', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }));
   updateRunState(project, runId, state => { state.engineCheckpoint = { pid: process.pid, processes: [] } as never; });
   const { child, gate } = commandChild();
   let returned = false;
@@ -173,7 +174,7 @@ it.each([
 ] as const)('validation propagates %s publication failure through the %s runner before evidence or another command', async (boundary, runner) => {
   vi.useFakeTimers();
   const { runId } = reserveRun(project);
-  initializeReservedRun(project, runId, 'fixture', '', []);
+  initializeReservedRun(project, runId, 'fixture', '', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }));
   updateRunState(project, runId, state => { state.engineCheckpoint = { pid: process.pid, processes: [] } as never; });
   const { child, gate } = commandChild();
   let spawned!: () => void;
@@ -224,7 +225,7 @@ it.each([
 ] as const)('terminal %s publication rejects the awaited %s without hook evidence or a substituted decision', async (boundary, consumer) => {
   vi.useFakeTimers();
   const { runId, runDirPath } = reserveRun(project);
-  initializeReservedRun(project, runId, 'fixture', '', ['work']);
+  initializeReservedRun(project, runId, 'fixture', '', ['work'], createBriefAdmission(inspectBrief('---\nterminal_states: {complete: {paths: [done.md], post_terminate_hook: {command: fixture-command, args: []}}}\n---\n'), { kind: 'not_required' }));
   const hook = { command: 'fixture-command', args: [] };
   updateRunState(project, runId, state => {
     state.stages.work.status = 'complete';
@@ -288,7 +289,7 @@ it.each([
 it.each(['success', 'nonzero', 'signal', 'error'] as const)('terminal hook retains best-effort %s evidence after answered publication', async completion => {
   vi.useFakeTimers();
   const { runId, runDirPath } = reserveRun(project);
-  initializeReservedRun(project, runId, 'fixture', '', []);
+  initializeReservedRun(project, runId, 'fixture', '', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }));
   updateRunState(project, runId, state => {
     state.status = 'complete'; state.engineCheckpoint = { pid: process.pid, processes: [] } as never;
   });

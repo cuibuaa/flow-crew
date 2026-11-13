@@ -304,11 +304,10 @@ it('keeps compatible peers held until every current-hold run is compatible', asy
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const compatible = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
-  const invalid = createRun(project, config.name, stringify(config), []);
+  const invalid = createRun(project, config.name, stringify(config), [], brief);
   updateRunState(project, invalid.runId, state => {
     state.status = 'parked';
     state.taskDescription = brief;
-    state.briefAdmission = admitted().brief_admission;
     state.deploymentHold = held.deploymentHold;
     state.engineCheckpoint = { ...held.engineCheckpoint!, version: 99 } as unknown as typeof state.engineCheckpoint;
   });
@@ -462,7 +461,7 @@ it('accepts normal iteration repending with the retained completed attempt ledge
 
 it('continues an attemptless legacy preparation without inventing completed history', async () => {
   const config = workflow();
-  const prepared = createRun(project, config.name, stringify(config), []);
+  const prepared = createRun(project, config.name, stringify(config), [], brief);
   updateRunState(project, prepared.runId, state => { state.status = 'failed'; });
   expect(assertContinuationCompatible(project, prepared.runId).stages).toEqual({});
   const calls: string[] = [];
@@ -514,9 +513,9 @@ it('retains completed uncommitted project work across a deployment hold and sche
 
 it.each([2, 99])('settles a lost scheduler through existing recovery under a hold (checkpoint version %s)', async version => {
   const config = workflow();
-  const created = createRun(project, config.name, stringify(config), config.stages.map(stage => stage.id));
+  const created = createRun(project, config.name, stringify(config), config.stages.map(stage => stage.id), brief);
   updateRunState(project, created.runId, state => {
-    state.taskDescription = brief; state.briefAdmission = admitted().brief_admission;
+    state.taskDescription = brief;
     state.currentIteration = 1; state.maxIterations = 2; state.maxRetries = 1;
     recordAdmittedPlan(state, config.stages, created.runDirPath, 'Admitted recovery fixture.');
     state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: 999_999_999, processStart: undefined };

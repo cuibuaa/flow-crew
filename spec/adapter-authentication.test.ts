@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,7 +39,7 @@ beforeEach(() => {
   // Instrumentation is an existing exact file in the declared scope, so real
   // native launches exercise the grant without an out-of-grant log write.
   writeFileSync(callsPath, '');
-  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2 }));
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
   // An empty synthetic source prevents this fixture from touching operator credentials.
   vi.stubEnv('CODEX_HOME', join(root, 'codex-source'));
   vi.stubEnv('CODEX_PLUGINS_CACHE', join(root, 'plugins'));

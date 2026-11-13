@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { parseBriefFrontmatterDocument } from '../brief-frontmatter.js';
+import { parseBriefDeclarations } from '../brief-declarations.js';
 import { result as checkResult } from './checks/_utils.js';
 import { REALITY_CHECK_REGISTRY } from './registry.js';
 import { inspectRealityHandlerReads } from './declared-reads.js';
@@ -33,10 +33,7 @@ export function parseChecksFromBrief(briefPath: string): CheckDecl[] {
 /** New briefs declare checks in frontmatter; replaces terminal prose parsing.
  * The Markdown reader remains solely for already admitted legacy contracts. */
 export function parseDeclaredChecksFromBrief(briefPath: string): CheckDecl[] {
-  const document = parseBriefFrontmatterDocument(readFileSync(briefPath, 'utf8'));
-  if (document?.error) return [invalidBlockDeclaration(document.error)];
-  const value = document?.value as { reality_checks?: unknown } | undefined;
-  return value && Object.hasOwn(value, 'reality_checks') ? parseRealityChecks(value.reality_checks) : [];
+  return parseRealityChecks(parseBriefDeclarations(readFileSync(briefPath, 'utf8')).reality_checks ?? []);
 }
 
 export function hasRealityChecksHeading(markdown: string): boolean {

@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -117,6 +118,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     const id = 'restored-run';
     const directory = join(runsRoot(), id); mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, 'run.json'), JSON.stringify({
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }),
       runId: id, projectDir: project, status: 'running', workflowName: 'fixture', startedAt: '2026-01-01T00:00:00.000Z', stages: {},
       engineCheckpoint: { version: 2, runId: id, projectDir: project, bootId: 'previous-boot',
         generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' },
@@ -130,7 +132,8 @@ describe('daemon-owned previous-boot orphan recovery', () => {
       const id = `orphan-${String(i).padStart(2, '0')}`;
       const directory = join(runsRoot(), id); mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, 'run.json'), JSON.stringify({
-        runId: id, projectDir: project, status: 'running', workflowName: 'fixture', startedAt: '2026-01-01T00:00:00.000Z', stages: {},
+        briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }),
+      runId: id, projectDir: project, status: 'running', workflowName: 'fixture', startedAt: '2026-01-01T00:00:00.000Z', stages: {},
         engineCheckpoint: { version: 2, runId: id, projectDir: project, bootId: 'previous-boot',
           generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' },
       }));

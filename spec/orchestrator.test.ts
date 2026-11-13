@@ -273,7 +273,7 @@ describe('Orchestrator', () => {
     });
   });
 
-  it.each([false, true])('checks deferred brief bytes across deployment (changed=%s)', async (changed) => {
+  it.each([false, true])('launches the admitted deferred brief across deployment despite export changes (changed=%s)', async (changed) => {
     const brief = 'Complete the deferred work';
     // Persist the admission produced by an earlier build with fewer advisory
     // findings. A new daemon must bind the bytes, regardless of its own lint.
@@ -293,13 +293,10 @@ describe('Orchestrator', () => {
     advance(60_001);
     await orchestrator.tickOnce();
     const launched = registry.get(task.id)!;
-    expect(launched.status).toBe(changed ? 'stuck' : 'running');
-    expect(systemd.runs).toHaveLength(changed ? 0 : 1);
-    if (changed) expect(launched.notes).toContain('digest_mismatch');
-    else {
-      const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(systemd.runs[0].command)![1];
-      expect(Buffer.from(encoded, 'base64url').toString('utf8')).toBe(brief);
-    }
+    expect(launched.status).toBe('running');
+    expect(systemd.runs).toHaveLength(1);
+    const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(systemd.runs[0].command)![1];
+    expect(Buffer.from(encoded, 'base64url').toString('utf8')).toBe(brief);
   });
 
   it('records active ticks and marks pending tasks running', async () => {
@@ -807,7 +804,7 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
-  it.each(['unbound', 'unreadable', 'wrong-project', 'wrong-admission', 'cancelling', 'live-owner'])('refuses %s task continuation before queueing', async kind => {
+  it.each(['unbound', 'unreadable', 'wrong-project', 'tampered-admission', 'cancelling', 'live-owner'])('refuses %s task continuation before queueing', async kind => {
     const runId = 'invalid-continuation';
     const admitted = admittedBrief('Continue work.');
     const runPath = writeRun(runId, 'stopped');
@@ -815,7 +812,7 @@ describe('Orchestrator', () => {
     writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
       projectDir: kind === 'wrong-project' ? join(tempDir, 'other') : tempDir,
       taskDescription: admitted.brief_text,
-      briefAdmission: kind === 'wrong-admission' ? admittedBrief('Other work.').brief_admission : admitted.brief_admission,
+      briefAdmission: kind === 'tampered-admission' ? { ...admitted.brief_admission, digest: '0'.repeat(64) } : admitted.brief_admission,
     }));
     if (kind === 'live-owner') {
       writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid));

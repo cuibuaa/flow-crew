@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 49 -->
+<!-- flowcrew-skill-revision: 50 -->
 
 # Ship a conversation to FlowCrew
 
@@ -28,6 +28,7 @@ as inputs, not paraphrased facts or a promise to repeat their outcome.
 Write a self-contained brief at `docs/task_brief.md` only after preflight facts are available. The run does not receive this
 conversation. Include outcome, evidence paths, real constraints, declared `criteria: [{id, text}]` identities and stage-readable acceptance prose, required human outputs and allowed stopping outcomes. State required observable
 properties; label example mechanisms explicitly. Criterion IDs must be unique and stable; headings, numbering and example wording have no engine meaning.
+The leading declaration uses closed schema version 1: unknown keys, aliases, duplicate YAML keys and malformed nested values refuse the entire brief with a key path. Use `terminal_states.<status>.paths` and entry-level `stage_glob` only. Admission freezes the canonical declaration by hash; changed brief acknowledgement binds its exact digest without changing original obligations. Old hashless runs are readable but cannot resume; start a new admitted run with their evidence as inputs.
 Declare outputs as `outputs: [path]` or `{path, type?, on_existing?}` entries; unknown entry keys are errors.
 Declare every source input in a leading
 frontmatter `inputs:` array, using path strings or `{path, frozen?, type?, sha256?}` entries. No aliases or recursive path inference are supported. A path in prose or a table is only a reference, not a declaration.

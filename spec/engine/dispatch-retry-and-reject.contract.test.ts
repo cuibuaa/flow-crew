@@ -56,8 +56,8 @@ function writeRoles(roles: string[]): string {
 
 /** A non-research run (no research: frontmatter) so plain gate-pass / fail
  * terminal semantics apply — the simplest way to observe FIX 1/FIX 2 behavior. */
-function setupPlainRun(): string {
-  const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan']);
+function setupPlainRun(brief = ''): string {
+  const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan'], brief);
   const rd = runDir(projectDir, created.runId);
   writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
   writeFileSync(runRecordPath(rd, 'task_brief.md'), '# Test task\nDo the thing.');
@@ -268,7 +268,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
   });
 
   it('refuses terminal settlement for a finalizer product delta with no independent review', async () => {
-    const runId = setupPlainRun();
+    const runId = setupPlainRun('---\nterminal_states: {complete: docs/final.md}\n---\n');
     const rd = runDir(projectDir, runId);
     const agentsDir = writeRoles(['planner', 'qa']);
     const state = readRunState(projectDir, runId);

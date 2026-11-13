@@ -51,7 +51,7 @@ describe('durable registration queue', () => {
     let second: Orchestrator | undefined;
     try {
       const task = input();
-      const id = createRun(root, 'default', 'name: default\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work']).runId;
+      const id = createRun(root, 'default', 'name: default\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work'], task.brief_text, task.brief_admission).runId;
       updateRunState(root, id, state => {
         state.status = 'parked'; state.taskDescription = task.brief_text; state.briefAdmission = task.brief_admission;
         state.engineCheckpoint = captureEngineCheckpoint(root, id);

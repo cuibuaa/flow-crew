@@ -7,7 +7,7 @@ import { isolatedProjectCommand } from './test-support/isolated-project-command.
 import { createHash } from 'node:crypto';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { readBriefCriteriaArtifact, writeBriefCriteriaArtifact } from '../src/brief-criteria.js';
-import { inspectBrief } from '../src/brief-preflight.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { parseBriefDeclarations } from '../src/brief-declarations.js';
 import { captureProjectTree } from '../src/evidence-ledger.js';
 import { observeEnginePublications } from '../src/engine-fs.js';
@@ -149,39 +149,30 @@ it.each([
   ['parent does not freeze nested input', 'inputs: [{frozen: true, nested: {path: source.txt}}]', 'source.txt', false],
   ['direct path suppresses nested input', 'inputs: [{path: source.txt, nested: {dataset: ignored.txt, frozen: true}}]', 'ignored.txt', false],
   ['outputs do not freeze', 'outputs: [{inputs: [{path: source.txt, frozen: true}]}]', 'source.txt', false],
-] as const)('legacy decoding preserves admitted authority: %s', (_label, metadata, name, frozen) => {
+] as const)('legacy decoding refuses activation without a stored contract hash: %s', (_label, metadata, name, frozen) => {
   const dir = project('legacy'); writeFileSync(join(dir, 'ignored.txt'), 'ORIGINAL');
   const created = reserveRun(dir); initializeReservedRun(dir, created.runId, 'fixture', 'name: fixture\nstages: []\n', []);
   const text = brief(metadata);
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), text);
   writeFileSync(runRecordPath(created.runDirPath, 'brief_criteria.json'), JSON.stringify({ version: 1,
     briefDigest: createHash('sha256').update(text).digest('hex'), criteria: [] }));
-  const contract = readAdmittedBriefContract(created.runDirPath);
-  if (_label === 'mutable ignored alias') expect(contract.inputs).toMatchObject([{ path: name, frozen: false }]);
-  const before = captureProjectTree(dir, text, created.runDirPath);
-  const snapshot = captureRepairRoundSnapshot(dir, [], { runDirPath: created.runDirPath });
-  try {
-    writeFileSync(join(dir, name), 'MUTATED');
-    const changed = captureProjectTree(dir, text, created.runDirPath);
-    if (_label === 'mutable ignored alias') expect(changed.hash).not.toBe(before.hash);
-    const settled = settleProjectWrites({ projectDir: dir, snapshot, rawWrites: [name], definiteWrites: new Set([name]) });
-    expect(settled.violations.some(item => item.path === name)).toBe(frozen);
-    expect(readFileSync(join(dir, name), 'utf8')).toBe(frozen ? 'ORIGINAL' : 'MUTATED');
-  } finally { closeRollbackBaseline(dir, created.runDirPath); }
+  expect(() => readAdmittedBriefContract(created.runDirPath)).toThrow('contract_hash_missing');
+  expect(readRunState(dir, created.runId).status).toBe('running');
+  expect(readFileSync(join(dir, name), 'utf8')).toBe('ORIGINAL');
 });
 
 it.each(['  source.txt  ', ' source.txt', 'source.txt ', 'C:source.txt'])('refuses unsupported literal path before verification/admission: %j', name => {
   const dir = project('literal'); writeFileSync(join(dir, name), 'ORIGINAL');
   const text = brief(`inputs: [{path: ${JSON.stringify(name)}, frozen: true}]`);
-  expect(() => parseBriefDeclarations(text)).toThrow('inputs.path');
-  expect(verifyDeclaredBriefInputs(text, dir).unresolvedInputs).toMatchObject([{ reason: expect.stringContaining('inputs.path') }]);
-  expect(() => prepareWorkflowLaunch(workflow(), '', dir, undefined, text)).toThrow('inputs.path');
+  expect(() => parseBriefDeclarations(text)).toThrow('inputs.0.path');
+  expect(verifyDeclaredBriefInputs(text, dir).unresolvedInputs).toMatchObject([{ reason: expect.stringContaining('inputs.0.path') }]);
+  expect(() => prepareWorkflowLaunch(workflow(), '', dir, undefined, text)).toThrow('inputs.0.path');
 });
 
 it('ordinary declared frozen input still detects and restores mutation', () => {
   const dir = project('frozen');
-  const created = reserveRun(dir); initializeReservedRun(dir, created.runId, 'fixture', 'name: fixture\nstages: []\n', []);
   const text = brief('inputs: [{path: source.txt, frozen: true}]');
+  const created = reserveRun(dir); initializeReservedRun(dir, created.runId, 'fixture', 'name: fixture\nstages: []\n', [], createBriefAdmission(inspectBrief(text), { kind: 'not_required' }));
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), text); writeBriefCriteriaArtifact(created.runDirPath, text);
   expect(verifyDeclaredBriefInputs(text, dir).unresolvedInputs).toEqual([]);
   const snapshot = captureRepairRoundSnapshot(dir, [], { runDirPath: created.runDirPath });

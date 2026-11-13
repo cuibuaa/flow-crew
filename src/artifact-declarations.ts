@@ -3,34 +3,19 @@ import type { DispatchAdmissionError } from './scheduler/sched_admission/dispatc
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
+import { resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
 import { fcGlobalDir, runsRoot, STAGE_STATUS } from './store.js';
 import { physicalRoot, withinPhysicalRoot, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
-const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
-const location = z.object({ root: z.enum(['project', 'run']), path: ArtifactPathSchema });
-const when = z.object({
-  stage: id,
-  field: z.enum(['status', 'exitCode']),
-  equals: z.union([z.string(), z.number().int()]),
-}).strict();
+import { id, location, when, ArtifactReadSchema } from './artifact-read-schema.js';
+export { ArtifactReadSchema } from './artifact-read-schema.js';
 const produced = location.extend({
   id,
   kind: z.enum(['file', 'directory']).default('file'),
   nonempty: z.boolean().default(false),
-  when: when.optional(),
-}).strict();
-export const ArtifactReadSchema = location.extend({
-  id,
-  kind: z.enum(['file', 'directory']).default('file'),
-  source: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('stage'), stage: id, artifact: id }).strict(),
-    z.object({ kind: z.literal('input') }).strict(),
-    z.object({ kind: z.literal('framework'), artifact: z.enum(['task_brief', 'run_state']) }).strict(),
-  ]),
   when: when.optional(),
 }).strict();
 export const ArtifactContractSchema = z.object({

@@ -62,15 +62,15 @@ afterEach(() => {
   rmSync(stateRoot, { recursive: true, force: true });
 });
 
-function makeRun(stageIds: string[]) {
+function makeRun(stageIds: string[], brief = '# Command control fixture\n') {
   const created = createRun(
     projectDir,
     'guidance-controls',
     `name: guidance-controls\nstages:\n${stageIds.map((id) => `  - id: ${id}\n    role: coder`).join('\n')}\n`,
-    stageIds,
+    stageIds, brief,
   );
   mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
-  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Command control fixture\n', 'utf-8');
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief, 'utf-8');
   return created;
 }
 
@@ -304,16 +304,12 @@ describe('live guidance and command controls', () => {
   });
 
   it.each(['first', 'passing', 'rejected'] as const)('frames a standalone review from %s history', async history => {
-    const created = makeRun(['qa']);
+    const created = makeRun(['qa'], '---\ncriteria: [{id: repaired, text: repaired}, {id: reexamined, text: reexamined}]\n---\nReview every declared criterion.');
     const criteria = {
       repaired: { status: 'fail', evidence: 'The first review found an unmet outcome.' },
       reexamined: { status: 'pass', evidence: 'The first review accepted this outcome.' },
     };
     const audit_findings = { version: 1, findings: [] };
-    writeFileSync(runRecordPath(created.runDirPath, 'brief_criteria.json'), JSON.stringify({
-      version: 1, briefDigest: 'fixture',
-      criteria: Object.keys(criteria).map(id => ({ id, text: id })),
-    }));
     const archive = runRecordPath(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     if (history === 'rejected') {
       mkdirSync(archive, { recursive: true });

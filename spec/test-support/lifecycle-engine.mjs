@@ -19,6 +19,8 @@ globalThis.Date = class extends NativeDate {
 };
 
 const store = await import('../../dist/store.js');
+const { createBriefAdmission, inspectBrief } = await import('../../dist/brief-preflight.js');
+const admission = createBriefAdmission(inspectBrief(''), { kind: 'not_required' });
 const { observeEnginePublications } = await import('../../dist/engine-fs.js');
 const { runRecordPath } = await import('../../dist/run-layout.js');
 const { prepareWorkflowLaunch } = await import('../../dist/scheduler/sched_loop/launch.js');
@@ -35,7 +37,7 @@ const { stringify } = await import('yaml');
 const yaml = stringify(workflow);
 const reserved = store.reserveRun(project);
 const { runId, runDirPath: directory } = reserved;
-if (mode !== 'initialize') store.initializeReservedRun(project, runId, workflow.name, yaml, ['work']);
+if (mode !== 'initialize') store.initializeReservedRun(project, runId, workflow.name, yaml, ['work'], admission);
 if (['resume', 'import-resume', 'import-short'].includes(mode)) store.updateRunState(project, runId, state => { state.status = 'parked'; });
 if (['import-resume', 'import-short'].includes(mode)) {
   const record = JSON.parse(fs.readFileSync(join(directory, 'run.json'), 'utf8'));
@@ -115,7 +117,7 @@ observeEnginePublications((paths, _tree, publication) => () => {
   checkpoint(kind, path);
 });
 fs.writeSync(1, JSON.stringify({ ready: true, runId, directory, project }) + '\n');
-if (mode === 'initialize') store.initializeReservedRun(project, runId, workflow.name, yaml, ['work']);
+if (mode === 'initialize') store.initializeReservedRun(project, runId, workflow.name, yaml, ['work'], admission);
 else if (mode === 'terminal-short') await concludeRun(store.readRunState(project, runId), { status: 'failed', reasonCode: 'workflow_complete' });
 else if (mode.startsWith('terminal:')) await concludeRun(store.readRunState(project, runId), {
   status: mode.slice('terminal:'.length), reasonCode: 'workflow_complete',

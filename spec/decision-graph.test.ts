@@ -129,11 +129,11 @@ describe('declared successor execution', () => {
 });
 
 describe('one entry and concrete clarification', () => {
-  it('refuses the CLI override and treats legacy workflow metadata as inert on the single entry', () => {
+  it('refuses the CLI override and legacy workflow declaration keys', () => {
     expect(() => parseCommandArgs('quick', ['--workflow', 'direct'])).toThrow(/unknown/i);
     for (const value of ['direct', 'planner', 'anything']) {
       const parsed = parseBriefFrontmatter(`---\nworkflow: ${value}\n---\nTask`);
-      expect(entryWorkflow(parsed)).toEqual({ workflow: 'entry', reason: expect.any(String) });
+      expect(entryWorkflow(parsed)).toMatchObject({ workflow: 'entry', error: expect.stringContaining('workflow') });
       expect(parsed.stripped).toBe('Task');
     }
     expect(entryWorkflow(parseBriefFrontmatter(task)).workflow).toBe('entry');

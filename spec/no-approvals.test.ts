@@ -125,11 +125,9 @@ describe('nothing waits for a person after launch', () => {
     config.defaults.max_iterations = 1;
     const text = `---\n${JSON.stringify({ research: { baseline: 0.5, policy: 'greedy_stack', stop } })}\n---\n${brief}`;
     const report = inspectBrief(text);
-    const admission = createBriefAdmission(report, { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
+    expect(() => createBriefAdmission(report, { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() })).toThrow('research');
     const fixture = adapter();
-    const state = await runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined, true, admission);
-    expect(state.status).toBe('failed');
-    expect(state.failureReason).toContain('research-instrument/v1');
+    await expect(runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined, true)).rejects.toThrow('research');
     expect(fixture.calls).toEqual([]);
   });
 

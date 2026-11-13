@@ -17,6 +17,7 @@ import { runPostTerminateHook } from '../src/scheduler/sched_policy/terminal.js'
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { createRun } from './test-support/create-run.js';
 import { readRunState } from '../src/store.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 
 vi.mock('node:net', async original => ({ ...await original<typeof import('node:net')>(), createServer: vi.fn() }));
@@ -78,8 +79,10 @@ describe('owned evidence waits for events unless its author declares an allowanc
 
   it('audit displays an exhausted reality command as unfinished without a fabrication verdict', async () => {
     const f = owned(0), projectDir = root(), brief = join(projectDir, 'brief.md');
-    writeFileSync(brief, '## Reality checks\n```yaml\nchecks:\n  - name: check\n    type: exec-script-exit-zero\n    reads: []\n    params: {script: fixture, timeout_seconds: 2}\n```\n');
-    const registry = new TaskRegistry(), task = registry.create({ projectDir, brief_path: brief, status: 'complete' });
+    const text = '---\nreality_checks:\n  - name: check\n    type: exec-script-exit-zero\n    reads: []\n    params: {script: fixture, timeout_seconds: 2}\n---\n';
+    writeFileSync(brief, text);
+    const registry = new TaskRegistry(), task = registry.create({ projectDir, brief_path: brief, status: 'complete',
+      brief_admission: createBriefAdmission(inspectBrief(text), { kind: 'not_required' }) });
     let output = '';
     const pending = cmdAuditReality(['--task', String(task.id)], { stdout: { write: (text: string) => { output += text; } } as unknown as NodeJS.WriteStream });
     await f.ready; await vi.advanceTimersByTimeAsync(2000);

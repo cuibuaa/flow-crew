@@ -37,7 +37,7 @@ const root = () => { const value = mkdtempSync(join(tmpdir(), 'attempt-clock-'))
 function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { resolve, promise }; }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 function fixture(budget?: number) {
-  const project = root(), created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['work']);
+  const project = root(), created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['work'], budget === undefined ? '' : `---\nstage_duration_ms: ${budget}\n---\n`);
   if (budget !== undefined) updateRunState(project, created.runId, state => { state.stageDurationLimitMs = budget; });
   const time = manualResearchClock();
   const options = { stageId: 'work', role, dependsOn: [], promptTemplate: 'Complete finite work.',

@@ -223,7 +223,7 @@ describe('native logs belong to scheduler attempts', () => {
   });
 
   it('uses the current native stream as the task watch activity clock', () => {
-    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    const created = createRun(project, 'fixture', 'name: fixture', ['work'], '---\nterminal_states: {complete: final.txt}\n---\n');
     beginStageAttempt(project, created.runId, 'work', 0, '2026-01-01T00:00:00.000Z');
     beginAttemptEvidenceGeneration(created.runDirPath, 'work', 1, '2026-01-01T00:00:00.000Z');
     const previous = stageLiveLogPath(created.runDirPath, 'work', 1);

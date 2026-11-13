@@ -28,7 +28,6 @@ import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdi
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import { prepareWorkflowLaunch, workflowContinuation } from '../src/scheduler/sched_loop/launch.js';
-import { admitStageDuration } from '../src/stage-duration.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -238,7 +237,7 @@ describe('durable bounded continuation', () => {
     expect(result.stages.other.status).toBe('pending');
   });
   it('B24 terminal settlement defers retained budget work at every entrance, including the next iteration', async () => {
-    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    const created = createRun(project, 'fixture', 'name: fixture', ['work'], '---\nterminal_states: {complete: report.md}\n---\n');
     writeFileSync(join(project, 'report.md'), 'Unfinished terminal document.');
     updateRunState(project, created.runId, state => { state.terminalStates = { complete: { paths: ['report.md'] } }; state.stages.work = { status: 'complete', retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } }; });
     const result = await tryTerminateOnTerminalState(readRunState(project, created.runId), { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 2, stages: [] });
@@ -298,11 +297,8 @@ describe('cause-owned budget handoff', () => {
       expect(parseBriefFrontmatter(`---\nmax_continuations: ${value}\n---\n# Task`).workflowError).toContain('max_continuations');
     const { roles, workflow } = workflowFixture(3);
     const run = vi.fn();
-    const result = await runWorkflow(workflow, stringify(workflow), project, { run }, new Map(), undefined, roles,
-      undefined, '---\nmax_continuations: -1\n---\n# Task', false, undefined, false);
-    expect(result.status).toBe('failed');
-    expect(result.failureReason).toContain('max_continuations');
-    expect(readRunState(project, result.runId).status).toBe('failed');
+    await expect(runWorkflow(workflow, stringify(workflow), project, { run }, new Map(), undefined, roles,
+      undefined, '---\nmax_continuations: -1\n---\n# Task', false, undefined, false)).rejects.toThrow('max_continuations');
     expect(run).not.toHaveBeenCalled();
   });
 });
@@ -625,8 +621,7 @@ function allowanceBrief(brief = '# Complete the fixture work.') {
     : `---\nstage_duration_ms: ${budget}\n---\n${brief}`;
 }
 function declaredRun(...args: Parameters<typeof createRun>) {
-  const created = createRun(...args);
-  updateRunState(project, created.runId, state => { state.stageDurationLimitMs = admitStageDuration(allowanceBrief()); });
+  const created = createRun(args[0], args[1], args[2], args[3], allowanceBrief(args[4]));
   return created;
 }
 function expire(time: ReturnType<typeof manualClock>, opts: RunOpts, output = ''): Promise<RunResult> {

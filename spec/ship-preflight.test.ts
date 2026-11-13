@@ -501,9 +501,6 @@ describe('ship-preflight declared brief inputs fact', () => {
     writeFileSync(join(fixture.project, 'docs', 'research-result.json'), 'x'.repeat(286 * 1024));
     writeFileSync(join(fixture.project, 'brief.md'), [
       '---',
-      'research:',
-      '  baseline: 0',
-      '  policy: greedy_stack',
       'outputs: [docs/research-result.json]',
       '---',
       '# Goal',
@@ -584,7 +581,7 @@ describe('ship-preflight declared brief inputs fact', () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Report every invalid leading input declaration.\"}]\ninputs:\n  - dependency_cache\n  - ../outside-cache\n---\n# Background\nThe ordinary words scheduler and generator are descriptive prose.\n## What the report must show\n1. Report every invalid leading input declaration.";
 
-    expect(extractDeclaredBriefInputPaths(brief)).toEqual([]);
+    expect(() => extractDeclaredBriefInputPaths(brief)).toThrow('inputs.1');
     const verification = verifyDeclaredBriefInputs(brief, fixture.project);
     expect(verification.inputs).toEqual([]);
     expect(verification.unresolvedInputs).toEqual([
@@ -675,8 +672,8 @@ describe('ship-preflight declared brief inputs fact', () => {
 
     expect(result.report.briefInputs.state).toBe('checked');
     expect(result.report.briefInputs.inputs).toEqual([
-      expect.objectContaining({ path: '.cache/snapshot', exists: false, readable: false }),
       expect.objectContaining({ path: 'data/prices.csv', exists: true, readable: true }),
+      expect.objectContaining({ path: '.cache/snapshot', exists: false, readable: false }),
       expect.objectContaining({ path: 'locked', exists: true, readable: false }),
     ]);
     const names = result.report.briefInputs.inputs.map((input) => input.path);

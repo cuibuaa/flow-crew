@@ -1,3 +1,4 @@
+import { declarationConfiguration } from './scheduler/sched_admission/brief-contract.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { admitWriteGrant, legacyWriteGrant, WriteGrantContractSchema, type WriteGrantContract } from './write-grant.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout, assertSeparatedRunLayout } from './run-layout.js';
@@ -20,10 +21,10 @@ import { renderRunSummary } from './run-summary.js';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { projectPersistenceIdentity } from './project-identity.js';
 import { cancelledRunPublicationError, canonicalRunDirectory, requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
-import { parseChecksFromBrief, parseDeclaredChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
-import { readBriefCriteriaArtifact } from './brief-criteria.js';
+import { parseChecksFromBrief, parseRealityChecks, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
+import { readAdmittedContract } from './brief-criteria.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
-import type { BriefAdmissionRecord } from './brief-preflight.js';
+import { admittedContract, ContractRefusal, type BriefAdmissionRecord } from './brief-admission.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage, tokensComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
@@ -473,6 +474,7 @@ export interface StoreState {
   briefConfigured?: boolean;
   /** Exact brief identity and recorded preflight findings admitted before launch. */
   briefAdmission?: BriefAdmissionRecord;
+  briefContinuationAdmission?: BriefAdmissionRecord;
   /** Admitted model-input ceiling; absent on historical records (use engine configuration). */
   inputLimitChars?: number;
   /** Admitted per-attempt ceiling; absent only on historical records. */
@@ -704,10 +706,7 @@ export async function evaluateRealityGate(
 ): Promise<Pick<StoreState, 'realityGate' | 'failureReason'>> {
   const dir = runDir(projectDir, runId);
   const briefPath = runRecordPath(dir, 'task_brief.md');
-  // New briefs use declarations. Archives without declaration snapshots retain
-  // their admitted checks; the planner snapshot is already an admitted contract.
-  const readChecks = readBriefCriteriaArtifact(dir)?.declarations ? parseDeclaredChecksFromBrief : parseChecksFromBrief;
-  const checks = existsSync(briefPath) ? readChecks(briefPath) : [];
+  const checks = parseRealityChecks(readAdmittedContract(dir).declaration.reality_checks ?? []);
   const plannerChecksPath = runRecordPath(dir, 'reality_checks.md');
   if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
   if (checks.length === 0) return {};
@@ -861,6 +860,7 @@ function generateRunId(at = new Date()): string {
 export const RUN_RESERVATION_FILE = '.run-reservation.json';
 
 export interface RunReservation {
+  briefAdmission?: BriefAdmissionRecord;
   lifecycleAuthority?: typeof LIFECYCLE_AUTHORITY;
   workflowName?: string;
   startedAt?: string;
@@ -973,23 +973,31 @@ export function initializeReservedRun(
   workflowName: string,
   workflowYaml: string,
   stageIds: string[],
+  briefAdmission?: BriefAdmissionRecord,
 ): { runId: string; runDirPath: string } {
   const normalizedProjectDir = resolve(projectDir);
   const reservation = readRunReservation(normalizedProjectDir, runId);
   if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
   const dir = runDir(normalizedProjectDir, runId);
   if (existsSync(runRecordPath(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
+  if (reservation.briefAdmission) {
+    admittedContract(reservation.briefAdmission);
+    if (briefAdmission && !isJsonPersistedEqual(reservation.briefAdmission, briefAdmission)) throw new ContractRefusal('contract_hash_mismatch');
+    briefAdmission = reservation.briefAdmission;
+  }
+  if (briefAdmission) admittedContract(briefAdmission);
   syncDirectory(dirname(dir));
   const reservationPath = runRecordPath(dir, RUN_RESERVATION_FILE);
   mkdirSync(engineDirectory(dir), { recursive: true });
   atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify({ ...reservation, storageLayout: 2,
-    lifecycleAuthority: LIFECYCLE_AUTHORITY, workflowName, startedAt: new Date().toISOString() }) + '\n');
+    lifecycleAuthority: LIFECYCLE_AUTHORITY, briefAdmission, workflowName, startedAt: new Date().toISOString() }) + '\n');
   mkdirSync(stageWorkPath(dir), { recursive: true });
   mkdirSync(requestPath(dir), { recursive: true });
   mkdirSync(controlPath(dir), { recursive: true });
   const stages: Record<string, StageStatus> = {};
   for (const sid of stageIds) stages[sid] = { status: 'pending', retries: 0 };
   const state: StoreState = {
+    ...(briefAdmission ? { briefAdmission } : {}),
     writeGrant: admitWriteGrant(normalizedProjectDir),
     storageLayout: 2,
     lifecycleAuthority: LIFECYCLE_AUTHORITY,
@@ -1159,7 +1167,30 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
   };
 }
 
+/** Runtime caches never override a frozen declaration. Historical records remain readable. */
+function projectAdmittedConfiguration(state: StoreState): void {
+  if (!state.briefAdmission?.contract) return;
+  const { declaration } = admittedContract(state.briefAdmission);
+  if (state.briefContinuationAdmission) admittedContract(state.briefContinuationAdmission);
+  const parsed = declarationConfiguration(declaration);
+  state.maxContinuations = parsed.maxContinuations;
+  state.terminalStates = parsed.terminalStates;
+  state.research = parsed.research;
+  state.declaredOutputs = declaration.outputs === undefined ? undefined : parsed.outputs;
+  state.stageDurationLimitMs = declaration.stage_duration_ms;
+  if (declaration.input_limit_chars !== undefined) state.inputLimitChars = declaration.input_limit_chars;
+}
+
+function assertFrozenAdmission(previous: StoreState | undefined, state: StoreState): void {
+  if (!previous?.briefAdmission?.contract) return;
+  admittedContract(previous.briefAdmission);
+  admittedContract(state.briefAdmission);
+  if (!isJsonPersistedEqual(previous.briefAdmission, state.briefAdmission)) throw new ContractRefusal('contract_hash_mismatch');
+  if (state.briefContinuationAdmission) admittedContract(state.briefContinuationAdmission);
+}
+
 function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): ArchivedStoreState {
+  projectAdmittedConfiguration(parsed as StoreState);
   if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
   projectRunLifecycle(runPath, parsed);
   for (const status of Object.values(parsed.stages ?? {})) projectAttemptCauses(status);
@@ -1356,6 +1387,7 @@ function persistRunStateUnlocked(
       currentState = hydrated as StoreState;
     }
   }
+  assertFrozenAdmission(currentState, state);
   if (expectation && currentRaw !== expectation.raw) {
     throw new RunStateProjectionConflictError(`Run state changed before mutation commit for ${runId}`);
   }
@@ -1514,6 +1546,7 @@ export function readOperationalRunState(projectDir: string, runId: string): Stor
   const path = runDir(projectDir, runId);
   const parsed = readRunSnapshot(path) as unknown as ArchivedStoreState;
   if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
+  projectAdmittedConfiguration(parsed as StoreState);
   projectRunLifecycle(path, parsed);
   parsed.status = requireKnownRunStatus(parsed.status, `read operational run state ${runId}`);
   if (parsed.runId !== runId) {
@@ -1529,7 +1562,8 @@ export function readOperationalRunState(projectDir: string, runId: string): Stor
  * This cast does not coerce at runtime: unknown raw text remains intact.
  */
 export function readRunState(projectDir: string, runId: string): StoreState {
-  return readArchivedRunState(projectDir, runId).state as StoreState;
+  const state = readArchivedRunState(projectDir, runId).state as StoreState;
+  return state;
 }
 
 export function writeRunState(projectDir: string, runId: string, state: StoreState): void {
@@ -1566,8 +1600,10 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
     const previous = projectRunLifecycle(identity.directory, JSON.parse(raw) as StoreState);
     const status = resolveRunStatus(previous.status);
     if (status.kind === 'known') previous.status = status.status;
+    projectAdmittedConfiguration(previous);
     const state = structuredClone(previous);
     mutator(state);
+    assertFrozenAdmission(previous, state);
     state.writeGrant = previous.writeGrant && WriteGrantContractSchema.parse(previous.writeGrant);
     if (state.runId !== identity.runId || state.projectDir !== identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: operational mutation changed run identity');
     if (!isJsonPersistedEqual(previous.stateFormat, state.stateFormat)
@@ -1589,6 +1625,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
     }
     let expected = raw;
     const persist = (): void => {
+      assertFrozenAdmission(previous, state);
       state.writeGrant = previous.writeGrant && WriteGrantContractSchema.parse(previous.writeGrant);
       if (state.stateFormat) state.stateFormat.revision += 1;
       publishRunProjection(identity.projectDir!, identity.directory, state, state, () => {

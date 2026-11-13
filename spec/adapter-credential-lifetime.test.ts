@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { readSession } from '../src/adapter-session.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -18,7 +19,7 @@ beforeEach(() => {
   source = join(root, 'source'); project = join(root, 'project'); runDir = join(root, 'run');
   const bin = join(root, 'bin');
   for (const directory of [source, project, runDir, bin, join(root, 'plugins'), join(root, 'skills')]) mkdirSync(directory);
-  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2 }));
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
   // These are deliberately invalid fixture bytes. No operator credentials are used.
   for (const name of names) writeFileSync(join(source, name), 'fake-credential-fixture');
   vi.stubEnv('CODEX_HOME', source);

@@ -604,13 +604,14 @@ describe('store integration', () => {
   });
 
   it.each([false, true])('settles a terminal transition from brief-authored checks passing=%s', async present => {
-    const created = createRun(projectDir, 'test', 'name: test', []);
-    if (present) write('artifact.txt', 'x');
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'task_brief.md'), [
-      '## Reality checks', 'checks:', '  - name: artifact', '    type: file-exists-nonempty',
+    const brief = [
+      '---', 'reality_checks:', '  - name: artifact', '    type: file-exists-nonempty',
       '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
-      '    params: { paths: [artifact.txt] }',
-    ].join('\n'), 'utf8');
+      '    params: { paths: [artifact.txt] }', '---',
+    ].join('\n');
+    const created = createRun(projectDir, 'test', 'name: test', [], brief);
+    if (present) write('artifact.txt', 'x');
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'task_brief.md'), brief, 'utf8');
     const state = readRunState(projectDir, created.runId); state.status = 'complete';
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));

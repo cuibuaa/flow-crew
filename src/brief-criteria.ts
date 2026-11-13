@@ -1,3 +1,5 @@
+import { readRunSnapshot } from './run-lifecycle.js';
+import { admittedContract, type FrozenBriefContract, type BriefAdmissionRecord } from './brief-admission.js';
 import { runRecordPath } from './run-layout.js';
 import { parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
 import { createHash } from 'node:crypto';
@@ -37,12 +39,27 @@ export function writeBriefCriteriaArtifact(runDir: string, brief: string): Brief
 
 /** Read admitted identities, including legacy IDs, without parsing old prose. */
 export function readBriefCriteriaArtifact(runDir: string): BriefCriteriaArtifact | undefined {
+  let record: BriefAdmissionRecord | undefined;
+  try {
+    record = (readRunSnapshot(runDir) as { briefAdmission?: BriefAdmissionRecord }).briefAdmission;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (record?.contract) {
+    const { declaration } = admittedContract(record);
+    const criteria = declaration.research?.review?.criteria.map((text, n) => ({ id: `review-${n + 1}`, text })) ?? declaration.criteria ?? [];
+    return { version: 1, briefDigest: record.digest, declarations: declaration,
+      criteria: criteria.map(c => ({ ...c, line: 1, section: 'criteria' })) };
+  }
+  // Historical read-only view. Active execution separately requires admittedContract.
   const path = runRecordPath(runDir, 'brief_criteria.json');
   if (!existsSync(path)) return;
   const artifact = JSON.parse(readFileSync(path, 'utf8')) as BriefCriteriaArtifact;
   if (artifact.version !== 1 || typeof artifact.briefDigest !== 'string' || !Array.isArray(artifact.criteria)
-    || artifact.criteria.some(c => typeof c.id !== 'string' || typeof c.text !== 'string')) {
-    throw new Error('brief_criteria.json has an invalid shape');
-  }
+    || artifact.criteria.some(c => typeof c.id !== 'string' || typeof c.text !== 'string')) throw new Error('brief_criteria.json has an invalid shape');
   return artifact;
+}
+
+/** The run admission is the sole runtime contract carrier. Sidecars are exports. */
+export function readAdmittedContract(runDir: string): FrozenBriefContract {
+  const state = readRunSnapshot(runDir) as { briefAdmission?: BriefAdmissionRecord };
+  return admittedContract(state.briefAdmission);
 }

@@ -74,6 +74,7 @@ function writeRun(
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, 'run.json'), JSON.stringify({
     storageLayout: 2,
+    briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }),
     runId,
     projectDir,
     workflowName: 'e13-fixture',

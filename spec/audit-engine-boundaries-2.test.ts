@@ -10,6 +10,7 @@ import { parse as parseYaml } from 'yaml';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { findAllReady, inspectRealityCheckReachability, runWorkflow, selectRunnableBatch, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { artifacts, producedRead } from './spec_contracts/declared-fixtures.js';
@@ -109,7 +110,7 @@ describe('engine boundary audit probes', () => {
       setFcGlobalDir(join(root, 'home'));
       const projectDir = join(root, 'project');
       mkdirSync(projectDir, { recursive: true });
-      const runId = 'nongate-verdict-fixture';
+      const { runId } = createRun(projectDir, 'fixture', 'name: fixture', ['baseline', 'work']);
       const dir = runDir(projectDir, runId);
       mkdirSync(dir, { recursive: true });
       // A run-local validation baseline exists, but no delta: deltas are recorded
@@ -125,6 +126,9 @@ describe('engine boundary audit probes', () => {
         projectDir, runId,
         stages: { baseline: { status: 'complete' }, work: { status: 'pending' } },
       };
+      writeFileSync(runRecordPath(dir, 'run.json'), JSON.stringify({ ...state,
+        status: 'running', workflowName: 'fixture', startedAt: new Date().toISOString(),
+        briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
       const asStages = (items: unknown[]) => items as Parameters<typeof findAllReady>[0];
       const nonGate = asStages([stage('baseline', { role: 'qa' }), work]);
       expect(findAllReady(nonGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).toContain('work');

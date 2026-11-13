@@ -1,3 +1,4 @@
+import { admittedContract, ContractRefusal } from './brief-admission.js';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { runRecordPath } from './run-layout.js';
@@ -15,7 +16,7 @@ export function recordContinuationRefusal(projectDir: string, runId: string, rea
   try {
     // A refusal is not acceptance of a legacy continuation or a cache repair.
     const snapshot = readRunState(projectDir, runId);
-    if (!hasLifecycleAuthority(snapshot) || snapshot.status === RUN_STATUS.CANCELLED) return;
+    if (!snapshot.briefAdmission?.contract || !hasLifecycleAuthority(snapshot) || snapshot.status === RUN_STATUS.CANCELLED) return;
     updateOperationalRunStateAtPath(runDir(projectDir, runId), state => {
       if (state.status !== RUN_STATUS.CANCELLED) state.continuationFailure = { at: new Date().toISOString(), reason, generation: engineGeneration() };
     });
@@ -25,6 +26,7 @@ export function recordContinuationRefusal(projectDir: string, runId: string, rea
 export function assertContinuationCompatible(projectDir: string, runId: string): StoreState {
   try {
     const state = readRunState(projectDir, runId);
+    admittedContract(state.briefAdmission);
     requireKnownRunStatus(state.status, `continue run ${runId}`);
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('run/project binding mismatch');
     if (state.recovery?.kind === 'blocked') throw new Error(state.recovery.reason);
@@ -81,6 +83,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     if (errors.length) throw new Error(errors.join('; '));
     return state;
   } catch (error) {
+    if (error instanceof ContractRefusal) throw error;
     const reason = `CONTINUATION_INCOMPATIBLE: ${error instanceof Error ? error.message : String(error)}`;
     recordContinuationRefusal(projectDir, runId, reason);
     throw new Error(reason, { cause: error });

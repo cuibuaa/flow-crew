@@ -151,11 +151,10 @@ describe('interrupted runs have a durable outcome without takeover', () => {
 
 describe('declared products are part of gate admission', () => {
   it.each([false, true])('keeps later report ownership distinct from repair wiring (repair=%s)', repair => {
-    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review', 'report']).runId;
+    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review', 'report'], '---\noutputs: [report.md]\n---\n').runId;
     const base = runDir(project, id);
     const stage = (name: string, extra: object) => StageConfigSchema.parse({ id: name, role: 'coder', scope: [], depends_on: [], prompt_template: 'fixture', artifact_contract: { version: 1, produces: [], reads: [] }, ...extra });
     updateRunState(project, id, state => {
-      state.declaredOutputs = [{ path: 'report.md', expectedType: 'file' }];
       state.planControl = { version: 1, capabilities: ['report.md'], stages: [stage('review', { is_gate: true }), stage('report', { scope: ['report.md'], depends_on: ['review'], ...(repair ? { retry_to: ['review'] } : {}) })] };
     });
     writeFileSync(runRecordPath(base, 'verdict_review.json'), '{"pass":true}');
@@ -167,15 +166,17 @@ describe('declared products are part of gate admission', () => {
   });
 
   it('accepts a delivered link object without treating its target as the product', () => {
-    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
-    writeFileSync(runRecordPath(runDir(project, id), 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the report.');
+    const brief = '---\noutputs: [report.md]\n---\n# Goal\nDeliver the report.';
+    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', [], brief).runId;
+    writeFileSync(runRecordPath(runDir(project, id), 'task_brief.md'), brief);
     writeFileSync(join(root, 'outside.md'), 'fixture'); symlinkSync(join(root, 'outside.md'), join(project, 'report.md'));
     writeFileSync(runRecordPath(runDir(project, id), 'verdict_review.json'), '{"pass":true}');
     expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(true);
   });
 
   it('retains declared products and an actual conflicting constraint after frontmatter stripping', () => {
-    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
+    const brief = '---\noutputs: [report.md]\n---\n# Goal\nChange code and tests only.';
+    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', [], brief).runId;
     const configured = configureWorkflowBrief({ name: 'fixture', description: '', defaults: {}, stages: [] }, project, id, runDir(project, id), 1, { resumingExistingRun: false, briefWasAdmitted: false }, '---\noutputs: [report.md]\n---\n# Goal\nChange code and tests only.');
     expect(configured.kind).toBe('configured');
     if (configured.kind !== 'configured') throw new Error('fixture did not configure');
@@ -184,9 +185,10 @@ describe('declared products are part of gate admission', () => {
   });
 
   it.each(['missing', 'wrong-type', 'present'])('checks a required %s output before accepting PASS', kind => {
-    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
+    const brief = '---\noutputs: [report.md]\n---\n# Goal\nDeliver the product and report.\n';
+    const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', [], brief).runId;
     const base = runDir(project, id);
-    writeFileSync(runRecordPath(base, 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the product and report.\n');
+    writeFileSync(runRecordPath(base, 'task_brief.md'), brief);
     writeFileSync(runRecordPath(base, 'verdict_review.json'), '{"pass":true}');
     if (kind === 'present') writeFileSync(join(project, 'report.md'), 'Required product');
     if (kind === 'wrong-type') mkdirSync(join(project, 'report.md'));

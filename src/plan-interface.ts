@@ -68,6 +68,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
   const { admissionError, buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
   const { parseBriefFrontmatter } = await import('./scheduler/sched_admission/brief-contract.js');
   const { extractBriefCriteria } = await import('./brief-criteria.js');
+  const { createBriefAdmission, inspectBrief } = await import('./brief-preflight.js');
   const { inspectDispatchProposal } = await import('./scheduler/sched_policy/dispatch-injection.js');
   const { engineConfigDir } = await import('./config.js');
   let scratch: string | undefined;
@@ -99,6 +100,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       writeFileSync(join(engineDirectory(scratch), '.run-reservation.json'), '{"storageLayout":2}\n');
       mkdirSync(stageWorkPath(scratch));
       writeFileSync(runRecordPath(scratch, 'task_brief.md'), brief);
+      writeFileSync(runRecordPath(scratch, 'run.json'), JSON.stringify({ briefAdmission: createBriefAdmission(inspectBrief(brief), { kind: 'not_required' }) }));
       writeFileSync(runRecordPath(scratch, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
       const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
       if (existsSync(checksPath)) copyFileSync(checksPath, runRecordPath(scratch, 'reality_checks.md'));

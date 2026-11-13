@@ -1,5 +1,7 @@
-import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runRecordPath } from '../src/run-layout.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
@@ -42,11 +44,13 @@ const DEAD_PID = 2_000_000_000;
 const POLL_MS = 25;
 
 let root: string;
+let previousFcHome: string;
 let bin: string;
 let previousPath: string | undefined;
 let parent: ChildProcess | undefined;
 
 beforeEach(() => {
+  previousFcHome = fcGlobalDir();
   root = mkdtempSync(join(tmpdir(), 'fc-shim-'));
   bin = join(root, 'bin');
   mkdirSync(bin);
@@ -56,6 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  setFcGlobalDir(previousFcHome);
   vi.restoreAllMocks();
   if (parent?.exitCode === null) parent.kill('SIGKILL');
   parent = undefined;
@@ -287,11 +292,13 @@ describe('durable portable supervision shim', () => {
   });
 
   it('closes operator cancellation while preserving unknown agent fate and refusing unbound signals', async () => {
+    setFcGlobalDir(root);
     const registry = new TaskRegistry({ baseDir: root });
     const runId = 'lost-shim-run';
     const runPath = join(root, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
     atomicWriteJson(runRecordPath(runPath, 'run.json'), {
+      storageLayout: 2, briefAdmission: createBriefAdmission(inspectBrief('terminal unknown cancellation fixture'), { kind: 'not_required' }),
       runId, projectDir: root, status: 'running', stages: { work: { status: 'running', retries: 0 } },
     });
     const task = registry.create({
@@ -332,7 +339,7 @@ describe('durable portable supervision shim', () => {
     });
     expect(result.message).toContain('may still be running');
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED, completed_at: expect.any(String) });
-    expect(JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf8'))).toMatchObject({
+    expect(JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf8')), result.message).toMatchObject({
       status: 'cancelled', stages: { work: { status: 'failed' } },
     });
     expect(signals.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);

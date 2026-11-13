@@ -77,17 +77,12 @@ objects with unique nonempty IDs and nonempty text. IDs are authored and stable 
 wording changes; the brief hash still binds exact bytes. Planning, gate coverage and discharge
 use only these IDs. Without a declaration there is no machine criterion inventory; stages
 and independent review still judge the complete brief. Headings and lists create no IDs.
-Existing run records and stored criterion artifacts retain their admitted identities,
-including historical slug IDs and illustrative-exclusion metadata. Status, watch, listing
-and UI readers do not run the active brief schema over archives. Continuations retain the
-admitted workflow, metadata and criterion artifact; they do not reinterpret old prose.
-Legacy input paths come from the exact setup verification receipt when available, with a
-read-only decoder that preserves the exact historical path aliases, normalization and
-freezing semantics in older records. Unrelated metadata does not create input authority.
-New runs commit all admitted metadata with a configuration-complete marker; preparation
-interrupted before that commit finishes from the original stored brief bytes, including
-publication of a missing declaration snapshot. Legacy archives without that marker retain
-their admitted interpretation.
+Historical criterion artifacts remain readable, including slug IDs and illustrative-exclusion
+metadata. Active planning, gate coverage, repair and continuation use criteria from the
+hash-checked admission record. Stored projection fields and exported sidecars do not amend
+that record. Interrupted preparation finishes configuration from the original canonical
+declaration. Old runs without a contract hash stay readable but cannot resume; start a new
+admitted run with explicit evidence inputs instead of inferring their contract.
 
 ## Execution and assumptions
 
@@ -95,7 +90,7 @@ The brief's constraints remain text that stages interpret under their existing a
 There is no execution approval contract, declaration, request inbox or decision transport.
 If a stage cannot obtain a resource, it continues as far as possible and names the gap in
 its structured result. Independent gates assess that result; the human reads it at wrap-up.
-Historical authorization frontmatter has no engine meaning.
+Historical authorization frontmatter is refused as an unknown declaration key. State such instructions in the body.
 
 The engineering entry chooser chooses a shape and records `assumptions` in its closed-schema
 result. Those assumptions are retained in the run record and summary. Invalid output fails
@@ -128,15 +123,18 @@ are sent unchanged; an oversized input returns typed `input_too_large` with nume
 Each send uses the smaller of the admitted ceiling and the actual selected adapter's
 configured ceiling, including per-role overrides. Review routing and inline evidence use
 that same owner-resolved number. Brief authorship applies its actual adapter's ceiling and
-any lower declaration before writing input evidence. Resume reads the recorded number;
-legacy admissions without it use the engine's configured number, without reinterpreting
-the archived brief. Status, watch, listing and UI readers require no migration.
+any lower declaration before writing input evidence. Resume reads the checked admitted declaration; an omitted input ceiling uses the engine's
+configured ceiling. Hashless legacy runs remain readable but cannot resume. Status, watch,
+listing and UI readers require no migration.
 
-One strict schema reads only the leading top-level `inputs`, `outputs` and `criteria`
-fields. Other frontmatter contracts have their own readers; arbitrary nested metadata is
-never searched for paths. Inputs are an array of path strings or `{path, frozen?, type?, sha256?}` entries.
+One closed declaration schema, version 1, validates the entire leading mapping before
+any consumer selects a field. Its keys are `inputs`, `outputs`, `criteria`, `validation`,
+`max_continuations`, `stage_duration_ms`, `input_limit_chars`, `terminal_states`,
+`reality_checks` and `research`. Unknown fields, aliases, duplicate YAML keys, YAML aliases,
+null blocks and malformed values refuse the whole brief with `DECLARATION_INVALID` and a
+key path. Omitted read `kind` has the documented value `file` and is recorded in the canonical declaration; omitted output type is `file`, and omitted output disposition is `create` (or input reuse when the same path is an input). These fixed optional semantics do not repair malformed supplied values. Arbitrary nested metadata is never searched for paths. Inputs are an array of path strings or `{path, frozen?, type?, sha256?}` entries.
 The opening delimiter must start at the first byte (after an optional BOM); a leading blank
-line or other whitespace makes the block body prose in admission and configuration alike.
+line or other whitespace makes the block body prose in admission and configuration alike. An exact leading opener requires a closing delimiter; an unclosed block is refused at `$`.
 `type` is `file|directory`; `sha256` is a lowercase 64-digit digest checked against file bytes.
 A supplied hash on a directory is refused. Copy verification also compares source/target hashes.
 Outputs are an array of path strings or `{path, type?, on_existing?}` entries. No field
@@ -152,7 +150,7 @@ criteria:
 ---
 ```
 
-Paths are literal filesystem names. Project-relative directories may have a trailing slash.
+Paths are literal filesystem names. Project-relative directories may have a trailing slash. Paths canonicalize one leading `./` and one trailing `/`; the contract hash uses this canonical form.
 Traversal, surrounding path whitespace and absolute inputs are refused. Relative paths must
 retain their spelling under the engine project-path normalizer; unsupported root spellings
 are schema errors. Punctuation and numeric path components are literal; the engine does not guess whether a string looks like prose or a fraction.
@@ -539,11 +537,25 @@ promises that a model will obey. Keep the detailed contract above authoritative.
 - If FlowCrew is unavailable, stop live work and provide the [public installation recipe](getting-started.md#install-in-a-development-checkout).
   Reason: an unavailable executable cannot establish launch or verification evidence.
 
+
+Admission stores the schema version, canonical declaration, SHA-256 of recursively sorted
+canonical JSON (including the version), SHA-256 of the exact UTF-8 brief bytes, and those
+exact bytes in the durable run record. Body edits and deletion/replacement of exported brief
+files never amend obligations. Resume, recovery, gate and repair verify the recorded hash.
+Old runs without the hash remain readable but resume refuses `contract_hash_missing`; retain
+the parked run as evidence and start a new admitted run referencing its evidence explicitly.
+A changed brief can still be continued after `--acknowledge-brief-warnings=<digest>` (or the
+existing current-input acknowledgement). That recorded acknowledgement binds the new exact
+digest and model instructions; the original machine-enforced contract remains frozen.
+Optional omissions have their documented semantics: no declared limits, no checks/terminal
+entries, mutable inputs, create/file outputs, and file reads. Supplied malformed values never
+select those omissions. Check parameter objects and recursive inline JSON schemas are closed;
+only explicit environment/properties maps and JSON enum values carry arbitrary keys/data.
+
 ## Terminal artifacts
 
 `terminal_states` maps a known terminal run status to a path string, path list or object with
-`paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
-with diagnostics. Engineering terminal acceptance belongs to the terminal evaluator: the artifact must
+`paths`. The singular `path` key and unknown or nonterminal status keys are refused. Declare only whole-run terminal products. Engineering terminal acceptance belongs to the terminal evaluator: the artifact must
 be present with content different from its launch baseline, required work must settle, and the
 effective independent gate outcomes must pass. Authorized authors, repairs and other authorized
 stages can produce it; a stage's write ledger does not prove publication. Touching or rewriting
@@ -563,7 +575,7 @@ Historical records without a
 content baseline retain their original timestamp interpretation for readers and continuation.
 
 An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
-(entry-level wins over floor-level). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
+(entry level only; `floor.stage_glob` is refused). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
 matching the declared evidence pattern. Result checks determine whether those receipts prove the outcome; file length does not.
 Research reports are engine-owned and stopping is determined by the declared search budget.
 For engineering, with an attempted-stage floor satisfied,
@@ -571,7 +583,7 @@ wall time is advisory; without it, wall time can be the sole floor. Use substant
 and criteria rather than elapsed time as evidence of work.
 
 `post_terminate_hook` accepts `command`, optional string-array `args`, positive
-`timeout_seconds` and string-valued `env`. It runs after terminal commit under the command
+`timeout_seconds` (at least 0.001 and at most 2147483.647 seconds, the timer range) and string-valued `env`. It runs after terminal commit under the command
 boundary, waiting for completion unless `timeout_seconds` is declared, with `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
 `FC_PROJECT_DIR`, `FC_RUN_ID` defaulting to the committed terminal context; explicit hook
 `env` can override them. An exhausted declared allowance is recorded as unfinished; a completed failure is
@@ -585,9 +597,8 @@ Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts
 ## Deterministic checks
 
 Declare `reality_checks` as an array in leading frontmatter. Markdown headings and body
-examples create no executable checks, even when headed `## Reality checks`. Existing
-admitted legacy runs retain their original checks. The scheduler also consumes its admitted
-planner check snapshot. Each check supplies
+examples create no executable checks, even when headed `## Reality checks`. Hashless historical runs stay readable but cannot execute checks or resume. The scheduler
+also consumes its admitted planner check snapshot. Each check supplies
 `name`, `type`, `reads` (explicitly empty if it has no file inputs), `params`, and optional
 `advisory: true`. Rooted reads follow [agent protocol](agent-protocol.md#artifact-locations).
 Typed handler file parameters must agree with declared reads; shell text is not parsed to
@@ -595,7 +606,7 @@ discover every dynamic read.
 
 | Type | Parameters |
 |---|---|
-| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` (no duration limit when omitted) |
+| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` from 1 through 2147483.647 (no duration limit when omitted) |
 | `file-exists-nonempty` | `paths` list or `{from_manifest, field}` |
 | `json-schema-match` | `file`, `schema` object or schema-file reference |
 
@@ -658,4 +669,4 @@ reality_checks:
 ---
 ```
 
-Legacy archives without a setup receipt retain mutable and frozen input identities through a read-only compatibility decoder. That decoder does not admit new briefs or confer new output authority.
+Historical artifacts remain inspectable as evidence. The runtime does not recover input identities from legacy aliases, setup receipt presence or current brief files; a hashless run needs a new admission under a new run identity.

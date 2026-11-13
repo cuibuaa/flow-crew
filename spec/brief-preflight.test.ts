@@ -30,7 +30,7 @@ describe('shared brief preflight', () => {
     }
   });
 
-  it('reports absent, valid, and invalid frontmatter while keeping findings overridable', () => {
+  it('reports absent, valid, and invalid frontmatter and refuses invalid admission', () => {
     const absent = inspectBrief('# Goal\nDo the work.\n## Requirements\n1. Produce the declared deliverable.');
     expect(absent.frontmatter.status).toBe('absent');
     expect(absent.contractReady).toBe(true);
@@ -44,8 +44,7 @@ describe('shared brief preflight', () => {
     const invalid = inspectBrief('---\nterminal_states: [\n---\n# Goal');
     expect(invalid.frontmatter.status).toBe('invalid');
     expect(invalid.contractReady).toBe(false);
-    const admitted = createBriefAdmission(invalid, { kind: 'not_required' });
-    expect(verifyBriefAdmission('---\nterminal_states: [\n---\n# Goal', admitted).status).toBe('valid');
+    expect(() => createBriefAdmission(invalid, { kind: 'not_required' })).toThrow('DECLARATION_INVALID: terminal_states');
   });
 
   it('digests exact UTF-8 bytes, including BOM, CRLF, and trailing newlines', () => {
@@ -113,7 +112,7 @@ describe('brief finding actionability', () => {
     ];
     const expectedCodes = [
       'frontmatter_invalid',
-      'research_policy_invalid', 'terminal_states_missing',
+      'terminal_states_missing',
     ];
     for (const code of expectedCodes) {
       const finding = reports.flatMap(({ findings }) => findings).find((candidate) => candidate.code === code);

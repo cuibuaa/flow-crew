@@ -122,10 +122,12 @@ describe('structural engine state protection', () => {
     'validation_delta_review.json', 'verdict_review.json', 'summary.md', 'goal_met.json',
     'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
-    const path = runRecordPath(run, local); write(path);
+    const path = runRecordPath(run, local);
+    if (local !== 'run.json') write(path);
+    const before = readFileSync(path, 'utf8');
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));
     // recorded-before-published: restore the authoritative log together with caches.
-    expect(readFileSync(path, 'utf8')).toBe('engine record');
+    expect(readFileSync(path, 'utf8')).toBe(before);
   });
 
   it('voids a repair stage creating probe files under an engine-owned evidence carrier', async () => {
@@ -445,8 +447,11 @@ describe('structural engine state protection', () => {
   });
 
   it('voids a late external hardlink write after dispatch without scanning the output directory', async () => {
-    const output = join(root, 'external'), carrier = runRecordPath(run, 'verdict_previous.json'), alias = join(output, 'late-alias');
-    write(carrier); write(runRecordPath(run, 'task_brief.md'), `---\noutputs:\n  - path: ${JSON.stringify(output)}\n    type: directory\n---\n# Goal\nWrite results.\n`);
+    const output = join(root, 'external');
+    const brief = `---\noutputs:\n  - path: ${JSON.stringify(output)}\n    type: directory\n---\n# Goal\nWrite results.\n`;
+    run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], brief).runDirPath;
+    const carrier = runRecordPath(run, 'verdict_previous.json'), alias = join(output, 'late-alias');
+    write(carrier); write(runRecordPath(run, 'task_brief.md'), brief);
     await voided(() => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');console.log('ready');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(alias)})){clearInterval(timer);fs.writeFileSync(${JSON.stringify(alias)},'counterfeit');}},5);`], '', {
       cwd: project, timeout_ms: 5000, onStdout(text) { if (text.includes('ready')) linkSync(carrier, alias); },
     }));
@@ -699,7 +704,9 @@ describe('structural engine state protection', () => {
 
   it('refuses an external output containing a future registered engine database', async () => {
     const output=join(root,'external');registerEngineOwnedSqlitePath(join(output,'future.sqlite'));
-    write(runRecordPath(run,'task_brief.md'),`---\noutputs:\n  - path: ${output}\n    type: directory\n---\n# Goal\nProduce results.\n`);
+    const brief = `---\noutputs:\n  - path: ${output}\n    type: directory\n---\n# Goal\nProduce results.\n`;
+    run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], brief).runDirPath;
+    write(runRecordPath(run,'task_brief.md'), brief);
     await expect(withEngineIntegrity(input(),async()=>{})).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
   });
 

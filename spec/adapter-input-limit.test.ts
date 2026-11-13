@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import * as inputOwner from '../src/adapter-input.js';
+import { DeclarationRefusal } from '../src/brief-declarations.js';
 import { loadEngineDefaults } from '../src/config.js';
 import { runStage, type StageOpts } from '../src/worker.js';
 import { stageRecordSchema } from '../src/handoff.js';
@@ -81,8 +82,7 @@ const paths = ['ordinary', 'gate', 'planner', 'successor', 'isolated-shape', 'is
 type SendingPath = typeof paths[number];
 
 async function worker(path: SendingPath, limit = 500_000, capturesInvocationInput = false) {
-  const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
-  updateRunState(project, created.runId, state => { state.inputLimitChars = limit; });
+  const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], `---\ninput_limit_chars: ${limit}\n---\n`);
   const time = clock(), seen: Array<{ prompt: string; system: string }> = [];
   const adapter: Adapter = { sessionKind: 'codex', capturesInvocationInput, async run(prompt, agent, opts) {
     seen.push({ prompt, system: agent.prompt });
@@ -158,7 +158,9 @@ describe('pre-admission brief writer', () => {
     const run = vi.fn<Adapter['run']>();
     const brief = `---\ninput_limit_chars: ${JSON.stringify(declared)}\n---\nTask`;
     await expect(writeTaskBrief(brief, { projectDir: project, adapter: 'mock', role, adapterInstance: { sessionKind: 'codex', run } }))
-      .rejects.toMatchObject({ declaredLimit: declared, engineLimit: inputOwner.adapterInputLimit({ sessionKind: 'codex' }) });
+      .rejects.toMatchObject(typeof declared === 'number' && declared > 0 && Number.isSafeInteger(declared)
+        ? { declaredLimit: declared, engineLimit: inputOwner.adapterInputLimit({ sessionKind: 'codex' }) }
+        : { code: 'declaration_invalid', keyPath: 'input_limit_chars' });
     expect(run).not.toHaveBeenCalled(); expect(existsSync(join(fcGlobalDir(), 'brief-writing'))).toBe(false);
   });
 
@@ -214,15 +216,17 @@ describe('admitted numeric contract and resume', () => {
     const before = listRuns(project);
     let error: unknown;
     try { prepareWorkflowLaunch(workflow, '', project, undefined, brief, undefined, engine); } catch (value) { error = value; }
-    expect(error).toBeInstanceOf(inputOwner.InputLimitDeclarationError);
-    expect(error).toMatchObject({ code: 'input_limit_declaration', declaredLimit: declared, engineLimit: engine });
+    if (typeof declared === 'number' && declared > 0 && Number.isSafeInteger(declared)) {
+      expect(error).toBeInstanceOf(inputOwner.InputLimitDeclarationError);
+      expect(error).toMatchObject({ code: 'input_limit_declaration', declaredLimit: declared, engineLimit: engine });
+    } else { expect(error).toBeInstanceOf(DeclarationRefusal); expect(error).toMatchObject({ code: 'declaration_invalid', keyPath: 'input_limit_chars' }); }
     expect(listRuns(project)).toEqual(before);
   });
 
   it.each([false, true])('resume reads the persisted number, or engine configuration for a legacy admission (legacy=%s)', async legacy => {
     setEngineDefaults({ adapter_input_limit_chars: { codex: 333_333, claude: 333_333 } });
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'fixture', scope: [] }] });
-    const created = createRun(project, 'fixture', JSON.stringify(workflow), ['work']);
+    const created = createRun(project, 'fixture', JSON.stringify(workflow), ['work'], legacy ? '' : '---\ninput_limit_chars: 123456\n---\n');
     updateRunState(project, created.runId, state => {
       state.taskDescription = '---\ninput_limit_chars: invalid-old-value\n---\nAdmitted task';
       state.status = 'failed';
@@ -241,15 +245,15 @@ describe('admitted numeric contract and resume', () => {
 
   it.each(['.nan', '.inf', '-.inf', '9007199254740992'])('refuses non-finite or unsafe declared number %s', number => {
     expect(() => inputOwner.admitInputLimit(`---\ninput_limit_chars: ${number}\n---\nTask`, 500_000))
-      .toThrow(inputOwner.InputLimitDeclarationError);
+      .toThrow(DeclarationRefusal);
   });
 
   it('retains invalid numeric and cyclic declaration values in typed admission diagnostics', () => {
-    for (const [yaml, display] of [['.nan', 'NaN'], ['.inf', 'Infinity'], ['&cycle {value: *cycle}', 'Circular']]) {
+    for (const yaml of ['.nan', '.inf', '&cycle {value: *cycle}']) {
       let error: unknown;
       try { inputOwner.admitInputLimit(`---\ninput_limit_chars: ${yaml}\n---\nTask`, 500_000); } catch (value) { error = value; }
-      expect(error).toBeInstanceOf(inputOwner.InputLimitDeclarationError);
-      expect(error).toMatchObject({ engineLimit: 500_000, message: expect.stringContaining(display) });
+      expect(error).toBeInstanceOf(DeclarationRefusal);
+      expect(error).toMatchObject({ code: 'declaration_invalid', keyPath: expect.stringMatching(/^input_limit_chars(?:\.value)?$/) });
     }
   });
 
@@ -260,8 +264,7 @@ describe('admitted numeric contract and resume', () => {
     const load = vi.spyOn(adapterLoader, 'loadAdapterByName').mockResolvedValue(selected);
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 1, max_retries: 2 },
       stages: [{ id: 'work', role: 'fixture', scope: [], prompt_template: 'P'.repeat(160_000), artifact_contract: contract }] });
-    const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
-    updateRunState(project, created.runId, state => { state.inputLimitChars = 250_000; });
+    const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], '---\ninput_limit_chars: 250000\n---\n');
     await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
       { sessionKind: 'codex', run }, new Map([['fixture', { ...role, adapter: 'claude' }]]), project,
       new Map([['fixture', { name: 'fixture', description: '' }]]), new Map());
@@ -276,8 +279,7 @@ describe('admitted numeric contract and resume', () => {
     gitProject(); writeFileSync(join(project, 'change.txt'), 'D'.repeat(50_000));
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'assess', role: 'fixture', scope: [], artifact_contract: contract,
       decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } }] });
-    const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess']);
-    updateRunState(project, created.runId, state => { state.inputLimitChars = 100_000; });
+    const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], '---\ninput_limit_chars: 100000\n---\n');
     const run = vi.fn<Adapter['run']>();
     await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
       { sessionKind: 'codex', run }, new Map([['fixture', role]]), project,
@@ -318,7 +320,7 @@ describe('admitted numeric contract and resume', () => {
     const load = vi.spyOn(adapterLoader, 'loadAdapterByName').mockResolvedValue(selected);
     const send = vi.spyOn(inputOwner, 'runAdapter');
     async function assess(limit: number) {
-      const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess']);
+      const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], `---\ninput_limit_chars: ${limit}\n---\n`);
       updateRunState(project, created.runId, state => { state.inputLimitChars = limit; state.taskDescription = 'T'.repeat(700_000); });
       await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
         override ? { sessionKind: 'claude', run } : selected, new Map([['fixture', override ? { ...role, adapter: 'codex' } : role]]), project,
@@ -349,7 +351,7 @@ describe('admitted numeric contract and resume', () => {
     'persists the limit with the admitted $status resume transition (recorded=$recorded)', ({ status, recorded }) => {
       const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 3 },
         stages: [{ id: 'work', role: 'fixture', scope: [], artifact_contract: contract }] });
-      const created = createRun(project, workflow.name, JSON.stringify(workflow), ['work']);
+      const created = createRun(project, workflow.name, JSON.stringify(workflow), ['work'], recorded ? '---\ninput_limit_chars: 123456\n---\n' : '');
       updateRunState(project, created.runId, state => {
         state.status = status; state.currentIteration = 1; state.maxIterations = 3;
         state.completedAt = '2030-01-01T00:00:00Z';
@@ -368,7 +370,7 @@ describe('admitted numeric contract and resume', () => {
   it.each([false, true])('keeps a sibling-blocked parked admission byte exact (recorded=%s)', recorded => {
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 3 },
       stages: [{ id: 'work', role: 'fixture', scope: [], artifact_contract: contract }] });
-    const created = createRun(project, workflow.name, JSON.stringify(workflow), ['work']);
+    const created = createRun(project, workflow.name, JSON.stringify(workflow), ['work'], recorded ? '---\ninput_limit_chars: 123456\n---\n' : '');
     updateRunState(project, created.runId, state => {
       state.status = 'parked'; state.taskDescription = 'Previously admitted'; state.currentIteration = 1; state.maxIterations = 3;
       state.parked = { requestId: 'fixture', action: 'deploy', target: 'project', reason: 'Fixture', atIteration: 1,

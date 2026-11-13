@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Orchestrator } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { engineValidation } from '../src/engine-validation.js';
 import { runProjectCommand, projectValidationResult, parseBriefValidationCommands, parseValidationCommands, type ValidationCommand } from '../src/project-validation.js';
 import * as validationOwner from '../src/project-validation.js';
@@ -16,7 +15,7 @@ import { createRun } from './test-support/create-run.js';
 import * as recorderOwner from '../src/recorded-command.js';
 import { assessFindings } from '../src/scoped-audit-repair.js';
 import { loadWorkflow, runWorkflow, snapshotShipSetupValidationBaseline } from '../src/scheduler.js';
-import { runDir, fcGlobalDir, readStageStatus, updateRunState } from '../src/store.js';
+import { runDir, fcGlobalDir, readRunState, readStageStatus, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import * as evidenceOwner from '../src/evidence-ledger.js';
 import { captureProjectTree, projectValidationFact, validationBatch, readEvidence, type ValidationFact } from '../src/evidence-ledger.js';
@@ -448,8 +447,7 @@ describe('scheduler owns validation after author settlement', () => {
       const registry = new TaskRegistry({ baseDir: project() });
       const brief = readFileSync(runRecordPath(runDir(root, final.runId), 'task_brief.md'), 'utf8');
       const task = registry.create({ projectDir: root, run_id: final.runId, status: 'stuck', brief_text: brief,
-        brief_admission: createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() }) });
-      updateRunState(root, final.runId, current => { current.briefAdmission = task.brief_admission; });
+        brief_admission: readRunState(root, final.runId).briefAdmission });
       const orchestrator = new Orchestrator({ registry, isProjectBusy: () => null });
       try {
         expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', run_id: final.runId, defer_kind: 'wait' });
@@ -531,7 +529,7 @@ describe('the project declares its validation limits', () => {
     ['attempts: 2.5', 'attempts'], ['attempts: null', 'attempts'], ['retries: 2', 'retries'],
   ])('declared-limits: refuses %s by field name', (field, name) => {
     const parsed = parseBriefValidationCommands(brief(`{commands: ${command}, ${field}}`), 'brief.md');
-    expect(parsed.error).toContain('Invalid validation declaration'); expect(parsed.error).toContain(name);
+    expect(parsed.error).toContain('DECLARATION_INVALID'); expect(parsed.error).toContain(`validation.${name}`);
     expect(parsed.commands).toEqual([]);
   });
 
@@ -549,9 +547,11 @@ describe('the project declares its validation limits', () => {
 
   describe('project and brief limits meet in the run plan', () => {
     const plan = (projectDeclaration: object | undefined, validation?: string) => {
-      const root = project(), base = join(root, 'run'); mkdirSync(join(root, 'config'), { recursive: true }); mkdirSync(base);
+      const root = project(); mkdirSync(join(root, 'config'), { recursive: true });
+      const exactBrief = validation === undefined ? 'Deliver the value.' : brief(validation);
+      const { runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', [], exactBrief);
       if (projectDeclaration) writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: 'node', args: ['check.cjs'] } }, ...projectDeclaration }));
-      return snapshotShipSetupValidationBaseline(root, validation === undefined ? 'Deliver the value.' : brief(validation), base);
+      return snapshotShipSetupValidationBaseline(root, exactBrief, base);
     };
     it('declared-limits: project limits are used when the brief states none', () => {
       const result = plan({ timeoutMs: 1_800_000, attempts: 2 });

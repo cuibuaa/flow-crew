@@ -814,6 +814,8 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
         external(declaration, project, fs, { engineRoot: join(root, 'engine'), ...context }));
       const output = join(root, 'results'); mkdirSync(output);
       const brief = `---\noutputs: [{path: ${JSON.stringify(output)}, type: directory}]\n---\nRetain the declared output.`;
+      ({ runId, runDirPath: directory } = createRun(project, 'grant-fixture', 'name: grant-fixture\nstages: []\n', ['left', 'right'], brief));
+      contract = readRunState(project, runId).writeGrant!;
       writeBriefCriteriaArtifact(directory, brief);
       const isolated = kind === 'isolated-decision', gate = kind === 'gate';
       const author = !isolated && !gate;

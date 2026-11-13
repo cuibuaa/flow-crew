@@ -10,7 +10,7 @@ import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { runStateContext } from '../src/run-state-access.js';
 import { readGateEvaluation } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
@@ -18,7 +18,6 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'stage-write-contract-'));
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review']));
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
@@ -27,7 +26,8 @@ const stageOptions = () => ({ stageId: 'review', role, dependsOn: [], promptTemp
 outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } });
 const delivered = () => ({ output: JSON.stringify({ status: 'delivered', summary: 'Reviewed', files_modified: [], checks: [], caveats: [] }), exitCode: 0, duration_ms: 1 });
 function declare(path = 'report.md', expectedType: 'file' | 'directory' = 'file') {
-  updateRunState(project, runId, state => { state.declaredOutputs = [{ path, expectedType }]; });
+  const brief = `---\n${JSON.stringify({ outputs: [{ path, type: expectedType }] })}\n---\nReview the required project products.`;
+  ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review'], brief));
   writeFileSync(runRecordPath(directory, 'verdict_review.json'), '{"pass":true}');
 }
 const verdict = () => readGateEvaluation(project, 'review', runId, undefined, false);
@@ -41,7 +41,8 @@ describe('stage writes follow the run product contract', () => {
       observed = true;
       expect(prompt).toContain('Remove report.md');
       expect(prompt).toContain('Required declared outputs (current engine facts)');
-      expect(prompt).toContain('"path":"report.md","expectedType":"file","available":true');
+      const facts = JSON.parse(prompt.split('# Required declared outputs (current engine facts)\n')[1].split('\n')[0]);
+      expect(facts).toContainEqual(expect.objectContaining({ path: 'report.md', expectedType: 'file', available: true }));
       expect(prompt.lastIndexOf('Guidance cannot remove these obligations')).toBeGreaterThan(prompt.indexOf('Remove report.md'));
       return delivered();
     } };

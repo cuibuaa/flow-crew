@@ -1,11 +1,10 @@
-import { ArtifactPathSchema } from '../../artifact-location.js';
-import { ResearchInstrumentSchema, RESEARCH_PROTOCOL } from '../../research-instrument.js';
+import { DeclarationRefusal, parseBriefDeclarations, type BriefDeclarations } from '../../brief-declarations.js';
 import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
-import { type TerminalStatesConfig, type ResearchConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
+import { type TerminalStatesConfig, type ResearchConfig, type TerminalStateEntry, type StoreState } from '../../store.js';
 import { join } from 'node:path';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { type BriefOutputDeclaration, extractBriefOutputDeclarations } from '../../ship-inputs.js';
+import { type BriefOutputDeclaration, outputsFromDeclarations } from '../../ship-inputs.js';
 import { log } from './shared.js';
 
 export interface ParsedBriefFrontmatter {
@@ -18,6 +17,7 @@ export interface ParsedBriefFrontmatter {
   outputs?: BriefOutputDeclaration[];
   stripped: string;
   frontmatterError?: string;
+  declarationRefusal?: DeclarationRefusal;
   frontmatterErrorKind?: BriefFrontmatterDocument['errorKind'];
 }
 
@@ -28,115 +28,37 @@ export function entryWorkflow(parsed: ParsedBriefFrontmatter): { workflow: strin
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  // Retain the public parser's legacy diagnostic; entry-point admission uses
-  // the shared document boundary, where an unclosed opener is body prose.
-  if (!frontmatter) return /^(?:\uFEFF)?---\r?\n/.test(brief)
-    ? { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' }
-    : { stripped: brief };
-  if (frontmatter.error) return { stripped: brief, frontmatterError: frontmatter.error, frontmatterErrorKind: frontmatter.errorKind };
-  const parsed = frontmatter.value ?? {};
-  const stripped = frontmatter.body;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
-  const out: ParsedBriefFrontmatter = { stripped };
-  const continuations = (parsed as Record<string, unknown>).max_continuations;
-  if (continuations !== undefined) {
-    if (!Number.isSafeInteger(continuations) || Number(continuations) < 0) return { stripped,
-      frontmatterError: 'max_continuations must be a finite nonnegative integer', workflowError: 'max_continuations must be a finite nonnegative integer' };
-    out.maxContinuations = Number(continuations);
+  const document = parseBriefFrontmatterDocument(brief);
+  const stripped = document?.body ?? brief;
+  try {
+    const declaration = parseBriefDeclarations(brief);
+    return { ...declarationConfiguration(declaration, stripped), stripped };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { stripped, ...(error instanceof DeclarationRefusal ? { declarationRefusal: error } : {}), frontmatterError: reason, frontmatterErrorKind: document?.errorKind ?? 'yaml', workflowError: reason };
   }
-  try { out.outputs = extractBriefOutputDeclarations(brief); }
-  catch (error) {
-    const reason = String(error);
-    return { stripped, frontmatterError: reason, workflowError: reason };
-  }
+}
 
-  // Active inputs have one strict contract. Historical run JSON is read separately.
-  const resRaw = Object.hasOwn(parsed, 'research') ? (parsed as Record<string, unknown>).research : (parsed as Record<string, unknown>).objective;
-  const duplicate = Object.hasOwn(parsed, 'research') && Object.hasOwn(parsed, 'objective');
-  if (resRaw !== undefined || duplicate) {
-    const parsedResearch = ResearchInstrumentSchema.safeParse(resRaw);
-    if (duplicate || Object.hasOwn(parsed, 'objective') || !parsedResearch.success) {
-      out.researchPolicyError = `Declare ${RESEARCH_PROTOCOL} in research; legacy research briefs are not reinterpreted. ${duplicate ? 'Declare research once.' : parsedResearch.error?.message ?? 'The objective alias is retired.'}`;
-      out.workflowError = out.researchPolicyError;
-    } else out.research = parsedResearch.data;
-  }
-
-  const raw = (parsed as Record<string, unknown>).terminal_states;
-  if (!raw || typeof raw !== 'object') return out;
+/** Project only a declaration already checked by the shared schema/hash boundary. */
+export function declarationConfiguration(declaration: BriefDeclarations, brief = ''): ParsedBriefFrontmatter {
   const ts: TerminalStatesConfig = {};
-  for (const [status, val] of Object.entries(raw as Record<string, unknown>)) {
-    // Only a REAL terminal status may be declared here. Without this check a
-    // brief could declare e.g. `terminal_states: { parked: ... }` and the
-    // terminal gate would blind-cast it into run.json WITH completedAt while
-    // every terminal guard reports false — an agent-reachable way to forge a
-    // zombie run that no consumer treats as finished or alive.
-    if (!isTerminalRunStatus(status)) {
-      log.warn({ status, allowed: TERMINAL_STATUSES }, 'terminal_states declares a non-terminal status — ignoring that key');
-      continue;
-    }
-    let entry: TerminalStateEntry | null = null;
-    if (typeof val === 'string') entry = { paths: [val] };
-    else if (Array.isArray(val)) {
-      const paths = val.filter((x): x is string => typeof x === 'string');
-      if (paths.length > 0) entry = { paths };
-    } else if (val && typeof val === 'object') {
-      const v = val as Record<string, unknown>;
-      const paths = Array.isArray(v.paths)
-        ? (v.paths as unknown[]).filter((x): x is string => typeof x === 'string')
-        : typeof v.path === 'string' ? [v.path] : [];
-      if (paths.length === 0) continue;
-      entry = { paths };
-      if (v.floor && typeof v.floor === 'object') {
-        const f = v.floor as Record<string, unknown>;
-        entry.floor = {};
-        if (typeof f.min_attempted_stages === 'number') entry.floor.minAttemptedStages = f.min_attempted_stages;
-        if (typeof f.min_wall_minutes === 'number') entry.floor.minWallMinutes = f.min_wall_minutes;
-        // stage_glob is logically a floor parameter, so accept it INSIDE the
-        // floor block (the intuitive placement). Entry-level placement below
-        // takes precedence if both are present (entry level is canonical).
-        if (typeof f.stage_glob === 'string') entry.stageGlob = f.stage_glob;
-      }
-      if (typeof v.stage_glob === 'string') entry.stageGlob = v.stage_glob;
-      // post_terminate_hook: optional command to run after this terminal state
-      // is committed — used for chaining into the next phase of a multi-phase
-      // research program. See PostTerminateHook docs in store.ts.
-      if (v.post_terminate_hook && typeof v.post_terminate_hook === 'object') {
-        const h = v.post_terminate_hook as Record<string, unknown>;
-        if (typeof h.command === 'string' && h.command.length > 0) {
-          const hook: PostTerminateHook = { command: h.command };
-          if (Array.isArray(h.args)) {
-            hook.args = (h.args as unknown[]).filter((x): x is string => typeof x === 'string');
-          }
-          if (typeof h.timeout_seconds === 'number' && h.timeout_seconds > 0) {
-            hook.timeoutSeconds = h.timeout_seconds;
-          }
-          if (h.env && typeof h.env === 'object') {
-            const envIn = h.env as Record<string, unknown>;
-            const envOut: Record<string, string> = {};
-            for (const [k, vv] of Object.entries(envIn)) {
-              if (typeof vv === 'string') envOut[k] = vv;
-            }
-            if (Object.keys(envOut).length > 0) hook.env = envOut;
-          }
-          entry.postTerminateHook = hook;
-        }
-      }
-    }
-    if (entry) ts[status] = entry;
+  for (const [status, value] of Object.entries(declaration.terminal_states ?? {})) {
+    if (value === undefined) continue;
+    const entry = typeof value === 'string' ? { paths: [value] } : Array.isArray(value) ? { paths: value } : value;
+    ts[status as keyof TerminalStatesConfig] = {
+      paths: entry.paths,
+      ...('floor' in entry && entry.floor ? { floor: {
+        minAttemptedStages: entry.floor.min_attempted_stages, minWallMinutes: entry.floor.min_wall_minutes,
+      } } : {}),
+      ...('stage_glob' in entry ? { stageGlob: entry.stage_glob } : {}),
+      ...('post_terminate_hook' in entry && entry.post_terminate_hook ? { postTerminateHook: {
+        command: entry.post_terminate_hook.command, args: entry.post_terminate_hook.args,
+        timeoutSeconds: entry.post_terminate_hook.timeout_seconds, env: entry.post_terminate_hook.env,
+      } } : {}),
+    };
   }
-  if (out.research) {
-    const roots = [...out.research.frozen, ...out.research.candidate];
-    const reports = Object.values(ts).flatMap(entry => entry.paths);
-    const invalid = reports.find(path => !ArtifactPathSchema.safeParse(path).success
-      || roots.some(root => path === root || path.startsWith(root + '/') || root.startsWith(path + '/')));
-    if (invalid !== undefined) {
-      out.workflowError = out.researchPolicyError = `Research terminal report ${JSON.stringify(invalid)} must be a confined file outside frozen and candidate roots.`;
-      delete out.research;
-    }
-  }
-  if (Object.keys(ts).length > 0) out.terminalStates = ts;
-  return out;
+  return { stripped: brief, maxContinuations: declaration.max_continuations, research: declaration.research,
+    outputs: outputsFromDeclarations(declaration, brief), ...(Object.keys(ts).length ? { terminalStates: ts } : {}) };
 }
 
 export function evaluateTerminalFloor(

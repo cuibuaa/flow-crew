@@ -58,7 +58,7 @@ describe('snapshot comparison and frozen-content reconciliation', () => {
     const target = join(projectDir, 'model.bin');
     const original = Buffer.alloc(4 * 1024 * 1024, 0x41);
     writeFileSync(target, original);
-    const created = createRun(projectDir, 'ignored-content', 'name: ignored-content', ['writer']);
+    const created = createRun(projectDir, 'ignored-content', 'name: ignored-content', ['writer'], '---\ninputs: [{path: model.bin, frozen: true}]\n---\n');
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: model.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
     try {
@@ -89,7 +89,7 @@ describe('snapshot comparison and frozen-content reconciliation', () => {
     mkdirSync(projectDir, { recursive: true });
     const target = join(projectDir, 'weights.bin');
     writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, 0x23));
-    const created = createRun(projectDir, 'metadata-control', 'name: metadata-control', ['writer']);
+    const created = createRun(projectDir, 'metadata-control', 'name: metadata-control', ['writer'], '---\ninputs: [{path: weights.bin, frozen: true}]\n---\n');
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: weights.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(projectDir, [stage('weights.bin')], { runDirPath: created.runDirPath });
     try {

@@ -50,7 +50,7 @@ const genericStructured = '---\ninputs: [{path: notes.md, frozen: true}]\noutput
 
 async function author(brief: string, restore = false) {
   const stage = StageConfigSchema.parse({ id: 'author', role: 'coder', scope: ['report.md'] });
-  const { runId, runDirPath } = createRun(project, 'frozen-field', 'name: fixture\nstages: []\n', ['author']);
+  const { runId, runDirPath } = createRun(project, 'frozen-field', 'name: fixture\nstages: []\n', ['author'], brief);
   directory = runDirPath;
   writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   let calls = 0;
@@ -96,6 +96,7 @@ it.each([['literal', proseOnly], ['generic', genericProse]])('keeps prose-only p
 
 it.each([['literal', structured], ['generic', genericStructured]])('recheck declared freeze plus explanatory prose launches, catches changed bytes and restores them (%s)', async (_shape, brief) => {
   expect(resolveImmutableEvidenceBindings(project, brief).map(input => input.path)).toEqual(['notes.md']);
+  expect(() => resolveImmutableEvidenceBindings(project, '---\ninputs: [notes.md, {path: notes.md, frozen: true}]\n---\n')).toThrow('inputs.1.path');
   const report = inspectBrief(brief);
   expect(report.contractReady).toBe(true);
   const result = await author(brief);
@@ -133,6 +134,7 @@ it('freezes only strict structured true, never notes, strings or prose-shaped fi
     const parsed = parseBriefInputs(`---\ninputs: [{path: notes.md, frozen: ${value}}]\n---`);
     expect(parsed.unresolvedInputs).toContainEqual(expect.objectContaining({ reason: expect.stringContaining('frozen') }));
   }
-  const brief = '---\ninputs: [notes.md, {path: notes.md, frozen: true}, {path: evidence, frozen: false}]\n---\nNever freeze `notes.md`.';
+  const brief = '---\ninputs: [{path: notes.md, frozen: true}, {path: evidence, frozen: false}]\n---\nNever freeze `notes.md`.';
   expect(resolveImmutableEvidenceBindings(project, brief).map(input => input.path)).toEqual(['notes.md']);
+  expect(() => resolveImmutableEvidenceBindings(project, '---\ninputs: [notes.md, {path: notes.md, frozen: true}]\n---\n')).toThrow('inputs.1.path');
 });

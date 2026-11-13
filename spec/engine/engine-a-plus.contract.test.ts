@@ -97,7 +97,7 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
     const brief = ['---', 'just a scalar string', '---', '# body'].join('\n');
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeDefined();
-    expect(out.frontmatterError).toMatch(/not a YAML mapping/i);
+    expect(out.frontmatterError).toContain('DECLARATION_INVALID: $:');
   });
 
   it('does NOT set frontmatterError for a brief with NO frontmatter at all', () => {
@@ -107,23 +107,22 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
   });
 
   it('does NOT set frontmatterError for valid frontmatter (no false positive)', () => {
-    const brief = ['---', 'research:', '  baseline: 1.0', '  policy: greedy_stack', '---', '# body'].join('\n');
+    const brief = ['---', 'outputs: [report.md]', '---', '# body'].join('\n');
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeUndefined();
     expect(out.research).toBeUndefined();
-    expect(out.workflowError).toContain('research-instrument/v1');
+    expect(out.workflowError).toBeUndefined();
   });
 
-  it('refuses the retired A+(a) research.confirm block with migration guidance', () => {
+  it('refuses the retired A+(a) research.confirm block through the shared schema', () => {
     const brief = [
       '---', 'research:', '  baseline: 1.0', '  policy: greedy_stack',
       '  confirm:', '    command: ./scripts/reconfirm.sh', '    requires: beat on a fresh split', '    timeout_seconds: 120',
       '---', '# body',
     ].join('\n');
     const out = parseBriefFrontmatter(brief);
-    expect(out.frontmatterError).toBeUndefined();
+    expect(out.frontmatterError).toContain('DECLARATION_INVALID: research.');
     expect(out.research).toBeUndefined();
-    expect(out.workflowError).toContain('research-instrument/v1');
   });
 });
 
@@ -199,7 +198,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
   const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
   function setupPlainRun(): string {
-    const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan']);
+    const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan'], '# Test task\nDo the thing.');
     const rd = runDir(projectDir, created.runId);
     writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
     writeFileSync(runRecordPath(rd, 'task_brief.md'), '# Test task\nDo the thing.');

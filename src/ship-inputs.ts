@@ -1,8 +1,5 @@
-import { readBriefCriteriaArtifact } from './brief-criteria.js';
-import { inspectShipSetupRecord } from './ship-setup-record.js';
-import { runRecordPath } from './run-layout.js';
-import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
-import { parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
+import { readAdmittedContract } from './brief-criteria.js';
+import { BriefDeclarationsSchema, parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import {
   accessSync,
@@ -17,7 +14,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { fcGlobalDir, type StoreState } from './store.js';
+import { fcGlobalDir } from './store.js';
 import { containsEngineOwnedGlobalPath, prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
 import { gitCommonDirectory } from './project-identity.js';
 
@@ -138,24 +135,18 @@ function lineForPath(brief: string, path: string): number {
 
 /** All admission/setup readers consume the same strict declaration. */
 export function extractDeclaredBriefInputPaths(brief: string): string[] {
-  return parseDeclaredBriefInputs(brief).references.map(reference => reference.path);
+  return (parseBriefDeclarations(brief).inputs ?? []).map(input => typeof input === 'string' ? input : input.path);
 }
 
 export function parseBriefInputs(brief: string): ParsedBriefInputs {
-  const references = new Map<string, BriefInputReference>();
-  const unresolvedInputs: UnresolvedBriefInputDeclaration[] = [];
   try {
-    for (const entry of parseBriefDeclarations(brief).inputs ?? []) {
+    return { references: (parseBriefDeclarations(brief).inputs ?? []).map(entry => {
       const value = typeof entry === 'string' ? { path: entry } : entry;
-      const line = lineForPath(brief, value.path);
-      const prior = references.get(value.path);
-      references.set(value.path, { ...prior, ...value, line,
-        ...(value.frozen || prior?.frozen ? { frozen: true } : {}) });
-    }
+      return { ...value, line: lineForPath(brief, value.path) };
+    }), unresolvedInputs: [] };
   } catch (error) {
-    unresolvedInputs.push({ value: 'frontmatter', line: 1, reason: String(error) });
+    return { references: [], unresolvedInputs: [{ value: 'frontmatter', line: 1, reason: String(error) }] };
   }
-  return { references: [...references.values()].sort((a, b) => a.path.localeCompare(b.path)), unresolvedInputs };
 }
 
 export const parseDeclaredBriefInputs = parseBriefInputs;
@@ -230,7 +221,7 @@ export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclar
   return outputsFromDeclarations(parseBriefDeclarations(brief), brief);
 }
 
-function outputsFromDeclarations(declarations: BriefDeclarations, brief: string): BriefOutputDeclaration[] {
+export function outputsFromDeclarations(declarations: BriefDeclarations, brief: string): BriefOutputDeclaration[] {
   const inputs = new Set((declarations.inputs ?? []).map(input => typeof input === 'string' ? input : input.path));
   const outputs: BriefOutputDeclaration[] = (declarations.outputs ?? []).map(entry => {
     const value = typeof entry === 'string' ? { path: entry } : entry;
@@ -238,100 +229,18 @@ function outputsFromDeclarations(declarations: BriefDeclarations, brief: string)
       disposition: inputs.has(value.path) ? 'input' : value.on_existing ?? 'create',
       expectedType: value.type ?? 'file' };
   });
-  const unique = new Map<string, BriefOutputDeclaration>();
-  for (const output of outputs) {
-    const prior = unique.get(output.path);
-    if (!prior || (prior.disposition === 'create' && output.disposition !== 'create')) unique.set(output.path, output);
-  }
-  return [...unique.values()];
+  return outputs;
 }
 
-/** Archive-only identity decoder: replaces the incomplete frozen-only fallback.
- * Vocabulary, normalization, traversal and duplicate freezing match 74e8422;
- * active admission never calls it and unrelated metadata confers no authority. */
-const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_manifest|source|sources|dataset|datasets|fixture|fixtures|consume|consumes|read|reads)(?:_|$)/i;
-const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
-const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter|frozen)$/i;
-
-
-function legacyInputPath(authored: string): string | undefined {
-  let path = authored.replace(/^\.\//, '');
-  if (authored !== authored.trim() || /[<>\\]/.test(authored)
-    || /^[`'"([]/.test(authored) || /[`'">)\],;:]$/.test(authored) || /:\d+(?::\d+)?$/.test(authored)
-    || !path || path.includes('::') || /\s/.test(path)
-    || path.startsWith('~') || isAbsolute(path) || /^[A-Za-z]:[\\/]/.test(path)
-    || /^(?:https?|file):\/\//i.test(path) || path.includes('://')
-    || /[?*{}[\]$<>]/.test(path) || path === '.' || path.endsWith('.')
-    || path.split('/').some(segment => segment === '..') || path.split('/').slice(1).includes('.')) return;
-  path = path.replace(/\/$/, '');
-  return path.split('/').every(segment => /^\d+$/.test(segment)) ? undefined : path;
-}
-
-function legacyBriefInputs(value: unknown): BriefInputReference[] {
-  const references = new Map<string, BriefInputReference>();
-  const add = (authored: string, frozen = false): void => {
-    const path = legacyInputPath(authored);
-    if (!path) return;
-    const prior = references.get(path);
-    references.set(path, { path, line: 1, frozen: frozen || prior?.frozen === true });
-  };
-  const process = (value: unknown): void => {
-    if (Array.isArray(value)) { value.forEach(process); return; }
-    if (typeof value === 'string') { add(value); return; }
-    if (!value || typeof value !== 'object') return;
-    const mapping = value as Record<string, unknown>;
-    const paths: string[] = [];
-    for (const [key, entry] of Object.entries(mapping)) {
-      if (OUTPUT_KEY.test(key) && !INPUT_KEY.test(key) || ASSERTION_KEY.test(key)) continue;
-      if (typeof entry === 'string') paths.push(entry);
-      else if (Array.isArray(entry) && entry.every(item => typeof item === 'string')) paths.push(...entry);
-    }
-    const valid = paths.filter(path => legacyInputPath(path));
-    if (valid.length) valid.forEach(path => add(path, mapping.frozen === true));
-    else for (const [key, entry] of Object.entries(mapping)) {
-      if (!OUTPUT_KEY.test(key) && entry && typeof entry === 'object') process(entry);
-    }
-  };
-  const walk = (value: unknown): void => {
-    if (Array.isArray(value)) { value.forEach(walk); return; }
-    if (!value || typeof value !== 'object') return;
-    for (const [key, entry] of Object.entries(value)) {
-      if (INPUT_KEY.test(key)) process(entry);
-      else if (!OUTPUT_KEY.test(key)) walk(entry);
-    }
-  };
-  walk(value);
-  return [...references.values()];
-}
-
-/** Runtime uses the admitted snapshot, not the current authoring schema.
- * The legacy decoder reads verified input receipts, historical input identities and stored output facts;
- * retired annotations cannot re-judge an already admitted run. */
-export function readAdmittedBriefContract(runDir: string, brief = ''): {
+/** Runtime never interprets a current brief or reconstructs an old contract. */
+export function readAdmittedBriefContract(runDir: string, _brief = ''): {
   inputs: BriefInputReference[]; outputs: BriefOutputDeclaration[];
 } {
-  const artifact = readBriefCriteriaArtifact(runDir);
-  if (artifact?.declarations) return {
-    inputs: (artifact.declarations.inputs ?? []).map(input => ({ ...(typeof input === 'string' ? { path: input } : input), line: 1 })),
-    outputs: outputsFromDeclarations(artifact.declarations, ''),
+  const { declaration } = readAdmittedContract(runDir);
+  return {
+    inputs: (declaration.inputs ?? []).map(input => ({ ...(typeof input === 'string' ? { path: input } : input), line: 1 })),
+    outputs: outputsFromDeclarations(declaration, ''),
   };
-  const statePath = runRecordPath(runDir, 'run.json');
-  const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) as StoreState : undefined;
-  if (artifact || state?.taskDescription) {
-    const briefPath = runRecordPath(runDir, 'task_brief.md');
-    const admittedBrief = existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : state?.taskDescription ?? brief;
-    const setup = state?.projectDir ? inspectShipSetupRecord(state.projectDir, admittedBrief) : undefined;
-    const verification = setup?.state === 'ready' ? (setup.record.targetVerification ?? setup.record.sourceVerification) as { inputs?: BriefInputReference[] } : undefined;
-    const recordedInputs = verification?.inputs;
-    const document = parseBriefFrontmatterDocument(admittedBrief);
-    return {
-      inputs: Array.isArray(recordedInputs) && recordedInputs.every(input => typeof input.path === 'string')
-        ? recordedInputs.map(input => ({ path: input.path, frozen: input.frozen === true, line: input.line ?? 1 }))
-        : legacyBriefInputs(document?.value),
-      outputs: (state?.declaredOutputs ?? []).map(output => ({ ...output, source: 'outputs' })),
-    };
-  }
-  return { inputs: parseBriefInputs(brief).references, outputs: extractBriefOutputDeclarations(brief) };
 }
 
 /** Absolute output directories are durable capabilities, not project artifacts.
@@ -359,12 +268,7 @@ function validateExternalOutputDirectory(
     || declaration.source !== 'outputs') {
     refuse('declare an absolute path with type: directory in outputs');
   }
-  const controls = Array.from(path).some(character => {
-    const code = character.charCodeAt(0);
-    return code < 32 || (code >= 127 && code <= 159);
-  });
-  if (path !== path.trim() || controls || /[\\$*?{}[\]<>]/.test(path)
-    || path.split('/').some(part => part === '.' || part === '..') || path.includes('//')) {
+  if (!BriefDeclarationsSchema.safeParse({ outputs: [{ path, type: 'directory' }] }).success) {
     refuse('use one literal absolute directory without traversal, templates, or control characters');
   }
   const target = resolve(path);

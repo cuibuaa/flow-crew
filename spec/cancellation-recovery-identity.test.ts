@@ -21,7 +21,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'flowcrew-cancellation-identity-'));
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runId;
+  runId = createRun(project, 'fixture', 'name: fixture\ndefaults: {max_iterations: 1}\nstages:\n  - id: work\n    role: coder\n    scope: []\n    prompt_template: Owned deterministic control.\n    artifact_contract: {version: 1, produces: [], reads: []}\n', ['work']).runId;
   directory = runDir(project, runId);
   writeStageStatus(project, runId, 'work', { status: 'pending', retries: 0 });
 });

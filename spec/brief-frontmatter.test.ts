@@ -33,7 +33,7 @@ describe('shared frontmatter contract', () => {
   ])('reports one malformed-metadata error through each entrance', async (brief) => {
     const briefPath = join(root, 'brief.md');
     writeFileSync(briefPath, brief);
-    const error = parseBriefFrontmatterDocument(brief)?.error;
+    const error = parseBriefFrontmatter(brief).frontmatterError;
     expect(error).toBeTruthy();
     // quick uses this exact workflow selection after rendering inspectBrief.
     expect(entryWorkflow(parseBriefFrontmatter(brief)).error).toBe(error);
@@ -50,26 +50,26 @@ describe('shared frontmatter contract', () => {
   it.each([
     '---\nworkflow: direct\n',
     '---\nBody prose after a Markdown horizontal rule.\n',
-  ])('treats an unclosed opener as body prose at admission', async (opening) => {
+  ])('refuses an unclosed declaration opener at admission', async (opening) => {
     const brief = `${opening}## Requirements\n1. Deliver a result.\n`;
-    expect(parseBriefFrontmatterDocument(brief)).toBeUndefined();
-    expect(inspectBrief(brief).frontmatter.status).toBe('absent');
-    expect(inspectBrief(brief).contractReady).toBe(true);
-    expect(entryWorkflow(parseBriefFrontmatter(brief)).error).toBeUndefined();
-    expect(parseBriefValidationCommands(brief, 'brief.md')).toEqual({ commands: [] });
+    expect(parseBriefFrontmatterDocument(brief)?.error).toContain('never closed');
+    expect(inspectBrief(brief).frontmatter.status).toBe('invalid');
+    expect(inspectBrief(brief).contractReady).toBe(false);
+    expect(entryWorkflow(parseBriefFrontmatter(brief)).error).toContain('never closed');
+    expect(parseBriefValidationCommands(brief, 'brief.md').error).toContain('never closed');
     const briefPath = join(root, 'unclosed.md');
     writeFileSync(briefPath, brief);
-    expect((await rehearseBrief([briefPath, '--static-only'])).exitCode).toBe(0);
+    expect((await rehearseBrief([briefPath, '--static-only'])).exitCode).toBe(1);
     const { report } = await collectShipPreflight(['ship-preflight', '--brief', briefPath], deps);
-    expect(report.briefErrors).toEqual([]);
+    expect(report.briefErrors?.map(finding => finding.message).join(' ')).toContain('never closed');
   });
 
-  it('retains the legacy semantic readers for empty, scalar, and sequence YAML', () => {
+  it('refuses empty, scalar, and sequence YAML consistently', () => {
     for (const yaml of ['', 'plain scalar', '[one, two]']) {
       const brief = `---\n${yaml}${yaml ? '\n' : ''}---\n## Requirements\n1. Deliver a result.\n`;
       expect(parseBriefFrontmatterDocument(brief)?.error).toBeUndefined();
-      expect(parseBriefValidationCommands(brief, 'brief.md')).toEqual({ commands: [] });
-      expect(Boolean(parseBriefFrontmatter(brief).frontmatterError)).toBe(yaml !== '');
+      expect(parseBriefValidationCommands(brief, 'brief.md').error).toContain('DECLARATION_INVALID: $');
+      expect(parseBriefFrontmatter(brief).frontmatterError).toContain('DECLARATION_INVALID: $');
     }
   });
 

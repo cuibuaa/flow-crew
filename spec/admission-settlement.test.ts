@@ -97,7 +97,7 @@ describe('terminal outcome waits for required settlement', () => {
 
   it('settles a terminal outcome without executing an inapplicable review branch', async () => {
     const project = setup();
-    const created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['author', 'optional', 'review']);
+    const created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['author', 'optional', 'review'], '---\nterminal_states: {complete: report.md}\n---\n');
     const state = readRunState(project, created.runId);
     const optional = stage({ id: 'optional', role: 'coder', condition: 'author.status == failed' });
     const review = stage({ id: 'review', role: 'qa', is_gate: true, depends_on: ['optional'] });
@@ -116,7 +116,7 @@ describe('terminal outcome waits for required settlement', () => {
 
   it.each(['pending', 'running', 'rejected', 'retired', 'failed_work'] as const)('does not let a fresh report bypass %s required review', async disposition => {
     const project = setup();
-    const created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['author', 'review']);
+    const created = createRun(project, 'fixture', 'name: fixture\nstages: []', ['author', 'review'], '---\nterminal_states: {complete: report.md}\n---\n');
     const state = readRunState(project, created.runId);
     const review = stage({ id: 'review', role: 'qa', is_gate: true });
     state.terminalStates = { complete: { paths: ['report.md'] } };

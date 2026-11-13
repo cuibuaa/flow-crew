@@ -75,7 +75,7 @@ it.each([true, false])(
         artifact_contract: { version: 1, produces: [], reads: [] } },
     ] });
     normalizeStageContracts(workflow.stages);
-    const run = createRun(fixture.project, workflow.name, stringify(workflow), ['done', 'done2', 'work']);
+    const run = createRun(fixture.project, workflow.name, stringify(workflow), ['done', 'done2', 'work'], brief, admission);
     updateRunState(fixture.project, run.runId, state => {
       state.taskDescription = brief;
       state.briefAdmission = admission;

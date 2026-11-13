@@ -1,4 +1,5 @@
 import { runRecordPath } from '../src/run-layout.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { emptyArtifactContract, gateArtifactContract } from './spec_presentation/declared-fixtures.js';
@@ -144,6 +145,14 @@ function materializeReplay(options: { verdict?: Record<string, unknown>; metric?
   const fcHome = join(root, '.fc');
   setFcGlobalDir(fcHome);
   const runDirPath = join(fcHome, 'runs', recorded.source.runId);
+  mkdirSync(runDirPath, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+  const brief = `---\n${JSON.stringify({ criteria: [{ id: recorded.criterionId, text: 'Choose the terminal path by outcome.' }] })}\n---\nSynthetic criterion discharge replay.`;
+  const admission = createBriefAdmission(inspectBrief(brief), { kind: 'not_required' });
+  const state = replayState();
+  state.projectDir = projectDir;
+  state.storageLayout = 2; state.briefAdmission = admission;
+  writeFileSync(runRecordPath(runDirPath, 'run.json'), JSON.stringify(state));
   const metricDir = runRecordPath(runDirPath, 'stages', 'audit_terminal');
   mkdirSync(metricDir, { recursive: true });
   const stages = settlementStages();
@@ -154,7 +163,7 @@ function materializeReplay(options: { verdict?: Record<string, unknown>; metric?
     errors: [],
     terminalOwners: { [recorded.terminalStates!.ceiling_hit.paths[0]]: 'write_ceiling' },
     criterionGateRefs: { audit_terminal: [recorded.criterionId] },
-    criteriaDigest: recorded.briefDigest,
+    criteriaDigest: admission.digest,
   }, null, 2)}\n`, 'utf8');
   writeFileSync(
     runRecordPath(runDirPath, 'verdict_audit_terminal.json'),
@@ -166,8 +175,6 @@ function materializeReplay(options: { verdict?: Record<string, unknown>; metric?
     `${JSON.stringify(options.metric ?? recorded.metric, null, 2)}\n`,
     'utf8',
   );
-  const state = replayState();
-  state.projectDir = projectDir;
   return { root, projectDir, runDirPath, stages, state };
 }
 
@@ -271,10 +278,10 @@ describe('criterion discharge boundary', () => {
         attemptOutputPaths: [],
       },
     ];
-    expect(validatedCriterionDischarges(replay.runDirPath, replay.state, recorded.briefDigest))
+    expect(validatedCriterionDischarges(replay.runDirPath, replay.state, replay.state.briefAdmission!.digest))
       .toHaveLength(1);
     writeFileSync(runRecordPath(replay.runDirPath, archivePath), '{"pass":true,"criteria":{}}\n', 'utf8');
-    expect(validatedCriterionDischarges(replay.runDirPath, replay.state, recorded.briefDigest))
+    expect(validatedCriterionDischarges(replay.runDirPath, replay.state, replay.state.briefAdmission!.digest))
       .toEqual([]);
 
     const terminalOnly = deriveCriterionDischarges({

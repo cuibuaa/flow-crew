@@ -7,7 +7,6 @@ import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Orchestrator } from '../src/orchestrator.js';
 import { cmdTask } from '../src/cli-task.js';
-import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { createDaemonReconciler } from '../src/daemon-reconciliation.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { inspectRunScheduler, processStartToken, writeSchedulerProcessIdentity } from '../src/run-lock.js';
@@ -29,7 +28,7 @@ beforeEach(() => {
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   registry = new TaskRegistry({ baseDir: join(root, 'registry') });
-  runId = createRun(project, 'fixture', 'name: fixture\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work']).runId;
+  runId = createRun(project, 'fixture', 'name: fixture\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work'], 'Resume the interrupted execution').runId;
   directory = runDir(project, runId);
   writeFileSync(runRecordPath(directory, 'scheduler.pid'), String(DEAD_PID));
   atomicWriteJson(supervisionPaths(registry.baseDir, unit).running, {
@@ -176,13 +175,12 @@ describe('lost shim process proof and lifecycle settlement', () => {
 
   it('resumes the same recovered run after manual retry of a terminal-unknown unit', async () => {
     const brief = 'Resume the interrupted execution';
-    const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
+    const admission = readRunState(project, runId).briefAdmission!;
     writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
     updateRunState(project, runId, state => {
       state.status = 'running';
       delete state.recovery;
       state.engineCheckpoint!.bootId = 'previous-boot';
-      state.briefAdmission = admission;
     });
     const warn = vi.fn();
     createDaemonReconciler(registry, warn)();

@@ -45,7 +45,7 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function boundaryFixture(source = brief(output)) {
-  const created = createRun(project, 'external-output', 'name: fixture\nstages: []\n', ['work']);
+  const created = createRun(project, 'external-output', 'name: fixture\nstages: []\n', ['work'], source);
   writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), source);
   const input = { projectDir: project, runDir: created.runDirPath, stageId: 'work',  artifactContract: contract };
   const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
@@ -96,6 +96,12 @@ describe('absolute directories in the declared output contract', () => {
         home: process.env.HOME!, 'home configuration': join(process.env.HOME!, '.ssh', 'results'), root: '/', 'root-level tree': '/tmp',
         traversal: `${output}/../escape`, 'absolute file': output, template: `${output}/$NAME`,
       };
+      if (['traversal', 'absolute file', 'template'].includes(kind)) {
+        expect(() => inspectBriefOutputs(brief(paths[kind], kind === 'absolute file' ? 'file' : 'directory'), project))
+          .toThrow(kind === 'absolute file' ? 'outputs.0.type' : 'outputs.0.path');
+        expect(existsSync(output)).toBe(false);
+        return;
+      }
       const inventory = inspectBriefOutputs(brief(paths[kind], kind === 'absolute file' ? 'file' : 'directory'), project);
       expect(inventory.blocking, kind).toHaveLength(1);
       expect(inventory.blocking[0].reason).toContain('EXTERNAL_OUTPUT_REFUSED');
@@ -137,7 +143,7 @@ describe('absolute directories in the declared output contract', () => {
   it('refuses an occupied file and grants no output authority to retired research slots', () => {
     mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, 'existing data');
     expect(inspectBriefOutputs(brief(output), project).blocking[0].reason).toContain('not a directory');
-    expect(inspectBriefOutputs(`---\nresearch:\n  report_dir: ${output}\n---\n`, project).declarations).toEqual([]);
+    expect(() => inspectBriefOutputs(`---\nresearch:\n  report_dir: ${output}\n---\n`, project)).toThrow('research.report_dir');
   });
 
   it('resolves dangling protected links using the same metadata adapter as preflight', () => {

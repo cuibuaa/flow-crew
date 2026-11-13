@@ -4,8 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { admitStageDuration, StageDurationDeclarationError } from '../src/stage-duration.js';
+import { admitStageDuration } from '../src/stage-duration.js';
 import * as entry from '../src/adapter-input.js';
+import { DeclarationRefusal } from '../src/brief-declarations.js';
 import * as execution from '../src/scheduler/sched_settlement/stage-execution.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { executeOrdinaryStage } from '../src/scheduler/sched_loop/ordinary-stage.js';
@@ -52,8 +53,9 @@ function workflow(extra: Record<string, unknown> = {}) {
   return WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 2, max_retries: 0 },
     stages: [{ id: 'work', role: 'fixture', scope: [], artifact_contract: contract, ...extra }] });
 }
-function createdRun(yaml = 'name: fixture\nstages: []\n') {
-  const created = createRun(project, 'fixture', yaml, ['work']);
+function createdRun(yaml = 'name: fixture\nstages: []\n', declared = true, inputLimit?: number) {
+  const brief = `---\n${declared ? `stage_duration_ms: ${limit}\n` : ''}${inputLimit === undefined ? '' : `input_limit_chars: ${inputLimit}\n`}${!declared && inputLimit === undefined ? '{}\n' : ''}---\n`;
+  const created = createRun(project, 'fixture', yaml, ['work'], brief);
   updateRunState(project, created.runId, state => { state.stageDurationLimitMs = limit; });
   return created;
 }
@@ -83,17 +85,17 @@ describe('stage duration admission and recorded contract', () => {
   it.each([0, -1, 1.5, '100', null, {}, [], true].map(declared => ({ declared })))('refuses $declared before reserving a run with both values', ({ declared }) => {
     const before = listRuns(project);
     expect(() => prepareWorkflowLaunch(workflow(), '', project, undefined, `---\nstage_duration_ms: ${JSON.stringify(declared)}\n---\nTask`))
-      .toThrow(StageDurationDeclarationError);
+      .toThrow(DeclarationRefusal);
     try { admitStageDuration(`---\nstage_duration_ms: ${JSON.stringify(declared)}\n---\nTask`); }
-    catch (error) { expect(error).toMatchObject({ code: 'stage_duration_declaration', declaredLimit: declared }); }
+    catch (error) { expect(error).toMatchObject({ code: 'declaration_invalid', keyPath: 'stage_duration_ms' }); }
     expect(listRuns(project)).toEqual(before);
   });
   it.each(['.nan', '.inf', '-.inf', '9007199254740992', '&cycle {value: *cycle}'])('retains a typed refusal for nonnumeric/unsafe declaration %s', yaml => {
-    expect(() => admitStageDuration(`---\nstage_duration_ms: ${yaml}\n---\nTask`)).toThrow(StageDurationDeclarationError);
+    expect(() => admitStageDuration(`---\nstage_duration_ms: ${yaml}\n---\nTask`)).toThrow(DeclarationRefusal);
   });
   it.each(['failed', 'cancelled', 'parked'] as const)('resumes %s from the recorded allowance or without a default without re-admitting old text', status => {
     for (const legacy of [false, true]) {
-      const config = workflow(), created = createdRun(JSON.stringify(config));
+      const config = workflow(), created = createdRun(JSON.stringify(config), !legacy);
       updateRunState(project, created.runId, state => {
         state.status = status; state.currentIteration = 1; state.maxIterations = 2;
         state.taskDescription = '---\nstage_duration_ms: retired-invalid-value\n---\nAdmitted';
@@ -142,7 +144,7 @@ describe('real scheduler routing through the entry owner', () => {
       : path === 'successor' ? { decision: { kind: 'successor', successors: ['next'], default: 'next' } } : {};
     const config = workflow(extra), stage = config.stages[0];
     for (const offset of [0, 1]) {
-      const created = createdRun(), state = readRunState(project, created.runId);
+      const created = createdRun(undefined, true, path === 'code-review-decision' ? 100_000 : undefined), state = readRunState(project, created.runId);
       if (path === 'code-review-decision') state.inputLimitChars = 100_000;
       if (path === 'repair' || path === 're-evaluation') state.gateRetryRound = { iteration: 1, round: 1 };
       if (path === 'timeout-retry' || path === 're-evaluation') {
@@ -237,7 +239,7 @@ describe('brief writer through the real adapter entry', () => {
     const directory = join(fcGlobalDir(), 'brief-writing');
     const existed = existsSync(directory);
     await expect(writeTaskBrief('---\nstage_duration_ms: -1\n---\nTask', { projectDir: project, adapter: 'mock', role, adapterInstance: { run } }))
-      .rejects.toMatchObject({ declaredLimit: -1 });
+      .rejects.toMatchObject({ code: 'declaration_invalid', keyPath: 'stage_duration_ms' });
     expect(run).not.toHaveBeenCalled(); expect(existsSync(directory)).toBe(existed);
   });
 });

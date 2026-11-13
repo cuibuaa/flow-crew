@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseBriefDeclarations } from '../src/brief-declarations.js';
-import { extractBriefCriteria } from '../src/brief-criteria.js';
+import { extractBriefCriteria, readBriefCriteriaArtifact } from '../src/brief-criteria.js';
 import { briefDeclarationFailures, createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { extractBriefOutputDeclarations, parseBriefInputs, verifyDeclaredBriefInputs, nodeShipInputFileSystem } from '../src/ship-inputs.js';
 import { collectShipPreflight } from '../src/cli-ship-preflight.js';
@@ -17,13 +17,12 @@ import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, listRuns, readRunState, runsRoot, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { fcGlobalDir, listRuns, readRunState, reserveRun, runsRoot, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { createWatchState, pollWatch } from '../src/watch.js';
 import { startDashboard } from '../src/dashboard.js';
 import { spawnSync } from 'node:child_process';
 import { captureRepairRoundSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
-import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
 import { ensureRollbackBaseline, closeRollbackBaseline } from '../src/scheduler/sched_scope/rollback-baseline.js';
 import { createHash } from 'node:crypto';
 
@@ -44,7 +43,8 @@ describe('one declaration schema', () => {
       expect(parseBriefInputs(brief).references).toMatchObject([{ path: 'source/input.txt' }]);
       expect(verifyDeclaredBriefInputs(brief, project).inputs).toMatchObject([{ exists: true, readable: true }]);
       expect(extractBriefOutputDeclarations(brief)).toMatchObject([{ path: 'result.md', expectedType: 'file' }]);
-      expect(parseBriefFrontmatter(brief).outputs).toEqual(extractBriefOutputDeclarations(brief));
+      expect(parseBriefFrontmatter(brief).outputs?.map(({ line, ...output }) => output))
+        .toEqual(extractBriefOutputDeclarations(brief).map(({ line, ...output }) => output));
       expect(declared.inputs).toHaveLength(1);
       expect(briefDeclarationFailures(brief)).toEqual([]);
       expect((await rehearseBrief(['fixture.md', '--static-only'], { briefText: brief, projectDir: project })).exitCode).toBe(0);
@@ -61,8 +61,8 @@ describe('one declaration schema', () => {
     ['criteria: [{id: result, text: Ready, extra: true}]', 'extra'],
     ['criteria: [{id: same, text: A}, {id: same, text: B}]', 'criteria'],
     ['criteria: []', 'criteria'],
-    ['inputs: [{path: source.txt, type: file}, {path: source.txt, type: directory}]', 'type'],
-    [`inputs: [{path: source.txt, sha256: "${'a'.repeat(64)}"}, {path: source.txt, sha256: "${'b'.repeat(64)}"}]`, 'sha256'],
+    ['inputs: [{path: source.txt, type: file}, {path: source.txt, type: directory}]', 'inputs.1.path'],
+    [`inputs: [{path: source.txt, sha256: "${'a'.repeat(64)}"}, {path: source.txt, sha256: "${'b'.repeat(64)}"}]`, 'inputs.1.path'],
   ])('refuses malformed schema with the field named: %s', (metadata, field) => {
     const brief = envelope(metadata);
     expect(() => parseBriefDeclarations(brief)).toThrow(field);
@@ -75,7 +75,7 @@ describe('one declaration schema', () => {
     const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
     try {
       const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{id: 'work', role: 'coder', scope: []}] });
-      const reservation = prepared ? createRun(project, 'fixture', 'name: fixture\nstages: []\n', []) : undefined;
+      const reservation = prepared ? reserveRun(project) : undefined;
       const before = listRuns(project);
       expect(() => prepareWorkflowLaunch(workflow, '', project, reservation?.runId, envelope('inputs: [missing.txt]'))).toThrow('inputs.path missing.txt');
       expect(listRuns(project)).toEqual(before);
@@ -90,6 +90,8 @@ describe('one declaration schema', () => {
     const wrongHash = valid.replace(sha256, '0'.repeat(64));
     expect(verifyDeclaredBriefInputs(wrongHash, root).unresolvedInputs).toMatchObject([{ reason: expect.stringContaining('inputs.sha256') }]);
     expect(verifyDeclaredBriefInputs(valid.replace('type: file', 'type: directory'), root).unresolvedInputs)
+      .toMatchObject([{ reason: expect.stringContaining('inputs.0.sha256') }]);
+    expect(verifyDeclaredBriefInputs(valid.replace('type: file', 'type: directory').replace(', sha256: '+JSON.stringify(sha256), ''), root).unresolvedInputs)
       .toMatchObject([{ reason: expect.stringContaining('inputs.type') }]);
     let hashed = 0;
     const escaped = verifyDeclaredBriefInputs(valid, root, { ...nodeShipInputFileSystem,
@@ -105,10 +107,10 @@ describe('one declaration schema', () => {
 
   });
 
-  it('does not infer input/output authority from nested metadata aliases', () => {
+  it('refuses nested metadata aliases before inferring input/output authority', () => {
     const brief = envelope('metadata: {sources: [missing.csv], report_file: occupied.md, inputs: [nested.txt]}');
-    expect(parseBriefInputs(brief)).toEqual({ references: [], unresolvedInputs: [] });
-    expect(extractBriefOutputDeclarations(brief)).toEqual([]);
+    expect(parseBriefInputs(brief)).toMatchObject({ references: [], unresolvedInputs: [{ reason: expect.stringContaining('metadata') }] });
+    expect(() => extractBriefOutputDeclarations(brief)).toThrow('metadata');
   });
 
   it('refuses a missing declared input while preserving literal punctuation', () => {
@@ -124,7 +126,7 @@ describe('one declaration schema', () => {
 describe('prose has no admission authority', () => {
   it('admits unusual prose unchanged across preflight, rehearsal and admission', async () => {
     const root = temp();
-    const metadata = 'criteria: [{id: property, text: Deliver the requested property.}]\noutputs: [result.md]\nsupplied_numbers: [42]\nplanner_policies: [evidence_statistics]';
+    const metadata = 'criteria: [{id: property, text: Deliver the requested property.}]\noutputs: [result.md]';
     const bodies = [
       'Keep everything frozen. 任意表述；例如 42。Do not report within_expected_range.',
       '# Requirements\n1. Example only: 99.\n- **Must** not change the method.\nThe operator supplied an expected result of 42.',
@@ -177,7 +179,8 @@ it('reads legacy records in status, watch, UI API and listing without re-admissi
       excluded: [{ line: 7, text: 'Example only.', reason: 'explicitly_illustrative' }] };
     writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify(legacyCriteria));
     const bytes = readFileSync(join(directory, 'run.json'));
-    expect(readBriefCriteriaForAdmission(directory)).toEqual(legacyCriteria);
+    expect(readBriefCriteriaArtifact(directory)).toEqual(legacyCriteria);
+    expect(() => readBriefCriteriaForAdmission(directory)).toThrow('contract_hash_missing');
     expect(() => plannerCriterionAssignmentContext(brief, directory)).not.toThrow();
     expect(plannerCriterionAssignmentContext(brief, directory)).toContain('old_slug_12345678');
     expect(listRuns(project)).toContain(runId);
@@ -195,7 +198,7 @@ it('reads legacy records in status, watch, UI API and listing without re-admissi
   } finally { await app?.close(); setFcGlobalDir(previous); }
 });
 
-it('retains admitted in-flight metadata and criterion identities without parsing the old schema', () => {
+it('keeps legacy in-flight metadata readable but refuses active configuration without a contract hash', () => {
   const root = temp(), project = join(root, 'project'); mkdirSync(project);
   const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
   try {
@@ -209,18 +212,19 @@ it('retains admitted in-flight metadata and criterion identities without parsing
     state.taskDescription = oldBrief;
     state.declaredOutputs = [{ path: 'result.md', line: 1, source: 'report_file', expectedType: 'file', disposition: 'update' }];
     state.terminalStates = { complete: { paths: ['result.md'] } }; writeRunState(project, created.runId, state);
-    const configured = configureWorkflowBrief(workflow, project, created.runId, created.runDirPath, 1, { resumingExistingRun: true, briefWasAdmitted: true }, oldBrief);
-    expect(configured.kind).toBe('configured');
+    const recordPath = runRecordPath(created.runDirPath, 'run.json');
+    const archived = JSON.parse(readFileSync(recordPath, 'utf8')); delete archived.briefAdmission;
+    writeFileSync(recordPath, JSON.stringify(archived));
     expect(readRunState(project, created.runId).declaredOutputs).toEqual(state.declaredOutputs);
-    expect(readRunState(project, created.runId).terminalStates).toEqual(state.terminalStates);
-    expect(readBriefCriteriaForAdmission(created.runDirPath)).toEqual(old);
-    const { baseline } = ensureRollbackBaseline(project, created.runDirPath);
-    expect(baseline.frozenInputs).toEqual([]);
+    expect(readBriefCriteriaArtifact(created.runDirPath)).toEqual(old);
+    expect(() => readBriefCriteriaForAdmission(created.runDirPath)).toThrow('contract_hash_missing');
+    expect(() => configureWorkflowBrief(workflow, project, created.runId, created.runDirPath, 1, { resumingExistingRun: true, briefWasAdmitted: true }, oldBrief)).toThrow('contract_hash_missing');
+    expect(() => ensureRollbackBaseline(project, created.runDirPath)).toThrow('contract_hash_missing');
     closeRollbackBaseline(project, created.runDirPath);
   } finally { setFcGlobalDir(previous); }
 });
 
-it.each(['path', 'dataset'])('preserves frozen inputs in legacy admitted records with retired annotations and no setup receipt (%s)', key => {
+it.each(['path', 'dataset'])('refuses active frozen-input inference for hashless legacy records (%s)', key => {
   const root = temp(), project = join(root, 'project'); mkdirSync(project);
   const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
   let directory: string | undefined;
@@ -231,20 +235,17 @@ it.each(['path', 'dataset'])('preserves frozen inputs in legacy admitted records
     writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
     writeFileSync(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify({ version: 1,
       briefDigest: createHash('sha256').update(brief).digest('hex'), criteria: [] }));
-    expect(briefDeclarationFailures(brief).map(f => f.message).join()).toContain('rows');
-    expect(() => ensureRollbackBaseline(project, directory)).not.toThrow();
-    const { baseline } = ensureRollbackBaseline(project, directory);
-    expect([...new Set(baseline.frozenInputs.map(input => input.path))]).toEqual(['source.txt']);
-    const snapshot = captureRepairRoundSnapshot(project, [], { runDirPath: directory });
-    writeFileSync(join(project, 'source.txt'), 'changed');
-    const settled = settleProjectWrites({ projectDir: project, snapshot, rawWrites: ['source.txt'], definiteWrites: new Set(['source.txt']) });
-    expect(settled.violations).toMatchObject([{ path: 'source.txt' }]);
-    expect(settled.rolledBackWrites).toEqual(['source.txt']);
+    const recordPath = runRecordPath(directory, 'run.json');
+    const archived = JSON.parse(readFileSync(recordPath, 'utf8')); delete archived.briefAdmission;
+    writeFileSync(recordPath, JSON.stringify(archived));
+    expect(briefDeclarationFailures(brief).length).toBeGreaterThan(0);
+    expect(() => ensureRollbackBaseline(project, directory)).toThrow('contract_hash_missing');
+    expect(() => captureRepairRoundSnapshot(project, [], { runDirPath: directory })).toThrow('contract_hash_missing');
     expect(readFileSync(join(project, 'source.txt'), 'utf8')).toBe('frozen bytes');
   } finally { closeRollbackBaseline(project, directory); setFcGlobalDir(previous); }
 });
 
-it('preserves legacy aliased frozen inputs from their exact admitted setup receipt', () => {
+it('refuses active import of legacy aliased frozen inputs even with an exact setup receipt', () => {
   const root = temp(), project = join(root, 'project'); mkdirSync(project);
   const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
   let directory: string | undefined;
@@ -258,11 +259,10 @@ it('preserves legacy aliased frozen inputs from their exact admitted setup recei
     const record = JSON.parse(readFileSync(ready, 'utf8'));
     record.targetVerification = { inputs: [{path: 'source.txt', frozen: true, line: 2, exists: true, readable: true}], unresolvedInputs: [] };
     writeFileSync(ready, JSON.stringify(record));
-    expect(() => captureRepairRoundSnapshot(project, [], { runDirPath: directory })).not.toThrow();
-    const snapshot = captureRepairRoundSnapshot(project, [], { runDirPath: directory });
-    writeFileSync(join(project, 'source.txt'), 'mutated');
-    const settled = settleProjectWrites({ projectDir: project, snapshot, rawWrites: ['source.txt'], definiteWrites: new Set(['source.txt']) });
-    expect(settled.rolledBackWrites).toEqual(['source.txt']);
+    const recordPath = runRecordPath(directory, 'run.json');
+    const archived = JSON.parse(readFileSync(recordPath, 'utf8')); delete archived.briefAdmission;
+    writeFileSync(recordPath, JSON.stringify(archived));
+    expect(() => captureRepairRoundSnapshot(project, [], { runDirPath: directory })).toThrow('contract_hash_missing');
     expect(readFileSync(join(project, 'source.txt'), 'utf8')).toBe('original');
   } finally { closeRollbackBaseline(project, directory); setFcGlobalDir(previous); }
 });

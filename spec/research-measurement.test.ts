@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,7 @@ let time: ReturnType<typeof controlResearchTime>;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'research-instrument-')); project = join(root, 'project'); run = join(root, 'run');
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  mkdirSync(project); mkdirSync(run); writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'controlled-run' }));
+  mkdirSync(project); mkdirSync(run); writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'controlled-run', briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
   time = controlResearchTime();
 });
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
@@ -376,7 +377,7 @@ it('refuses active protocol execution in a historical layout without changing it
   expect(existsSync(join(run, 'research_measurement'))).toBe(false);
 });
 it('requires the explicit protocol and refuses scientific legacy declarations', () => {
-  expect(parseBriefFrontmatter('---\nresearch: {measurement: {replicates: 2}, stop: {max_rounds: 3}}\n---\nTry candidates.').researchPolicyError).toContain('research-instrument/v1');
+  expect(parseBriefFrontmatter('---\nresearch: {measurement: {replicates: 2}, stop: {max_rounds: 3}}\n---\nTry candidates.').frontmatterError).toContain('research.');
   const config = makeInstrument(project);
   expect(ResearchInstrumentSchema.safeParse({ ...config, threshold: 2 }).success).toBe(false);
 });

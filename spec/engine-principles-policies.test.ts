@@ -20,7 +20,7 @@ beforeEach(() => {
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
-function brief(policies: unknown): string { return `---\nplanner_policies: ${JSON.stringify(policies)}\n---\n# Goal\nApply the selected planning constraints.\n`; }
+function brief(policies: unknown): string { return `# Goal\nApply the selected planning constraints.\nRetired policy wording: planner_policies: ${JSON.stringify(policies)}\n`; }
 
 async function runPolicyWorkflow(task: string) {
   const workflow = WorkflowConfigSchema.parse({ name: 'policy-fixture', defaults: { max_iterations: 1, max_retries: 0 },
@@ -43,6 +43,7 @@ async function runPolicyWorkflow(task: string) {
 describe('brief planning uses the authored contract', () => {
   it('does not inject retired evidence-statistics obligations into any invocation', async () => {
     const { final, received } = await runPolicyWorkflow(brief(['evidence_statistics']));
+    await expect(runPolicyWorkflow('---\nplanner_policies: [evidence_statistics]\n---\nTask')).rejects.toThrow('planner_policies');
     expect(final.status, final.failureReason).toBe('complete');
     for (const { system } of Object.values(received)) {
       expect(system).not.toContain('# Brief planning policies');

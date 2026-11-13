@@ -1,3 +1,4 @@
+import { parseBriefDeclarations } from './brief-declarations.js';
 import { gitAsync, rethrowGitNotAnswered } from './git-facts.js';
 import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
@@ -48,7 +49,7 @@ import { deploymentHeld, parkAtDeploymentBoundary, readDeploymentHold, requestDe
 import { assertContinuationCompatible, recordContinuationRefusal } from './engine-continuation.js';
 import { checkpointConsumers } from './restart-recovery.js';
 import { unitIsStopped } from './run-control.js';
-import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
+import { verifyBriefAdmission, admittedContract, ContractRefusal, type BriefAdmissionRecord } from './brief-preflight.js';
 import { readHostBootId, reconcileHostInterruptedRun } from './restart-recovery.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
 import { workflowContinuation } from './scheduler/sched_loop/launch.js';
@@ -266,18 +267,37 @@ export class Orchestrator {
         throw new Error(`Invalid existing-run resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }
+    const suppliedBrief = input.brief_text !== undefined || input.brief_path !== undefined || input.brief_admission !== undefined;
+    if (!input.run_id || suppliedBrief) {
+      const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
+      parseBriefDeclarations(brief);
+      const verification = verifyBriefAdmission(brief, input.brief_admission);
+      if (verification.status !== 'valid') throw new Error(admissionFailureMessage(verification.status, verification.digest));
+    }
     if (input.run_id) {
       const bound = this.registry.list({ status: TASK_LIST_STATUS.ALL }).reverse().find(task =>
         task.run_id && this.boundRunPath(task.run_id) === this.boundRunPath(input.run_id!)
         && resolve(task.projectDir) === resolve(input.projectDir));
-      if (bound) return this.queueResume(bound.id);
-    }
-    const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
-    const verification = verifyBriefAdmission(brief, input.brief_admission);
-    if (verification.status !== 'valid') {
-      throw new Error(admissionFailureMessage(verification.status, verification.digest));
+      if (bound) return this.queueResume(bound.id, suppliedBrief ? input.brief_admission : undefined);
+      assertContinuationCompatible(input.projectDir, input.run_id);
+      if (suppliedBrief) this.recordBriefContinuation(input.projectDir, input.run_id, input.brief_admission!);
     }
     return this.registry.create(input);
+  }
+
+  /** Receipt publication precedes queue publication; the original contract never changes. */
+  private recordBriefContinuation(projectDir: string, runId: string, receipt: BriefAdmissionRecord): void {
+    admittedContract(receipt);
+    const current = readRunState(projectDir, runId);
+    admittedContract(current.briefAdmission);
+    if ((current.briefContinuationAdmission ?? current.briefAdmission)!.digest === receipt.digest) return;
+    updateRunState(projectDir, runId, state => {
+      admittedContract(state.briefAdmission);
+      const effective = state.briefContinuationAdmission ?? state.briefAdmission!;
+      if (effective.digest === receipt.digest) return;
+      if (receipt.acknowledgement.kind !== 'explicit') throw new Error('Changed brief requires an explicit digest acknowledgement');
+      state.briefContinuationAdmission = receipt;
+    });
   }
 
   async register(input: TaskCreateInput): Promise<TaskEntry> {
@@ -332,7 +352,7 @@ export class Orchestrator {
     return this.queueResume(id);
   }
 
-  private queueResume(id: number): TaskEntry {
+  private queueResume(id: number, continuation?: BriefAdmissionRecord): TaskEntry {
     const task = this.mustGet(id);
     if (deploymentHeld()) throw new Error('Deployment hold is active; use flowcrew daemon continue');
     const bound = this.readBoundRun(task);
@@ -353,6 +373,7 @@ export class Orchestrator {
     buildCommand(task, this.cliPath); // Verify the original admission before queuing any work.
     assertContinuationCompatible(task.projectDir, bound.runId);
     workflowContinuation(readRunState(task.projectDir, bound.runId), task.projectDir, bound.runId);
+    if (continuation) this.recordBriefContinuation(task.projectDir, bound.runId, continuation);
     if (heldContinuation) updateRunState(task.projectDir, bound.runId, state => {
       if (state.status !== RUN_STATUS.PARKED || state.deploymentHold?.id !== heldContinuation.id) throw new Error('Held run changed before explicit resume');
       state.deploymentHold.releasedAt ??= new Date().toISOString();
@@ -1636,12 +1657,6 @@ function normalizeSystemdStatus(output: string): UnitStatus {
   }
 }
 
-function readBrief(task: TaskEntry): string {
-  if (task.brief_text) return task.brief_text;
-  if (task.brief_path) return readFileSync(task.brief_path, 'utf-8');
-  return task.name;
-}
-
 function admissionFailureMessage(status: ReturnType<typeof verifyBriefAdmission>['status'], digest: string): string {
   return `Brief admission ${status}; refusing to launch before a fresh visible preflight decision (current digest ${digest.slice(0, 12)}).`;
 }
@@ -1650,24 +1665,14 @@ function readRunAdmission(task: TaskEntry): BriefAdmissionRecord | undefined {
   if (!task.run_id) return undefined;
   try {
     const runPath = isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id);
-    const parsed = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as {
+    const parsed = readRunSnapshot(runPath) as {
       briefAdmission?: BriefAdmissionRecord;
+      briefContinuationAdmission?: BriefAdmissionRecord;
     };
-    return parsed.briefAdmission;
-  } catch {
-    return undefined;
-  }
-}
-
-function readBoundRunBrief(task: TaskEntry): string | undefined {
-  if (!task.run_id) return undefined;
-  try {
-    const runPath = isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id);
-    const sidecar = runRecordPath(runPath, 'task_brief.md');
-    if (existsSync(sidecar)) return readFileSync(sidecar, 'utf-8');
-    const parsed = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as { taskDescription?: unknown };
-    return typeof parsed.taskDescription === 'string' ? parsed.taskDescription : undefined;
-  } catch {
+    admittedContract(parsed.briefAdmission);
+    return parsed.briefContinuationAdmission ?? parsed.briefAdmission;
+  } catch (error) {
+    if (error instanceof ContractRefusal) throw error;
     return undefined;
   }
 }
@@ -1676,26 +1681,15 @@ function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: 
   if (task.config_path !== undefined) {
     throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
   }
-  const brief = readBrief(task);
-  const taskVerification = verifyBriefAdmission(brief, task.brief_admission);
-  if (taskVerification.status !== 'valid' || !task.brief_admission) {
-    throw new Error(admissionFailureMessage(taskVerification.status, taskVerification.digest));
+  const reservation = task.run_id ? readRunReservation(task.projectDir, task.run_id) : undefined;
+  if (task.run_id && (!reservation || reservation.briefAdmission)) {
+    if (task.brief_admission) admittedContract(task.brief_admission);
+    const record = readRunAdmission(task);
+    const contract = admittedContract(record);
+    return { brief: contract.brief, admission: record! };
   }
-  const boundPath = task.run_id
-    ? (isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id))
-    : undefined;
-  if (boundPath && existsSync(join(boundPath, 'run.json'))) {
-    const runAdmission = readRunAdmission(task);
-    const runBrief = readBoundRunBrief(task) ?? '';
-    const runVerification = verifyBriefAdmission(runBrief, runAdmission);
-    if (runVerification.status !== 'valid' || !runAdmission) {
-      throw new Error(`Bound run ${task.run_id}: ${admissionFailureMessage(runVerification.status, runVerification.digest)}`);
-    }
-    if (runAdmission.digest !== task.brief_admission.digest || runBrief !== brief) {
-      throw new Error(`Bound run ${task.run_id}: task and run admission digests differ; refusing to launch.`);
-    }
-  }
-  return { brief, admission: task.brief_admission };
+  const contract = admittedContract(task.brief_admission);
+  return { brief: contract.brief, admission: task.brief_admission! };
 }
 
 export function buildCommand(task: TaskEntry, cliPath: string): string {

@@ -868,22 +868,24 @@ async function cmdQuick(preview = false) {
   // admitted exact bytes and record together.
   if (existingRunId) {
     const { runsRoot: getRunsRoot } = await import('./store.js');
-    let storedTaskDescription: string | undefined;
     try {
       const runJson = JSON.parse(readFileSync(runRecordPath(join(getRunsRoot(), existingRunId), 'run.json'), 'utf-8'));
       existingRunInitialized = true;
-      if (typeof runJson.taskDescription === 'string') storedTaskDescription = runJson.taskDescription;
-      storedAdmission = runJson.briefAdmission as BriefAdmissionRecord | undefined;
-    } catch { /* an uninitialized reservation has no run state yet */ }
-
-    const hasTransportedExactTask = taskSupplied && transportedAdmission !== undefined;
-    const briefPath = runRecordPath(join(getRunsRoot(), existingRunId), 'task_brief.md');
-    if (existsSync(briefPath)) {
-      try { recordedBrief = readFileSync(briefPath, 'utf-8'); } catch { /* ignore */ }
-      if (!hasTransportedExactTask && recordedBrief !== undefined) task = recordedBrief;
+      const { admittedContract } = await import('./brief-preflight.js');
+      admittedContract(runJson.briefAdmission);
+      storedAdmission = (runJson.briefContinuationAdmission ?? runJson.briefAdmission) as BriefAdmissionRecord | undefined;
+    } catch (error) {
+      if (existingRunInitialized) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = EXIT_CODE.failed; return; }
+      // An uninitialized reservation has no run state yet.
     }
-    recordedBrief ??= storedTaskDescription;
-    if (!task.trim() && storedTaskDescription !== undefined) task = storedTaskDescription;
+
+    if (existingRunInitialized) {
+      const { admittedContract } = await import('./brief-preflight.js');
+      try { recordedBrief = admittedContract(storedAdmission).brief; }
+      catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = EXIT_CODE.failed; return; }
+      if (!taskSupplied) task = recordedBrief;
+    }
+
   }
 
   if (!task.trim()) {
@@ -907,7 +909,7 @@ async function cmdQuick(preview = false) {
     console.error('  --session <id>          Session ledger for registration (default: CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID)');
     console.error('  --acknowledge-brief-warnings[=<digest>]  Confirm changed-run continuation (never skips inspection)');
     console.error('  -                       Read task from stdin');
-    console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
+    console.error('  --existing-run-id <id>  Resume an existing run (reads the admitted task record)');
     process.exit(EXIT_CODE.failed);
   }
 
@@ -1014,9 +1016,11 @@ async function cmdQuick(preview = false) {
 
   const preflight = inspectBrief(task);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
-  const { parseBriefFrontmatter, entryWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+  const { parseBriefFrontmatter, entryWorkflow, declarationConfiguration } = await import('./scheduler/sched_admission/brief-contract.js');
   const parsedBrief = parseBriefFrontmatter(task);
-  const auto = entryWorkflow(parsedBrief);
+  const auto = entryWorkflow(existingRunInitialized && existingRunId
+    ? declarationConfiguration((await import('./brief-admission.js')).admittedContract(readRunState(projectDir, existingRunId).briefAdmission).declaration)
+    : parsedBrief);
   // Nothing about the brief matters if nothing can execute it. A newcomer whose
   // adapter CLI is not installed must be told the install command, not sent to
   // fix a brief they cannot run either way, so environment refusals precede
@@ -1034,7 +1038,7 @@ async function cmdQuick(preview = false) {
   }
 
   const admittedContinuation = existingRunInitialized && (storedAdmission
-    ? verifyBriefAdmission(task, storedAdmission).status === 'valid' : recordedBrief === task);
+    ? verifyBriefAdmission(task, storedAdmission).status === 'valid' : false);
   const refusalFindings = admittedContinuation ? [] : briefDeclarationFailures(task, preflight);
   if (refusalFindings.length) {
     const refusal = refusalFindings.map(finding => `[${finding.code}] ${finding.message}`).join('\n');

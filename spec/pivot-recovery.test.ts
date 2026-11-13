@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -53,6 +54,7 @@ describe('terminal study completion contract', () => {
     }));
 
     const state: StoreState = {
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }),
       runId,
       workflowName: 'default',
       projectDir,

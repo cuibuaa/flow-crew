@@ -1,3 +1,4 @@
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -67,7 +68,7 @@ beforeEach(() => {
   project = join(root, 'project'); mkdirSync(project);
   previous = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   const reserved = reserveRun(project);
-  ({ runId, runDirPath: directory } = initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture\nstages: []\n', ['work']));
+  ({ runId, runDirPath: directory } = initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture\nstages: []\n', ['work'], createBriefAdmission(inspectBrief(''), { kind: 'not_required' })));
   io.target = join(directory, 'events.jsonl'); io.calls = []; io.fail = ''; io.short = false;
 });
 afterEach(() => { io.fail = ''; io.target = ''; setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
@@ -107,8 +108,13 @@ describe('bytes-only lifecycle fold and recorded authority', () => {
     expect(paths.map(path => [readFileSync(path), statSync(path).mtimeMs])).toEqual(before);
   });
   it.each(['lock', 'snapshot', 'mutation', 'operational', 'stage-early-return', 'recovery-early-return', 'resume-early-return'])('reconciles on the next %s writer without an event from any cache', writer => {
+    if (writer === 'resume-early-return') {
+      const brief = `---\nresearch: ${JSON.stringify({ protocol: 'research-instrument/v1', candidate: ['src'], frozen: ['instrument'], argv: [process.execPath], environment: {}, author: { role: 'coder', instruction: 'Fixture.' }, budget: { max_rounds: 1 } })}\n---\n`;
+      const reservation = reserveRun(project);
+      ({ runId, runDirPath: directory } = initializeReservedRun(project, reservation.runId, 'fixture', 'name: fixture\nstages: []\n', ['work'], createBriefAdmission(inspectBrief(brief), { kind: 'not_required' })));
+      io.target = join(directory, 'events.jsonl');
+    }
     if (writer.endsWith('early-return') && writer !== 'stage-early-return') updateRunState(project, runId, state => { state.status = 'complete'; });
-    if (writer === 'resume-early-return') updateRunState(project, runId, state => { state.research = { protocol: 'research-instrument/v1' } as never; });
     const snapshot = readRunState(project, runId);
     corruptCaches(); const log = bytes('events.jsonl');
     if (writer === 'lock') withRunStateLock(directory, () => {});
@@ -165,12 +171,12 @@ describe('lifecycle durability and failure retry', () => {
   it.each(['append', 'file-sync', 'directory-sync'] as const)('keeps first admission readable and repairable after %s failure', failure => {
     const reserved = reserveRun(project);
     io.target = join(reserved.runDirPath, 'events.jsonl'); io.fail = failure;
-    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [])).toThrow('injected');
+    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }))).toThrow('injected');
     expect(existsSync(join(reserved.runDirPath, 'run.json'))).toBe(false);
     io.fail = '';
     if (failure === 'append') {
       expect(() => readRunState(project, reserved.runId)).toThrow('no complete lifecycle');
-      initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', []);
+      initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }));
     } else {
       expect(readRunState(project, reserved.runId).status).toBe('running');
       withRunStateLock(reserved.runDirPath, () => {});
@@ -183,7 +189,7 @@ describe('lifecycle durability and failure retry', () => {
   it('opens cancellation under the run lock when the initial log exists before the first snapshot', () => {
     const reserved = reserveRun(project);
     io.target = join(reserved.runDirPath, 'events.jsonl'); io.fail = 'file-sync';
-    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [])).toThrow('injected');
+    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }))).toThrow('injected');
     expect(existsSync(join(reserved.runDirPath, 'run.json'))).toBe(false);
     io.fail = '';
     expect(cancelRunStateAtPath(reserved.runDirPath, '2030-01-01T00:00:00.000Z').state.status).toBe('cancelled');
@@ -195,7 +201,7 @@ describe('lifecycle durability and failure retry', () => {
   it('cancels through the public coordinator after the first event but before the first snapshot', async () => {
     const reserved = reserveRun(project);
     io.target = join(reserved.runDirPath, 'events.jsonl'); io.fail = 'file-sync';
-    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [])).toThrow('injected');
+    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [], createBriefAdmission(inspectBrief(''), { kind: 'not_required' }))).toThrow('injected');
     expect(existsSync(join(reserved.runDirPath, 'run.json'))).toBe(false);
     io.fail = '';
     const control = new RunCancellationCoordinator({

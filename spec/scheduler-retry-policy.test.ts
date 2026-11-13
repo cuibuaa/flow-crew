@@ -39,7 +39,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true,
 function fixture() {
   const workflow = WorkflowConfigSchema.parse({ name: 'retry-policy', defaults: { max_iterations: 1 },
     stages: [{ id: 'work', role: 'coder', scope: [], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
-  const created = createRun(project, workflow.name, stringify(workflow), ['work']);
+  const created = createRun(project, workflow.name, stringify(workflow), ['work'], '---\nstage_duration_ms: 50\n---\n');
   const state = readRunState(project, created.runId); state.stageDurationLimitMs = 50;
   writeRunState(project, created.runId, state);
   return { workflow, ...created };
@@ -181,7 +181,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
       { id: 'review', role: 'coder', scope: [], is_gate: true, prompt_template: 'Review fixture.',
         artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json' }], reads: [] } },
     ] });
-    const f = createRun(project, workflow.name, stringify(workflow), ['work', 'review']);
+    const f = createRun(project, workflow.name, stringify(workflow), ['work', 'review'], '---\nstage_duration_ms: 50\n---\n');
     const state = readRunState(project, f.runId), now = '2026-10-01T00:00:00.000Z';
     state.status = 'running'; state.currentIteration = 1; state.maxRetries = 2; state.stageDurationLimitMs = 50;
     state.gateRetryRound = { iteration: 1, round: 2 };

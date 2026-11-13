@@ -185,7 +185,7 @@ describe('Dashboard admission handshake', () => {
     const { config } = scheduler.loadWorkflow(join(projectDir, 'config', 'workflows', 'default.yaml'));
     config.stages = coveredStages(config.stages[0], brief);
     const raw = stringifyYaml(config);
-    const { runId } = createRun(projectDir, 'default', raw, config.stages.map(({ id }) => id));
+    const { runId } = createRun(projectDir, 'default', raw, config.stages.map(({ id }) => id), brief, admission);
     const state = readRunState(projectDir, runId);
     state.status = 'pending';
     state.taskDescription = brief;
@@ -276,20 +276,27 @@ describe('durable daemon boundary', () => {
     expect(readFileSync(roundTrip.brief_path!, 'utf-8')).toBe(brief);
   });
 
-  it('refuses different task and run briefs even when each admission is valid', () => {
+  it('uses the admitted run despite stale valid task metadata and refuses a tampered run contract', () => {
     const runBrief = 'Keep the admitted run brief';
     const taskBrief = 'A separately admitted task brief';
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
+    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work'], runBrief);
     const state = readRunState(projectDir, runId);
     state.taskDescription = runBrief;
-    state.briefAdmission = explicitAdmission(runBrief);
     writeRunState(projectDir, runId, state);
     const registry = new TaskRegistry({ baseDir: join(fixtureRoot, 'registry') });
     const task = registry.create({
       projectDir, run_id: runId, brief_text: taskBrief, brief_admission: explicitAdmission(taskBrief),
     });
-    expect(() => buildCommand(task, join(repositoryRoot, 'src', 'cli.ts')))
-      .toThrow(/task and run admission digests differ/);
+    const command = buildCommand(task, join(repositoryRoot, 'src', 'cli.ts'));
+    const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(command)![1];
+    expect(Buffer.from(encoded, 'base64url').toString('utf8')).toBe(runBrief);
+    const admission = /'--brief-admission-record' '([A-Za-z0-9_-]+)'/.exec(command)![1];
+    expect(JSON.parse(Buffer.from(admission, 'base64url').toString('utf8'))).toEqual(state.briefAdmission);
+    const path = runRecordPath(join(runsRoot(), runId), 'run.json');
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    raw.briefAdmission.contract.contractHash = '0'.repeat(64);
+    writeFileSync(path, JSON.stringify(raw));
+    expect(() => buildCommand(task, join(repositoryRoot, 'src', 'cli.ts'))).toThrow('contract_hash_mismatch');
   });
 
   it('removes caller attempts to override daemon-owned text, project, binding, or acknowledgement', () => {
@@ -476,7 +483,7 @@ describe('quick and operator entry behavior', () => {
     }
   });
 
-  it('requires a fresh decision for missing existing-run admission and reuses a valid same-digest record', () => {
+  it('refuses hashless existing-run admission and reuses a valid same-digest record', () => {
     const isolated = cliFixture();
     const runId = 'existing-fixture';
     const runPath = join(isolated.fcHome, 'runs', runId);
@@ -496,7 +503,7 @@ describe('quick and operator entry behavior', () => {
       '--adapter', 'mock',
     ]);
     expect(missing.status).toBe(1);
-    expect(`${missing.stdout}${missing.stderr}`).toContain('Launch paused before run creation');
+    expect(`${missing.stdout}${missing.stderr}`).toContain('contract_hash_missing');
 
     const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8'));
     state.briefAdmission = explicitAdmission(brief);

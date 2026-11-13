@@ -166,6 +166,9 @@ describe('record correction uses the existing attempt', () => {
   });
 
   it.each(['omitted', 'extra', 'missing-round', 'open-reason'] as const)('refuses persistently invalid complete-review output: %s', async mode => {
+    ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review'],
+      '---\ncriteria: [{id: criterion, text: First}, {id: second, text: Second}]\n---\n'));
+    writeFileSync(runRecordPath(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
     writeFileSync(runRecordPath(runDir, 'brief_criteria.json'), JSON.stringify({ version: 1, briefDigest: 'fixture',
       criteria: [{ id: 'criterion', text: 'First' }, { id: 'second', text: 'Second' }] }));
     const record = { ...rejected(), criteria: { criterion: rejected().criteria.criterion } as Record<string, unknown> };

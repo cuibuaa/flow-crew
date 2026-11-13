@@ -270,8 +270,10 @@ describe('repair requires a reviewer reproduction', () => {
     const verdict = readGateEvaluation(project, 'review', run.runId, { metric: 'quality', threshold: 1, higherIsBetter: true }, false);
     expect(verdict?.pass).toBe(false); expect(verdict?.refusal?.kind).toBe('numeric_evidence');
     expect(verdict?.findings?.unconfirmed[0].id).toBe('uncited');
-    writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), '---\noutputs: [docs/missing.md]\n---\n# Required product\n');
-    const missing = readGateEvaluation(project, 'review', run.runId, undefined, false);
+    const productRun = createRun(project, 'observation-contract', 'name: observation-contract\nstages: []\n', ['review'],
+      '---\noutputs: [docs/missing.md]\n---\n# Required product\n');
+    writeFileSync(runRecordPath(productRun.runDirPath, 'verdict_review.json'), readFileSync(runRecordPath(run.runDirPath, 'verdict_review.json')));
+    const missing = readGateEvaluation(project, 'review', productRun.runId, undefined, false);
     expect(missing?.pass).toBe(false); expect(missing?.refusal?.kind).toBe('declared_output');
   });
 

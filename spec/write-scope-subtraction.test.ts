@@ -48,7 +48,7 @@ function commit() {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Synthetic baseline');
 }
 function create(brief = 'Complete the required project work.', stages = [stage()]) {
-  ({ runId, runDirPath: directory } = createRun(project, 'write-contract', 'name: fixture\nstages: []\n', stages.map(s => s.id)));
+  ({ runId, runDirPath: directory } = createRun(project, 'write-contract', 'name: fixture\nstages: []\n', stages.map(s => s.id), brief));
   writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   return stages;
 }
