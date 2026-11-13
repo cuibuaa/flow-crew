@@ -72,6 +72,10 @@ describe('control reaches the invocation with verified retirement', () => {
         const emit=x=>console.log(JSON.stringify(x));
         const a=spawn(process.execPath,['-e',${JSON.stringify(childA)}],{stdio:'ignore'});
         const b=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+        // Join actual child closure: a leader-only exit can strand retirement
+        // behind a polling timer on the deliberately frozen deadline clock.
+        const retired=Promise.all([a,b].map(child=>new Promise(resolve=>child.once('close',resolve))));
+        process.once('SIGTERM',()=>{retired.then(()=>process.kill(process.pid,'SIGTERM'))});
         emit({type:'item.started',item:{id:'long-a',type:'command_execution',command:'long child a'}});
         emit({type:'item.started',item:{id:'long-b',type:'command_execution',command:'long child b'}});
         a.on('close',code=>emit({type:'item.completed',item:{id:'long-a',type:'command_execution',exit_code:code}}));
