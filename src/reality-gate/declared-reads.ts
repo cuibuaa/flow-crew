@@ -1,16 +1,17 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import { isReservedRunPath, prospectivePhysicalPath } from '../engine-owned-carriers.js';
+import { prospectivePhysicalPath } from '../engine-owned-carriers.js';
+import { runRecordPath } from '../run-layout.js';
 import { resolveArtifactLocation } from '../artifact-location.js';
 import type { ArtifactRead } from '../artifact-declarations.js';
 import type { CheckDecl, CheckContext } from './types.js';
 
-/** Built-in data checks read authored artifacts, not the engine's own records.
- * Explicit framework reads remain available to model stages and project commands. */
+/** Built-ins must not interpret the admitted brief, including lexical/symlink aliases. */
 function handlerLocation(read: ArtifactRead, projectDir: string, runDir: string): string {
   const path = resolveArtifactLocation(read, projectDir, runDir);
-  if (read.root === 'run' && isReservedRunPath(relative(realpathSync(runDir), prospectivePhysicalPath(path)))) {
-    throw new Error(`ARTIFACT_HANDLER_READ_ENGINE_OWNED: ${read.id} must read project or run work data; use a project command to inspect engine records`);
+  const brief = runRecordPath(realpathSync(runDir), 'task_brief.md');
+  if (path === brief || prospectivePhysicalPath(path) === prospectivePhysicalPath(brief)) {
+    throw new Error(`ARTIFACT_HANDLER_READ_ENGINE_OWNED: ${read.id} cannot read the task brief as a built-in handler input`);
   }
   return path;
 }
@@ -39,7 +40,7 @@ export function inspectRealityHandlerReads(check: Exclude<CheckDecl, { kind: 'in
     const reads = (check.reads ?? []).filter((read) => covers(read, path));
     if (!reads.length) errors.push(`ARTIFACT_HANDLER_READ_UNDECLARED: reality check ${JSON.stringify(check.name)}.reads must declare the exact rooted handler input ${path}, or its exact directory for a glob/manifest member`);
     else if (new Set(reads.map((read) => read.root)).size > 1) errors.push(`ARTIFACT_HANDLER_READ_AMBIGUOUS: reality check ${JSON.stringify(check.name)}.reads declares ${path} in both roots; choose the handler's exact root`);
-    for (const read of reads) try { handlerLocation(read, projectDir, runDir); } catch (error) { errors.push(String(error)); }
+    for (const read of reads) try { handlerLocation({ ...read, path }, projectDir, runDir); } catch (error) { errors.push(String(error)); }
   }
   return errors;
 }

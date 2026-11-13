@@ -126,16 +126,27 @@ it('incidental check files and brief sidecars cannot select terminal checks; the
   expect((await evaluateRealityGate(project, created.runId, 'complete')).realityGate?.pass).toBe(false);
 });
 
-it.each(['framework', 'input', 'work-alias'] as const)('built-in data checks cannot interpret engine records through %s reads', async source => {
-  const project = join(root, 'project'); mkdirSync(project);
+it.each(['framework', 'input', 'work-alias', 'project-alias', 'directory', 'legacy', 'brief-target'] as const)('built-in data checks cannot read the task brief through %s reads', async source => {
+  const project = source === 'project-alias' ? root : join(root, 'project'); mkdirSync(project, { recursive: true });
   const created = createRun(project, 'checks', 'name: checks', [], '{}');
+  if (source === 'legacy') {
+    created.runDirPath = join(root, 'legacy'); mkdirSync(created.runDirPath);
+  }
   const briefPath = runRecordPath(created.runDirPath, 'task_brief.md');
+  if (source === 'brief-target') {
+    rmSync(briefPath, { force: true }); writeFileSync(join(created.runDirPath, 'work/body.json'), '{}');
+    symlinkSync(join(created.runDirPath, 'work/body.json'), briefPath);
+  }
   let path = 'engine/task_brief.md';
   if (source === 'work-alias') {
     path = 'work/brief.json';
     symlinkSync(briefPath, join(created.runDirPath, path));
   }
-  const read = { id: 'brief', root: 'run', path,
+  if (source === 'project-alias') { path = 'brief.json'; symlinkSync(briefPath, join(project, path)); }
+  if (source === 'legacy') path = 'task_brief.md';
+  if (source === 'brief-target') path = 'work/body.json';
+  const read = { id: 'brief', root: source === 'project-alias' ? 'project' : 'run',
+    path: source === 'directory' ? 'engine' : path, ...(source === 'directory' ? { kind: 'directory' } : {}),
     source: source === 'framework' ? { kind: 'framework', artifact: 'task_brief' } : { kind: 'input' } };
   const checks = parseRealityChecks([
     { name: 'data', type: 'json-schema-match', reads: [read], params: { file: path, schema: { type: 'object', required: ['ok'] } } },
@@ -169,4 +180,32 @@ it('framework brief reads remain transport for project-owned commands', async ()
     expect(report.pass).toBe(true);
     expect(report.results[0].evidence).toMatchObject({ stdout: body });
   }
+});
+
+
+it.each(['same.json', 'engine/ordinary.json', 'work/data.json'])('allows nonbrief run data at %s with no root fallback', async path => {
+  const project = join(root, 'project'); mkdirSync(project);
+  const created = createRun(project, 'checks', 'name: checks', [], '{}');
+  for (const [directory, value] of [[project, 'decoy'], [created.runDirPath, 'intended']]) {
+    mkdirSync(join(directory, path, '..'), { recursive: true });
+    writeFileSync(join(directory, path), JSON.stringify({ value }));
+  }
+  const checks = parseRealityChecks([{ name: 'data', type: 'json-schema-match',
+    reads: [{ id: 'data', root: 'run', path, source: { kind: 'input' } }],
+    params: { file: path, schema: { properties: { value: { enum: ['intended'] } } } } }]);
+  expect(inspectRealityCheckReachability({ checks, stages: [], projectDir: project, runDir: created.runDirPath })).toEqual([]);
+  expect((await runAllChecks(checks, { projectDir: project, taskDir: created.runDirPath })).pass).toBe(true);
+});
+
+it('refuses a brief member named by an otherwise admissible manifest at runtime', async () => {
+  const project = join(root, 'project'); mkdirSync(project);
+  const created = createRun(project, 'checks', 'name: checks', [], '{}');
+  writeFileSync(join(created.runDirPath, 'engine/manifest.json'), JSON.stringify({ files: ['engine/task_brief.md'] }));
+  const checks = parseRealityChecks([{ name: 'members', type: 'file-exists-nonempty',
+    reads: [{ id: 'records', root: 'run', path: 'engine', kind: 'directory', source: { kind: 'input' } }],
+    params: { paths: { from_manifest: 'engine/manifest.json', field: 'files[*]' } } }]);
+  expect(inspectRealityCheckReachability({ checks, stages: [], projectDir: project, runDir: created.runDirPath })).toEqual([]);
+  const report = await runAllChecks(checks, { projectDir: project, taskDir: created.runDirPath });
+  expect(report.pass).toBe(false);
+  expect(report.results[0].details).toContain('ARTIFACT_HANDLER_READ_ENGINE_OWNED');
 });
