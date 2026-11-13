@@ -2,53 +2,83 @@
 
 ## 1. Criterion evidence and validation
 
-The lifecycle decision is recorded durably before publication. New runs declare
-`event-log-v1`; old runs retain snapshot display until an accepted resume imports
-that snapshot once. This covers lifecycle status only, not complete run replay.
-References without a revision identify this delivered tree. Before references use
-local `main` at `ad94786`.
+New runs declare `event-log-v1`. Lifecycle decisions are appended and flushed
+before status-bearing caches; readers fold log bytes without writing. Legacy
+runs display their snapshots until an accepted resume imports them once.
+This is lifecycle replay only. Before references use local main `888cb0c`;
+unprefixed references identify this delivery.
 
 | Criterion | Verdict | Production evidence | Regression evidence |
 | --- | --- | --- | --- |
-| recorded-before-published | Met | `src/store.ts:1457` calls `recordRunLifecycle` before summary, snapshot and cursor. `src/run-lifecycle.ts:109` appends a decision batch; `src/append-boundary.ts:45` flushes the file, then its directory. | `lifecycle durability and failure retry`; `terminal publication`; `lifecycle crash then replay` covers all eight terminal statuses and every nonterminal producer below. |
-| format-is-declared | Met | `src/store.ts:979` persists the admission declaration before the initial event, and `:988` includes it in the snapshot. `src/run-lifecycle-authority.ts:4` accepts only the closed value; log bytes, presence and times never select authority. | `records the exact declaration at admission and selects authority only from that value`; first-admission failure tests. |
-| status-is-a-fold | Met | `src/run-lifecycle-fold.ts:13` has only event bytes as input. `src/run-lifecycle.ts:71` projects reads, `:80` reconciles caches under `src/store.ts:1178`'s lock. `src/store.ts:1355` fences stale whole snapshots. | `reads fold despite corrupt snapshot/cursor, without changing bytes or timestamps`; seven `reconciles on the next ... writer` cases; stale whole-snapshot regression; independent crash oracle. |
-| crash-then-replay | Met | Admission fallback `src/run-lifecycle.ts:58`; log-first publication and locked reconciliation above; provenance import `:141`. | `covers EVERY consecutive write gap for ...` in `spec/lifecycle-crash.test.ts:211`: owned SIGKILL at each boundary, read every surface without writes, then open for writing and compare both caches with an independent reducer. |
-| readers-do-not-write | Met | CLI `src/cli.ts:1528`, `:1615`; watch `src/watch.ts:750`; operational detail `src/cli-events.ts:362`; state view `src/run-state-view.ts:452`; UI detail `src/dashboard.ts:1127`; selected list entries use `readRunStateSafe`. | Crash-test `checkReads` hashes and compares nanosecond mtimes of snapshot, cursor and log across CLI status/list, watch, state/operational views and injected HTTP detail/list requests. SQLite candidate discovery/seeding remains permitted. |
+| recorded-before-published | Met | `src/store.ts:1475` calls `recordRunLifecycle` before summary, snapshot and cursor. `src/run-lifecycle.ts:109` appends a decision batch; `src/append-boundary.ts:45` flushes the file, then its directory. | `lifecycle durability and failure retry`; `terminal publication`; `lifecycle crash then replay` covers all eight terminal statuses and every nonterminal producer below. |
+| format-is-declared | Met | `src/store.ts:988` persists the admission declaration before the initial event, and `:998` includes it in the snapshot. `src/run-lifecycle-authority.ts:4` accepts only the closed value; log bytes, presence and times never select authority. | `records the exact declaration at admission and selects authority only from that value`; first-admission failure tests. |
+| status-is-a-fold | Met | `src/run-lifecycle-fold.ts:13` has only event bytes as input. `src/run-lifecycle.ts:71` projects reads, `:80` reconciles caches under `src/store.ts:1188`'s lock. `src/store.ts:1365` fences stale whole snapshots. | `reads fold despite corrupt snapshot/cursor, without changing bytes or timestamps`; seven `reconciles on the next ... writer` cases; stale whole-snapshot regression; independent crash oracle. |
+| crash-then-replay | Met | Admission fallback `src/run-lifecycle.ts:58`; log-first publication and locked reconciliation above; provenance import `:141`. | `covers EVERY consecutive write gap for ...` in `spec/lifecycle-crash.test.ts:213`: owned SIGKILL at each boundary, read every surface without writes, then open for writing and compare both caches with an independent reducer. |
+| readers-do-not-write | Met | CLI `src/cli.ts:1529`, `:1617`; watch `src/watch.ts:750`; operational detail `src/cli-events.ts:362`; state view `src/run-state-view.ts:453`; UI detail `src/dashboard.ts:1128`; selected list entries use `readRunStateSafe`. | Crash-test `checkReads` hashes and compares nanosecond mtimes of snapshot, cursor and log across CLI status/list, watch, state/operational views and injected HTTP detail/list requests. SQLite candidate discovery/seeding remains permitted. |
 | legacy-is-read-only | Met | `src/legacy-run-status.ts:4` is a seven-line display reader. It imports only enum resolution, returns a normalized display value, and has no transition or persistence calls. `projectRunLifecycle` branches on the recorded declaration only. | `keeps identical event bytes read-only while legacy snapshot displays differ on every surface`; characterization includes unknown status and historical `stopped`. |
-| legacy-resume-imports-once | Met | `src/store.ts:1528` imports under the run lock; `src/scheduler/sched_loop/launch.ts:144`, `:174` call it before host-recovery/resume transitions. `src/run-lifecycle.ts:141` appends+flushes snapshot provenance, then records authority. | Accepted/repeated resume; legacy running recovery; interrupted file/directory fsync; complete JSON without final newline; unknown-status/layout refusals; `import-resume` and `import-short` crash cases. |
-| light-tests | Met | Stub stage/provider outcomes, fixed clock in `spec/test-support/lifecycle-engine.ts:16`, stdout checkpoint/stdin acknowledgement protocol at `:87`. No backend or daemon is required. | The crash suite uses filesystem actions and event acknowledgements, never elapsed-time thresholds for its verdict. Independent order/fold mutations are described below. |
+| legacy-resume-imports-once | Met | `src/store.ts:1544` imports under the run lock; `src/scheduler/sched_loop/launch.ts:146`, `:176` call it before host-recovery/resume transitions. `src/run-lifecycle.ts:141` appends+flushes snapshot provenance, then records authority. | Accepted/repeated resume; legacy running recovery; interrupted file/directory fsync; complete JSON without final newline; unknown-status/layout refusals; `import-resume` and `import-short` crash cases. |
+| light-tests | Met | Stub stage/provider outcomes, fixed clock in `spec/test-support/lifecycle-engine.ts:16`, stdout checkpoint/stdin acknowledgement protocol at `:86`. No backend or daemon is required. | The crash suite uses filesystem actions and event acknowledgements, never elapsed-time thresholds for its verdict. Independent order/fold mutations are described below. |
 
-Validation records (runner totals, without constructing a full-suite total):
 
-- Initial related-file invocation: 26 files / 631 tests: 628 passed, 3 failed
-  in the two integration files subsequently repaired and rechecked below.
-- After repairing the failing integrations: 4 files / 282 tests passed, including
-  all lifecycle unit regressions, all 137 integrity tests, all 94 Git fact tests
-  and all 19 terminal-publication tests.
-- Additional daemon/status readers: 2 files / 19 tests passed.
-- Changed-source ESLint: zero errors; two existing cli.ts warnings, on the
-  unchanged workflow assignment and unused printGuideUsage helper.
-- Final build passed; every copied input/output hash matched the delivered tree.
+Final related invocation: **28 files / 872 tests; 872 passed, 0 failed** (`.cache/fix20/final-related-pass.json`). Crash/replay: **1 file / 23 tests; 23 passed, 0 failed** (`.cache/fix20/crash-final.json`). The per-case checkpoint output records 333 killed write gaps.
 
-Both deliberate mutations ran in an isolated copy inside the worktree, after a
-successful build of each mutant. The unchanged crash test
-`covers EVERY consecutive write gap for terminal:failed` rejected both:
+The inherited full validation of `659c7d1` reported 349 files / 5,104 tests,
+5,084 passed and 20 failed; public-spec isolation reported 40 passed / 1 failed.
+Those failures were deterministic. This fix does not claim that earlier report's
+completion assertion. The launcher owns full declared validation and VERIFY;
+neither command was run here. No full-suite total is assembled from subsets.
 
-| Mutation | Result | Independent assertion |
+Build (`npm run build`), full production ESLint (zero errors, five existing
+warnings) and `tsc --noEmit` passed. Builds use a byte-identical source copy inside
+`.cache/fix20`, with staging in a sibling private directory; published backend/UI
+payload hashes are checked by the unchanged test global setup. Test environments,
+engine homes and sockets are private; all physical writes stay in this worktree.
+Short fixture paths use owned aliases; the Landlock recheck uses physical paths
+rather than `/proc` aliases. No timeout was increased, and no test was removed.
+
+Both mutants built successfully in independent owned copies and each ran **all
+22 parameter cases**, not a selected terminal example:
+
+| Case | Write order reversal | First-fact fold reversal |
 | --- | --- | --- |
-| Move recordRunLifecycle after run.json publication | Exit 1; 1 test failed, 22 unselected | `spec/lifecycle-crash.test.ts:105`: cache `failed`, event oracle `running` at the cache write. |
-| Fold only the first lifecycle event | Exit 1; 1 test failed, 22 unselected | `spec/lifecycle-crash.test.ts:98`: production sequence/status `1/running`, independent oracle `2/failed` after the event append. |
+| initialize | caught | survived |
+| terminal:complete | caught | caught |
+| terminal:failed | caught | caught |
+| terminal:shipped | caught | caught |
+| terminal:ceiling_hit | caught | caught |
+| terminal:escalated | caught | caught |
+| terminal:reality_gate_failed | caught | caught |
+| terminal:cancelled | caught | caught |
+| terminal:incomplete | caught | caught |
+| pause | caught | caught |
+| park | caught | caught |
+| quota | caught | caught |
+| validation-unfinished | survived | survived |
+| resume | caught | caught |
+| cancel | caught | caught |
+| cancel-active | caught | caught |
+| recovery-active | caught | caught |
+| recovery-park | caught | caught |
+| recovery-block | caught | caught |
+| import-resume | caught | caught |
+| terminal-short | caught | caught |
+| import-short | caught | caught |
 
-An initial draft of the second mutation did not typecheck and was not counted;
-the tested mutation typechecked, built and then failed the actual crash assertion.
-Both temporary source mutations were restored; neither was applied to delivery.
+Write order moves `recordRunLifecycle` after run.json publication. The fold mutant
+keeps the first versioned fact. Order is caught by 21/21 actual transitions; fold
+by 20/21. Initialization has just one lifecycle event, so first and last facts
+coincide: its fold survivor is expected, not a claim of mutation sensitivity.
+Main removed validation-exhaustion parking; `validation-unfinished` retains that
+case as a no-transition control with an explicit unfinished validation fact.
+Both mutants correctly survive that control. The unrelated legacy-characterization
+test is unselected in mutation runs. Raw assertions and per-case results are in
+`.cache/fix20/mutant-{order,fold}.json`; there were no build or timeout failures.
 
-The crash file passed all 23 tests: 22 transition cases, 340 owned
-SIGKILL gaps, plus the identical-log/different-legacy-display case. No elapsed-time
-timeout failed. Recorded gaps by transition:
+The unmutated crash suite uses child write checkpoints and acknowledgments,
+SIGKILL at every consecutive gap, read-only checks across all surfaces, then
+locked replay of both caches. It includes the no-transition validation control.
 
-| Transition | Gaps checked |
+| Case | Killed write gaps |
 | --- | ---: |
 | initialize | 14 |
 | terminal:complete | 15 |
@@ -62,7 +92,7 @@ timeout failed. Recorded gaps by transition:
 | pause | 10 |
 | park | 10 |
 | quota | 13 |
-| validation-park | 10 |
+| validation-unfinished | 3 |
 | resume | 10 |
 | cancel | 15 |
 | cancel-active | 20 |
@@ -73,21 +103,9 @@ timeout failed. Recorded gaps by transition:
 | terminal-short | 16 |
 | import-short | 22 |
 
-The complete declared validator/VERIFY command is deliberately left to the task
-launcher, as required by the task's final instruction. The finisher runs only
-related tests and does not claim full-suite validation.
-
-Builds use `npm run build` on a byte-identical source copy inside ignored scratch.
-This satisfies the task's write boundary while respecting the existing guard
-against staging beneath that build's source root. Backend/UI payloads are copied
-back and `assertDistFresh` checks every current input and published output hash
-before tests. The first direct build correctly refused overlapping staging; its
-source and guard were not changed. Temporary copies, logs and results remain
-untracked under `.cache/finish/`.
-
 ## 2. Lifecycle writers, publication order and bypass audit
 
-Before: every ordinary serializer eventually used `main:src/store.ts:1427`:
+Before: every ordinary serializer eventually used `main:src/store.ts:1443`:
 summary -> run.json -> snapshot/cursor-based lifecycle observer -> cursor ->
 index/campaign. The observer was also invoked for unchanged saves at `:1335`,
 `:1395`, `:1547`. `main:src/run-events.ts:146` consulted the cursor and supplied
@@ -107,20 +125,20 @@ and stage metadata writes retain their existing order. Lifecycle publication is:
 
 | Status producer / writer | Before -> after boundary | Transition and extra ordering |
 | --- | --- | --- |
-| Admission and initialization | `main:src/store.ts:950` -> `src/store.ts:964` | Reservations carry identity but no lifecycle status. Initialization durably declares authority in the reservation, then records initial `running` before either cache; newly created ancestor links are flushed. Workflow/stage directories retain their existing initialization order. |
+| Admission and initialization | `main:src/store.ts:959` -> `src/store.ts:973` | Reservations carry identity but no lifecycle status. Initialization durably declares authority in the reservation, then records initial `running` before either cache; newly created ancestor links are flushed. Workflow/stage directories retain their existing initialization order. |
 | Ordinary terminal outcomes | `src/scheduler/sched_policy/run-completion.ts:54`, `:73`, `:84` -> `updateRunState` -> shared publication | All eight terminal enums, including validation downgrade to `incomplete`, use the same durable batch before summary/snapshot/cursor. Research and artifact policy decisions themselves are unchanged. |
 | Iteration reset | `src/scheduler/sched_loop/iteration-setup.ts:181` -> `writeRunState` | Explicit `running` decision; unchanged lifecycle emits no new status event. |
-| Relaunch and resume | `src/scheduler/sched_loop/launch.ts:216`, `:352` -> `updateRunState` | Legacy import precedes the transition; resume repends failed/skipped stage sidecars before the `running` lifecycle batch. |
+| Relaunch and resume | `src/scheduler/sched_loop/launch.ts:218`, `:352` -> `updateRunState` | Legacy import precedes the transition; resume repends failed/skipped stage sidecars before the `running` lifecycle batch. |
 | Deployment pause/park | `src/deployment-hold.ts:72` -> `updateRunState` | Settled-attempt check, `parked` lifecycle batch, caches. There is no separate `paused` run enum. |
 | Provider-quota park | `src/scheduler/sched_settlement/stage-execution.ts:97`, `:102` -> `writeRunState` | Repend stage sidecar/aggregate, then explicit `parked` batch and caches. |
-| Validation-resource park | `src/scheduler/sched_settlement/gate-validation.ts:189`, `:193` -> `updateRunState` | Existing validation evidence first; explicit `parked` batch before lifecycle caches. |
-| Cancellation | `src/run-control.ts:559` -> `run-completion.ts:124` -> `updateOperationalRunState` | Matching active stage ledgers close before `cancelled` batch and caches; interruption/completion notices follow. Existing terminal/unknown outcomes remain preserved. Public cancellation can now read a declared admission before run.json exists. |
+| Unfinished validation | `src/scheduler/sched_settlement/gate-validation.ts:173` | Main releases unfinished facts to review without parking; the crash control checks cache-only writes preserve the existing fold. |
+| Cancellation | `src/run-control.ts:562` -> `run-completion.ts:124` -> `updateOperationalRunState` | Matching active stage ledgers close before `cancelled` batch and caches; interruption/completion notices follow. Existing terminal/unknown outcomes remain preserved. Public cancellation can now read a declared admission before run.json exists. |
 | Host interruption | `src/restart-recovery.ts:106`, `:124`, `:240`, `:243` -> locked store APIs | Initial lock replay also covers early returns; recovery intent and stage-ledger settlement retain their existing evidence checks; explicit `parked` or `failed` decision precedes caches, then recovery notice. |
-| Whole snapshot save | `main:src/store.ts:1492` -> `src/store.ts:1522` | Common publication; an outdated lifecycle sequence cannot reverse a newer decision. Cancellation fence remains. |
-| Locked snapshot mutation and callback repeat | `main:src/store.ts:1497` -> `src/store.ts:1534`, `:1602` | Fresh log projection before mutator; all saves, including callback re-publication, route through the common boundary. |
-| Operational / alternate-directory mutation | `main:src/store.ts:1510` -> `src/store.ts:1547` | Shared publication without requiring history hydration; authority cannot be silently added or removed. |
-| Stage and recovery aggregate publishers | `main:src/store.ts:1622`, `:1653` -> `src/store.ts:1657`, `:1688` | Hold the same lock, then common run publication; a stage-only update cannot manufacture a new lifecycle from stale aggregate status. |
-| Integrity restoration | `main:src/engine-integrity.ts:447` -> `src/engine-integrity.ts:447` | Restore log before caches, flush it before a status-bearing snapshot restore, fold status from that restored log, then reconcile both caches under lock. Opaque legacy preimages retain exact bytes. |
+| Whole snapshot save | `main:src/store.ts:1508` -> `src/store.ts:1538` | Common publication; an outdated lifecycle sequence cannot reverse a newer decision. Cancellation fence remains. |
+| Locked snapshot mutation and callback repeat | `main:src/store.ts:1513` -> `src/store.ts:1550`, `:1602` | Fresh log projection before mutator; all saves, including callback re-publication, route through the common boundary. |
+| Operational / alternate-directory mutation | `main:src/store.ts:1526` -> `src/store.ts:1563` | Shared publication without requiring history hydration; authority cannot be silently added or removed. |
+| Stage and recovery aggregate publishers | `main:src/store.ts:1640`, `:1653` -> `src/store.ts:1675`, `:1688` | Hold the same lock, then common run publication; a stage-only update cannot manufacture a new lifecycle from stale aggregate status. |
+| Integrity restoration | `main:src/engine-integrity.ts:447` -> `src/engine-integrity.ts:451` | Restore log before caches, flush it before a status-bearing snapshot restore, fold status from that restored log, then reconcile both caches under lock. Opaque legacy preimages retain exact bytes. |
 | Projection-only repair | New `src/run-lifecycle.ts:80`, `:101` | Flush existing log; write status and both cursors equal to its fold. No new lifecycle decision is appended. A missing wrap-up notice may be completed solely from a logged decision's structured obligation. |
 | Legacy adoption | New `src/run-lifecycle.ts:141` | Append+fsync one `run_status_imported` with snapshot status/source; persist declaration+folded snapshot; persist cursor. Retry recognizes the complete import, flushes and adopts it without a duplicate. |
 
@@ -162,106 +180,126 @@ log read, resume, cancellation, recovery or transition function. A source import
 search finds only its read-projection caller. Legacy producer decisions continue
 to use the existing explicit control operations; this reader decides none.
 
-`src/store.ts:1528` exposes the synchronous locked import. Accepted resume uses
-it before any recovery or running transition. The event records
+`src/store.ts:1544` exposes the synchronous locked import. Accepted resume uses
+it before any recovery or running transition, and before an accepted terminal
+research re-entry returns its settled result. Refusal checks run before opening
+for writing; undeclared and cancelled refusal diagnostics never open a writer. The event records
 `type=run_status_imported`, `lifecycleVersion=1`, `snapshotSource=run.json`,
 `snapshotStatus`, `runStatus`, run identity and timestamp. Import-event detection
 is an idempotence key only; it never selects display authority. A crash before
 the declaration retains legacy display. Declaration publication follows fsync;
 subsequent reads and writes use only the log for lifecycle status.
 
-## 4. Removed/added mechanisms, defects and size
+## 4. Mechanisms, defects and production size
 
-Removed: cursor/snapshot-based observation/backfill in
-`main:src/run-events.ts:146`, and its four ordinary/no-op save hooks in store.
-Replaced: mutable lifecycle selection in status/watch/details with a bytes-only
-fold and lock-entry cache reconciliation. Added: lifecycle-only durable append,
-closed declaration reader, required legacy reader/import, and admission fallback.
-No feature flag retains the old observer. High-volume event appends stay unflushed;
-store public signatures stay synchronous. The separate reducer/declaration/legacy
-modules keep lifecycle policy out of the already-large store.
+| Added or restructured production mechanism | What it replaces / why it remains |
+| --- | --- |
+| Durable append and shared directory fsync (`src/append-boundary.ts:16`, `src/engine-fs.ts:132`) | Refactors the existing append loop and atomic directory flush; only lifecycle appends pay fsync. Ancestor creation also flushes directory links. No high-volume diagnostic fsync was added. |
+| Versioned pure fold (`src/run-lifecycle-fold.ts:13`) | Replaces mutable snapshot/cursor selection for declared runs. It reads event bytes only. |
+| Closed declaration (`src/run-lifecycle-authority.ts:4`, `src/store.ts:988`) | Replaces implicit selection; stored `event-log-v1` alone chooses authority. Uses the existing admission reservation, not a second authority channel. |
+| Seven-line legacy display reader (`src/legacy-run-status.ts:4`) | Replaces duplicated enum normalization in readers; no filesystem or transition operation. |
+| Shared admission-aware snapshot reader (`src/run-lifecycle.ts:58`) | Replaces direct snapshot-only reads; the existing declaration-bearing reservation keeps the first durable fact readable before run.json. |
+| Locked decision publication, projection and stale-snapshot fence (`src/run-lifecycle.ts:109`, `src/store.ts:1365`, `src/store.ts:1473`) | Replaces snapshot-first publication and `main:src/run-events.ts:146`'s cursor observer. Four observer hooks at main store lines 1345, 1411, 1458 and 1565 are gone. General unflushed event APIs reject lifecycle events. |
+| Lock-entry replay and log-derived wrap-up completion (`src/run-lifecycle.ts:42`, `src/run-lifecycle.ts:80`) | Replaces cursor repair/backfill, retaining the existing wrap-up obligation entirely from a recorded decision. Never invents a lifecycle event from caches. |
+| Provenance import (`src/run-lifecycle.ts:141`, `src/store.ts:1544`) | Replaces implicit legacy adoption with one durable import under the existing lock, after acceptance. Retry uses the import as an idempotence key, not an authority selector. |
+| Log-first integrity restoration (`src/engine-integrity.ts:282`, `src/engine-integrity.ts:456`) | Replaces cache-first restoration and digest-only treatment of the authoritative log. Reuses existing preimage machinery; full carrier deletion now restores the log and caches together. Restoration verifies the staged digest. |
+| Cancellation admission/replay (`src/run-control.ts:235`, `src/run-control.ts:547`) | Replaces snapshot-only target lookup and an unlocked terminal-control decision. Existing cancellation/refusal policy is retained after metadata publication settles under the existing lock. |
+| Refusal boundary (`src/engine-continuation.ts:17`, `src/scheduler/sched_loop/launch.ts:59`) | Removes premature repair on a refused legacy/cancelled continuation; accepted routes already enter the import/replay lock, including settled research re-entry. |
 
-The net source increase is necessary for the durable boundary, pure replay,
-explicit historical-format policy and their failure/retry cases, which had no
-previous equivalent. It replaces the old observation mechanism; stage/index/task
-replay, extra authority channels and new runtime options were not added.
+There is no parallel cursor-observation implementation: its function, cursor
+schema/dedupe construction, imports and all four call sites are deleted. Source
+searches find lifecycle status event construction only at the locked decision
+and explicit import boundaries. Existing status producers still use the shared
+store serializer; integrity restoration is the additional physical writer.
+No runtime option, flag, test-name/path/error-text rule or async store API was added.
 
-The independent finish review reproduced and fixed three inherited defects:
+Fix20 production defects were the refusal write before cancellation checks,
+unrecoverable authoritative log after carrier deletion, and cancellation's
+unlocked terminal decision in the log/cache gap. Existing regression tests stay.
+Fixtures which overwrote declared facts now retain/log them; legacy fixtures
+remove the declaration; filesystem probes reload setup-preloaded modules.
+Integrity tests now demand trusted log restoration instead of counterfeit bytes,
+and their original append read-count assertion still passes.
 
-- Public cancellation returned RUN_NOT_FOUND after the first lifecycle event but
-  before run.json. `src/run-control.ts:544` now uses the same declaration-bearing
-  admission fallback as readers. New test: `cancels through the public coordinator
-  after the first event but before the first snapshot`.
-- Operational mutations could silently add authority to a legacy snapshot without
-  import. `src/run-lifecycle.ts:112` now rejects that adoption at the common
-  boundary, before appending. New test: `refuses authority adoption by an
-  operational mutation without the resume import`. Both new tests failed against
-  the inherited implementation and passed after the fixes.
-- Integrity restoration unconditionally parsed every snapshot preimage as JSON,
-  leaving a corrupted replacement in place for opaque legacy bytes.
-  `src/engine-integrity.ts:469` now preserves those preimages byte for byte and
-  folds only declared JSON records. Existing regression: `voids a successful
-  child overwriting run.json`.
+Physical line counts include comments/blanks in tracked `src/**/*.ts`; they
+exclude every test, report, generated file and temporary source copy.
 
-Two integration fixtures were also corrected without changing production policy:
-`spec/engine-integrity.test.ts:630` retains admission facts when appending a
-concurrent parent diagnostic; `spec/git-facts.test.ts:271` checks that summary Git
-termination still propagates synchronously and leaves snapshot bytes unchanged,
-while the preceding logged decision remains readable. Its held-Git retry now
-publishes actual conclusion metadata: replay makes a pure status-only retry a
-no-op. Neither failure was a timeout, and no timeout was extended.
-
-Production physical-line counts use tracked `.ts` files beneath src, including
-comments/blanks, comparing local main with delivery. Source-only temporary copies
-are excluded. The total is 197 -> 201 source files and 53,808 -> 54,084 physical source lines
-(net +276). Module counts:
-
-| Module | Before | After |
+| Revision | Production files | Production lines |
 | --- | ---: | ---: |
-| src/store.ts | 2,112 | 2,148 |
-| src/run-events.ts | 236 | 196 |
+| Incoming 659c7d1 | 201 | 54,084 |
+| New main 888cb0c | 198 | 54,366 |
+| Rebased before Fix20 | 202 | 54,642 |
+| Final | 202 | 54,655 |
+
+Against new main: **408 added / 119 deleted production lines; net +289**,
+in 21 production paths. Fix20 itself adds net 13 production lines after rebase.
+The new guarantees require durable replay and an explicit historical-format
+boundary which had no equivalent before; their total size does not claim a
+line-for-line reduction. The net increase and restoration cost are explicit.
+
+| Changed production module | main | Final |
+| --- | ---: | ---: |
 | src/append-boundary.ts | 31 | 52 |
+| src/cli-events.ts | 599 | 602 |
+| src/cli.ts | 1933 | 1941 |
+| src/dashboard.ts | 1512 | 1513 |
+| src/engine-continuation.ts | 84 | 88 |
 | src/engine-fs.ts | 168 | 167 |
-| src/engine-integrity.ts | 488 | 512 |
-| src/run-lifecycle.ts | 0 | 163 |
-| src/run-lifecycle-fold.ts | 0 | 27 |
-| src/run-lifecycle-authority.ts | 0 | 8 |
+| src/engine-integrity.ts | 488 | 516 |
 | src/legacy-run-status.ts | 0 | 7 |
+| src/orchestrator.ts | 1721 | 1722 |
+| src/restart-recovery.ts | 254 | 255 |
+| src/run-control.ts | 558 | 562 |
+| src/run-events.ts | 236 | 196 |
+| src/run-lifecycle-authority.ts | 0 | 8 |
+| src/run-lifecycle-fold.ts | 0 | 27 |
+| src/run-lifecycle.ts | 0 | 163 |
+| src/run-state-view.ts | 559 | 570 |
+| src/scheduler/sched_loop/launch.ts | 384 | 389 |
+| src/store.ts | 2136 | 2172 |
+| src/watch.ts | 948 | 950 |
 
-The delivery changes 35 paths including this report, below the approximate
-40-file bound.
+The complete diff spans about 40 paths (42); the extra paths above the original
+35 are existing failing test files plus the refusal boundary. Production remains
+21 paths. This task explicitly requires covering those previously skipped files.
+Rebase conflicts were in store imports/fields, CLI status fields and state-view
+hash/run fields; both lifecycle and main write-grant behavior were retained.
+Main's review completeness and validation changes are retained, and production
+Git ownership remains `src/git-facts.ts`, checked by the unchanged ownership tests.
 
-The initial inherited implementation was committed unchanged before rebase. The
-rebase resolved only leading import conflicts in dashboard and orchestrator,
-retaining both lifecycle imports and main's Git owner imports. All production Git
-execution still uses `src/git-facts.ts`; its source-ownership test is retained.
-The ignore file now permits only this report beneath docs/append-log, leaving all
-three frozen inputs untracked and ignored.
+The three append-log-specific ignore lines are removed. Two general report rules
+replace both former per-directory lists, keeping tracked reports admissible to
+the tracked-ignored-file check. All three archived input copies are removed from
+the final worktree and never committed.
 
-## 5. Measured durable-append cost
+## 5. Measured durability and restoration cost
 
-The actual production primitives `appendTextRecord` and
-`appendDurableTextRecord` appended the same versioned lifecycle JSON record on
-the same worktree filesystem. Each mode has 64 alternating-order pairs. Existing
-files were created and flushed before sampling; new-file samples use unique
-names in an already-created directory. The durable primitive includes file and
-parent-directory fsync in both modes. Native monotonic measurements impose no
-pass/fail duration threshold.
+The same production primitives appended the same lifecycle JSON on this machine,
+64 alternating-order pairs per mode. Values below are milliseconds; there is no
+elapsed-time pass/fail threshold. File and parent-directory fsync are included.
+Raw samples: `.cache/fix20/cost.json`.
 
-| Work | Mean ms | Median ms | p95 ms |
+| Work | Mean | Median | p95 |
 | --- | ---: | ---: | ---: |
-| Existing log, unflushed | 0.315 | 0.190 | 0.554 |
-| Existing log, durable | 20.300 | 14.670 | 24.364 |
-| New log, unflushed | 0.214 | 0.186 | 0.434 |
-| New log, durable | 15.227 | 13.451 | 21.257 |
+| Existing log, unflushed | 0.132 | 0.108 | 0.241 |
+| Existing log, durable | 15.125 | 14.648 | 21.988 |
+| New log, unflushed | 0.200 | 0.134 | 0.368 |
+| New log, durable | 16.689 | 16.226 | 22.101 |
 
-Added mean cost: 19.985 ms for an existing log, 15.013 ms for a new one. The machine
-was loaded; these are observations, not a claim that first creation is faster.
-The benchmark excludes lock acquisition, ancestor creation, fold scanning,
-summary rendering, snapshot/cursor writes and index work. A terminal lifecycle
-batch includes its wrap-up notice in the same flush. The measurement script and
-raw per-sample milliseconds are retained in ignored finisher scratch, alongside
-the test logs. No operator data or backend was used.
+Added mean: 14.993 ms existing / 16.489 ms new. This excludes lock, fold, summary,
+cache and index work; it does not add diagnostic flushing.
+
+Restoration has a measured cost too: eight runs of the same guard over a fixed
+4 KiB log and 32 identical diagnostic appends averaged **93.515 ms before /
+179.250 ms after** (about 2.679 ms added per guarded append in this probe).
+Only integrity code differs between the probe copies. The exact existing
+2-prefix-read append assertion remains unchanged and passes; retained preimages
+add clone/write work, not another full-prefix hash on each append. This cost
+buys restoration after total carrier deletion; a digest cannot recover deleted
+bytes. It reuses the existing preimage implementation and adds no log fsync.
+These are loaded-machine observations, not a performance improvement claim.
+Raw samples/scripts are under `.cache/fix20/integrity-*.json` and
+`.cache/fix20/benchmark-integrity.mjs`.
 
 ## 6. GAP-REPORT corrections and next-slice contract
 

@@ -156,6 +156,9 @@ describe('terminal artifact freshness', () => {
     });
     const legacyRunPath = runRecordPath(created.runDirPath, 'run.json');
     const legacyState = JSON.parse(readFileSync(legacyRunPath, 'utf8'));
+    // format-is-declared / legacy-resume-imports-once: this is an old run.
+    delete legacyState.lifecycleAuthority;
+    delete legacyState.lifecycleCursor;
     delete legacyState.terminalArtifactBaselines;
     legacyState.status = 'failed';
     legacyState.completedAt = new Date().toISOString();
@@ -177,6 +180,9 @@ terminal_states:
 `, true, undefined, false,
     );
 
+    const imports = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
+      .map(row => JSON.parse(row)).filter(row => row.type === 'run_status_imported');
+    expect(imports).toEqual([expect.objectContaining({ lifecycleVersion: 1, snapshotSource: 'run.json', snapshotStatus: 'failed', runStatus: 'failed' })]);
     expect(state.status, state.failureReason).toBe('shipped');
     expect(state.runId).toBe(created.runId);
     expect(state.startedAt).toBe(legacyState.startedAt);

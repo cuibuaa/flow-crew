@@ -1,3 +1,4 @@
+import { withRunStateLock } from './store.js';
 import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { runRecordPath } from './run-layout.js';
 import { cancelRunStateAtPath } from './scheduler/sched_policy/run-completion.js';
@@ -230,7 +231,9 @@ export class RunCancellationCoordinator {
     const task = initial.task ? (this.registry.get(initial.task.id) ?? initial.task) : undefined;
     const runBinding = initial.runBinding ?? initial.run?.binding ?? task?.run_id;
     const run = runBinding
-      ? (this.readRunTarget(runBinding) ?? initial.run)
+      ? (initial.run
+        ? withRunStateLock(initial.run.runPath, () => this.readRunTarget(runBinding)) ?? initial.run
+        : this.readRunTarget(runBinding))
       : initial.run;
     const target: CancellationTarget = { task, run, runBinding, unit: initial.unit };
     const targetRunId = run?.runId ?? (task ? this.taskRunId(task) : undefined);

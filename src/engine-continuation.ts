@@ -1,4 +1,5 @@
 import { rethrowGitNotAnswered } from './git-facts.js';
+import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { runRecordPath } from './run-layout.js';
 /** Validate persisted execution contracts before any continuation is queued or
  * claimed. Build identity is provenance; supported state, not hash equality,
@@ -12,6 +13,9 @@ import { readRunState, readStageStatus, requireKnownRunStatus, runDir, RUN_STATU
 
 export function recordContinuationRefusal(projectDir: string, runId: string, reason: string): void {
   try {
+    // A refusal is not acceptance of a legacy continuation or a cache repair.
+    const snapshot = readRunState(projectDir, runId);
+    if (!hasLifecycleAuthority(snapshot) || snapshot.status === RUN_STATUS.CANCELLED) return;
     updateOperationalRunStateAtPath(runDir(projectDir, runId), state => {
       if (state.status !== RUN_STATUS.CANCELLED) state.continuationFailure = { at: new Date().toISOString(), reason, generation: engineGeneration() };
     });

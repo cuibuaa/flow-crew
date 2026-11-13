@@ -9,6 +9,7 @@ import type { Adapter } from '../src/adapters/base.js';
 import { archiveGateRoundEvidence } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { createRun } from './test-support/create-run.js';
 import {
+  updateRunState,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -63,14 +64,20 @@ describe('Reality-Gate advisory summary', () => {
       const projectDir = join(root, 'project'); mkdirSync(projectDir);
       const created = createRun(projectDir, 'test', 'name: test', ['active_work']);
       const path = runRecordPath(runDir(projectDir, created.runId), 'run.json');
+      // status-is-a-fold: the terminal status must be a logged decision.
+      updateRunState(projectDir, created.runId, state => { state.status = 'complete'; });
       const state = JSON.parse(readFileSync(path, 'utf8'));
-      state.status = 'complete';
+      state.status = 'running'; // status-is-a-fold: the snapshot cache cannot hide the terminal log fact.
       state.stages.active_work = { status: 'complete', retries: 0 };
       state.retiredStageUsage = [{ stageId: 'work', iteration: 'damaged-optional-iteration', status: { status: 'failed', retries: 0 } }];
       writeFileSync(path, JSON.stringify(state));
       const summary = await generateRunSummary(projectDir, created.runId, {
         run: async () => ({ output: '## What was done\n- deterministic narrative', exitCode: 0, duration_ms: 1 }),
       });
+      const terminal = readFileSync(runRecordPath(runDir(projectDir, created.runId), 'events.jsonl'), 'utf8')
+        .trim().split('\n').map(row => JSON.parse(row)).findLast(row => row.lifecycleVersion === 1 && row.type === 'run_status_changed');
+      expect(terminal).toMatchObject({ lifecycleVersion: 1, runStatus: 'complete' });
+      expect(readRunState(projectDir, created.runId).status).toBe(terminal.runStatus);
       expect(summary).toContain('active_work: complete');
       expect(summary).toContain('RUN_STAGE_HISTORY_INVALID: retiredStageUsage[0]: optional history omitted');
       expect(summary).not.toContain('work [iteration');

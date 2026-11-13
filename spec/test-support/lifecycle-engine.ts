@@ -7,8 +7,10 @@ import { basename, join, resolve } from 'node:path';
 
 const root = resolve(process.argv[2]);
 const mode = process.argv[3];
-if (process.env.FC_HOME !== join(root, 'fc') || process.env.TMPDIR !== join(root, 'tmp')
-    || process.env.FLOWCREW_DAEMON_SOCKET !== join(root, 'daemon.sock')) throw new Error('private engine environment required before module load');
+// This owned helper establishes isolation before loading engine modules.
+Object.assign(process.env, { HOME: join(root, 'home'), FC_HOME: join(root, 'fc'),
+  TMPDIR: join(root, 'tmp'), TMP: join(root, 'tmp'), TEMP: join(root, 'tmp'),
+  FLOWCREW_DAEMON_SOCKET: join(root, 'daemon.sock') });
 const NativeDate = Date;
 const instant = '2035-02-03T04:05:06.000Z';
 globalThis.Date = class extends NativeDate {
@@ -50,7 +52,7 @@ if (mode === 'recovery-park' || mode === 'recovery-active') store.updateRunState
     bootId: 'previous-boot', at: instant, processes: [] };
 });
 
-if (mode === 'validation-park') {
+if (mode === 'validation-unfinished') {
   const { appendEvidence, captureProjectTree, VALIDATION_FACT_VERSION } = await import('../../src/evidence-ledger.js');
   store.updateRunState(project, runId, state => { state.planControl = { version: 1, stages: workflow.stages } as never; });
   store.writeStageStatus(project, runId, 'work', { status: 'complete', retries: 0, attempts: [
@@ -60,7 +62,7 @@ if (mode === 'validation-park') {
     exitCode: 0, status: 'complete', treeHash: null, files: [],
     measurements: { inputTokens: null, outputTokens: null, durationMs: 0, provenance: 'adapter-reported' } });
   fs.writeFileSync(runRecordPath(directory, 'validation_baseline.json'), JSON.stringify({ version: 1,
-    capturedAt: instant, source: 'project-declarations', baseline: { version: 1, results: [], discovery: {
+    capturedAt: instant, source: 'project-declarations', limits: { timeoutMs: 1, attempts: 1 }, baseline: { version: 1, results: [], discovery: {
       state: 'configured', configPath: 'fixture', missingRoles: [], commands: [
         { role: 'test', command: process.execPath, args: ['-e', 'throw Error("exhausted validation must not execute")'], display: 'stub validation' },
       ],
@@ -125,7 +127,11 @@ else if (mode === 'quota') parkProviderQuota(store.readRunState(project, runId),
   providerFailure: { kind: 'quota', provider: 'stub', source: 'native_stdout', resetAt: '2035-02-04T00:00:00.000Z' },
 } as never);
 else if (mode === 'resume' || ['import-resume', 'import-short'].includes(mode)) prepareWorkflowLaunch(workflow, yaml, project, runId);
-else if (mode === 'validation-park') await (await import('../../src/scheduler/sched_settlement/gate-validation.js')).validateSettledTree(project, runId);
+else if (mode === 'validation-unfinished') {
+  await (await import('../../src/scheduler/sched_settlement/gate-validation.js')).validateSettledTree(project, runId);
+  const facts = (await import('../../src/evidence-ledger.js')).readEvidence(directory);
+  if (!facts.some(fact => fact.kind === 'validation' && fact.resourceState === 'unfinished')) throw new Error('missing unfinished validation fact');
+}
 else if (mode === 'cancel' || mode === 'cancel-active') cancelRunStateAtPath(directory, instant);
 else if (mode === 'recovery-park' || mode === 'recovery-active') reconcileHostInterruptedRun(project, runId, { currentBootId: 'current-boot', assertSchedulerAbsent: () => {} });
 else if (mode === 'recovery-block') reconcileHostInterruptedRun(project, runId, { assertSchedulerAbsent: () => {} });

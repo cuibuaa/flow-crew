@@ -1,3 +1,5 @@
+import { appendDurableTextRecord } from '../src/append-boundary.js';
+import type { StoreState } from '../src/store.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -100,6 +102,17 @@ async function clean(keep = 0): Promise<string> {
   return result.stdout;
 }
 
+// recorded-before-published / status-is-a-fold: simulate a crash after the
+// durable terminal decision and cache publication, before scratch retirement.
+function interruptedTerminal(state: StoreState): void {
+  appendDurableTextRecord(runRecordPath(runDir, 'events.jsonl'), JSON.stringify({
+    type: 'run_status_changed', lifecycleVersion: 1, runId: state.runId,
+    runStatus: state.status, timestamp: new Date().toISOString(),
+  }));
+  writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify(state));
+  expect(readRunState(project, state.runId).status).toBe(state.status);
+}
+
 describe('invocation scratch lifetime without provider calls', () => {
   it('shares scratch ownership through an aliased run path and its physical storage identity', () => {
     const link = join(root, 'control-link');
@@ -200,8 +213,8 @@ describe('invocation scratch lifetime without provider calls', () => {
     recovered.cleanup();
     expect(existsSync(citation)).toBe(true);
     const recoveredPayload = realpathSync(recovered.path);
-    writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: 'failed',
-      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
+    interruptedTerminal({ ...readRunState(project, basename(runDir)), status: 'failed',
+      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } });
     expect(await clean()).toContain('Cleaned 1');
     for (const path of [payload, recovered.path, recoveredPayload]) expect(existsSync(path)).toBe(false);
   });
@@ -240,11 +253,11 @@ describe('invocation scratch lifetime without provider calls', () => {
     await once(child, 'spawn');
     const exited = once(child, 'exit');
     try {
-      writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({
+      interruptedTerminal({
         ...readRunState(project, basename(runDir)), status: 'failed',
         engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, at: new Date().toISOString(),
           processes: [{ pid: child.pid, processStart: processStartToken(child.pid!) }] },
-      }));
+      });
       expect(await clean()).toContain('Skipped 1 live run(s)');
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
       child.kill('SIGKILL');
@@ -309,8 +322,8 @@ describe('invocation scratch lifetime without provider calls', () => {
     const alias = dirname(scratch.path);
     writeFileSync(join(payload, 'build-cache.bin'), 'disposable');
     // Simulate interrupted terminal retirement followed by a wiped TMPDIR.
-    writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: RUN_STATUS.COMPLETE,
-      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
+    interruptedTerminal({ ...readRunState(project, basename(runDir)), status: RUN_STATUS.COMPLETE,
+      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } });
     rmSync(alias);
     expect(existsSync(join(payload, 'build-cache.bin'))).toBe(true);
     expect(await clean()).toContain('Cleaned 1');

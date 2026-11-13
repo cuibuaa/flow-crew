@@ -23,13 +23,8 @@ Thumbs.db
 .idea/
 *.tsbuildinfo
 ui/*.d.ts.map
-docs/*
-!docs/append-log/
-docs/append-log/*
-!docs/append-log/report.md
-!docs/git-facts/
-docs/git-facts/*
-!docs/git-facts/report.md
+docs/*/*
+!docs/*/report.md
 tests/
 ui/tests/
 design/*

@@ -70,7 +70,7 @@ function oracle(bytes: string) {
 async function execute(mode: string, killAt?: number): Promise<Execution> {
   const root = temporaryRoot();
   const child = spawn(process.execPath, ['--import', loader, join(repository, 'spec/test-support/lifecycle-engine.ts'), root, mode],
-    { cwd: repository, env: environment(root), stdio: ['pipe', 'pipe', 'pipe'], timeout: 90_000 });
+    { cwd: repository, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 90_000 });
   children.add(child);
   let buffer = '', errors = '', identity: Identity | undefined, final: { status: string } | undefined;
   const checkpoints: Checkpoint[] = [];
@@ -141,7 +141,7 @@ async function checkReads(execution: Execution): Promise<void> {
   const expected = declared ? folded?.status : record?.status;
   const cli = (command: string, args: string[]) => spawnSync(process.execPath,
     ['--import', loader, join(repository, 'src/cli.ts'), command, ...args],
-    { cwd: project, env: environment(root), encoding: 'utf8', timeout: 90_000 });
+    { cwd: project, env: { ...environment(root), HOME: join(root, 'home'), FC_HOME: join(root, 'fc') }, encoding: 'utf8', timeout: 90_000 });
   if (expected !== undefined) {
     expect(readRunState(project, runId).status).toBe(expected);
     expect(readArchivedRunState(project, runId).state.status).toBe(expected);
@@ -201,10 +201,12 @@ async function checkReads(execution: Execution): Promise<void> {
   }
 }
 
+// main releases unfinished validation to the next model without a lifecycle
+// transition. Retain that former parking case as a no-transition control.
 const cases = [
   ['initialize', 'running'],
   ...['complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'cancelled', 'incomplete'].map(status => [`terminal:${status}`, status]),
-  ['pause', 'parked'], ['park', 'parked'], ['quota', 'parked'], ['validation-park', 'parked'], ['resume', 'running'],
+  ['pause', 'parked'], ['park', 'parked'], ['quota', 'parked'], ['validation-unfinished', 'running'], ['resume', 'running'],
   ['cancel', 'cancelled'], ['cancel-active', 'cancelled'], ['recovery-active', 'parked'], ['recovery-park', 'parked'], ['recovery-block', 'failed'], ['import-resume', 'running'], ['terminal-short', 'failed'], ['import-short', 'running'],
 ];
 describe('lifecycle crash then replay', () => {

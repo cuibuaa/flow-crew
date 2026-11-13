@@ -276,9 +276,11 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     }
   }
   const owns = (path: string): boolean => roots.some(root => inside(root, path));
-  // Append-only text records retain a prefix digest, never a disk preimage.
+  // Diagnostic append-only records retain a prefix digest. The authoritative
+  // lifecycle log needs a preimage so deleted carriers can be restored together.
   // run-history is a rewritable journal (tail repair/truncation), not a log.
   const appendOnly = (path: string): boolean => /\.(?:log|jsonl)$/.test(path)
+    && path !== (run && join(run, 'events.jsonl'))
     && !/^run-history(?:[./]|$)/.test(relative(engine ?? distribution, path));
   const backing = mkdtempSync(join(tmpdir(), '.tmp-integrity-'));
   let sequence = 0;
@@ -305,7 +307,9 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     const needsPrior = !replace && (write.resize !== undefined || offset !== priorLength || !appendOnly(path));
     if (needsPrior && previous) {
       copyFileSync(previous.backing ?? path, saved, constants.COPYFILE_FICLONE);
-      if (hashRollbackFileSync(saved).sha256 !== prefix.copy().digest('hex')) throw new EngineStateError(`ENGINE_STATE_TAMPERED: changed engine preimage ${path}`);
+      // Appends use the retained engine image and the cached prefix digest;
+      // restoration checks that image again before publishing it.
+      if ((!append || !previous.backing) && hashRollbackFileSync(saved).sha256 !== prefix.copy().digest('hex')) throw new EngineStateError(`ENGINE_STATE_TAMPERED: changed engine preimage ${path}`);
     }
     let resized: Hash | undefined;
     if (write.resize !== undefined) {

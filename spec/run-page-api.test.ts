@@ -68,8 +68,10 @@ describe('dashboard iteration history', () => {
       // Raw persisted optional data can be malformed even when core hydration
       // succeeds. Use the gate's damaged iteration, with a valid-row control.
       const path = runRecordPath(runDir(project, runId), 'run.json');
+      // status-is-a-fold: publish terminal status before damaging optional history.
+      updateRunState(project, runId, state => { state.status = 'complete'; });
       const state = JSON.parse(readFileSync(path, 'utf8'));
-      state.status = 'complete';
+      state.status = 'failed'; // A stale cache must not replace the logged terminal decision.
       const status = { status: 'failed', retries: 0 };
       state.retiredStageUsage = [
         { stageId: 'work', iteration: 'damaged-optional-iteration', status },
@@ -80,7 +82,10 @@ describe('dashboard iteration history', () => {
       const response = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
       expect(response.statusCode).toBe(200);
       const detail = response.json();
-      expect(detail.status).toBe('complete');
+      const terminal = readFileSync(runRecordPath(runDir(project, runId), 'events.jsonl'), 'utf8')
+        .trim().split('\n').map(row => JSON.parse(row)).findLast(row => row.lifecycleVersion === 1 && row.type === 'run_status_changed');
+      expect(terminal).toMatchObject({ lifecycleVersion: 1, runStatus: 'complete' });
+      expect(detail.status).toBe(terminal.runStatus);
       expect(detail.stages.map((stage: { id: string }) => stage.id)).toEqual(['active']);
       expect(detail.stageHistory).toEqual([{ stageId: 'valid', iteration: 1, status }]);
       expect(detail.stageHistoryDiagnostics).toEqual([expect.objectContaining({ code: 'RUN_STAGE_HISTORY_INVALID', path: 'retiredStageUsage[0]' })]);

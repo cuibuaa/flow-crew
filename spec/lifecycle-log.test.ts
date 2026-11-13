@@ -10,6 +10,7 @@ import { appendDurableTextRecord, appendTextRecord } from '../src/append-boundar
 import { recordRunEvent, readRunEvents } from '../src/run-events.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { RUN_STATUS, fcGlobalDir, initializeReservedRun, reserveRun, readRunState, readArchivedRunState, readOperationalRunState, setFcGlobalDir, updateRunState, updateOperationalRunState, updateStageStatusUnderRunLock, withRunStateLock, writeRunState, importRunLifecycleForResume } from '../src/store.js';
+import { assertContinuationCompatible, recordContinuationRefusal } from '../src/engine-continuation.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
@@ -309,17 +310,38 @@ describe('explicit legacy exception and one-time import', () => {
     expect(readRunEvents(project, runId).filter(row => row.type === 'run_status_imported')).toHaveLength(1);
     assertCaches();
   });
+  it.each([true, false])('refuses cancelled continuation without opening it for writing (declared: %s)', declared => {
+    const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'worker' }] });
+    writeFileSync(runRecordPath(directory, 'workflow.yaml'), stringify(workflow));
+    updateRunState(project, runId, state => { state.status = 'cancelled'; });
+    const snapshot = cached(); snapshot.status = 'stopped';
+    snapshot.stages.work = { status: 'running', retries: 0, attempts: [] };
+    if (!declared) { delete snapshot.lifecycleAuthority; delete snapshot.lifecycleCursor; }
+    writeFileSync(join(directory, 'run.json'), JSON.stringify(snapshot));
+    const paths = ['run.json', 'events.jsonl', 'run_event_status.json'];
+    const before = paths.map(name => bytes(name));
+    for (let repeat = 0; repeat < 2; repeat++) {
+      expect(() => assertContinuationCompatible(project, runId)).toThrow('unsettled attempt');
+      expect(paths.map(name => bytes(name))).toEqual(before);
+    }
+  });
   it('preserves unknown-status and unsupported-layout resume refusals without importing', () => {
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'worker' }] });
     legacy('unknown-future');
+    const unknownBefore = bytes('run.json');
     expect(() => prepareWorkflowLaunch(workflow, stringify(workflow), project, runId)).toThrow('Unrecognized archived run status');
+    recordContinuationRefusal(project, runId, 'unsupported status');
+    expect(bytes('run.json')).toBe(unknownBefore);
     legacy('parked');
     const state = cached(); delete state.storageLayout;
     writeFileSync(join(directory, 'run.json'), JSON.stringify(state));
     // An already-loaded layout is cached; use a fresh alias to exercise routing.
     const freshDirectory = join(root, 'fc', 'runs', 'legacy-flat'); mkdirSync(freshDirectory);
     writeFileSync(join(freshDirectory, 'run.json'), JSON.stringify({ ...state, runId: 'legacy-flat' }));
+    const flatBefore = readFileSync(join(freshDirectory, 'run.json'), 'utf8');
     expect(() => prepareWorkflowLaunch(workflow, stringify(workflow), project, 'legacy-flat')).toThrow('RUN_LAYOUT_INCOMPATIBLE');
+    recordContinuationRefusal(project, 'legacy-flat', 'unsupported layout');
+    expect(readFileSync(join(freshDirectory, 'run.json'), 'utf8')).toBe(flatBefore);
     expect(readRunEvents(project, runId).some(row => row.type === 'run_status_imported')).toBe(false);
   });
 });

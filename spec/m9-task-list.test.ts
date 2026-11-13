@@ -8,6 +8,8 @@ import { readRunIndexRecords, upsertRunIndex } from '../src/run-index.js';
 import { fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 
+// Reload setup-imported lifecycle readers so the filesystem probe covers them too.
+vi.hoisted(() => vi.resetModules());
 const accesses = vi.hoisted(() => [] as string[]);
 vi.mock('node:fs', async importOriginal => {
   const original = await importOriginal<typeof import('node:fs')>();

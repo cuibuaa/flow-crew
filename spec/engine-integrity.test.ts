@@ -124,7 +124,8 @@ describe('structural engine state protection', () => {
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
     const path = runRecordPath(run, local); write(path);
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));
-    expect(readFileSync(path, 'utf8')).toBe(local === 'events.jsonl' ? 'counterfeit pass' : 'engine record');
+    // recorded-before-published: restore the authoritative log together with caches.
+    expect(readFileSync(path, 'utf8')).toBe('engine record');
   });
 
   it('voids a repair stage creating probe files under an engine-owned evidence carrier', async () => {
@@ -639,8 +640,10 @@ describe('structural engine state protection', () => {
 
   it('does not let a later parent overwrite or append hide tampering', async () => {
     const path = runRecordPath(run, 'events.jsonl'); appendFileSync(path, 'original\n');
+    const trusted = readFileSync(path, 'utf8');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { appendTextRecord(path, 'parent'); } catch { /* observer may ignore display failure */ } });
-    expect(readFileSync(path, 'utf8')).toBe('counterfeit');
+    // status-is-a-fold requires retaining the trusted lifecycle prefix.
+    expect(readFileSync(path, 'utf8')).toBe(trusted);
     write(path, 'original\n');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { atomicWrite(path, 'parent replacement'); } catch { /* still latched */ } });
   });

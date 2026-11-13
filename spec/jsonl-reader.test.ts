@@ -143,16 +143,20 @@ describe('tolerant shared JSONL reader', () => {
     const { runId, runDirPath } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
     const path = runRecordPath(runDirPath, 'events.jsonl');
     const event = { runId, type: 'admission_rejected', attemptIndex: 1, timestamp: '2026-07-01T00:00:00Z' };
-    writeFileSync(path, `${JSON.stringify(event)}\n`);
+    // status-is-a-fold: retain the admission fact while exercising torn diagnostics.
+    const admission = readOperatorEvents(runDirPath);
+    expect(admission).toEqual([expect.objectContaining({ lifecycleVersion: 1, runStatus: 'running' })]);
+    appendFileSync(path, `${JSON.stringify(event)}\n`);
     const drift = () => readRunDriftProjection(runDirPath).rows.find(row => row.id === 'first_plan_admission');
     expect(drift()?.value).toBe('rejected');
     const before = drift();
     appendFileSync(path, '{"type":');
-    expect(readOperatorEvents(runDirPath)).toEqual([event]);
+    expect(readOperatorEvents(runDirPath)).toEqual([...admission, event]);
     expect(readOperationalProjection(runDirPath, { includeDrift: false }).sourceCoverage.events).toBe('read');
     expect(drift()).toEqual(before);
     const view = readRunStateView(projectDir, runId);
-    expect(view.events).toEqual({ rows: [event], malformedRecords: 1 });
+    expect(view.run.status).toBe(admission[0].runStatus);
+    expect(view.events).toEqual({ rows: [...admission, event], malformedRecords: 1 });
     expect(view.diagnostics.some(row => row.code === 'STATE_EVENT_ROWS_UNREADABLE')).toBe(true);
 
     const registry = new TaskRegistry({ baseDir: fcGlobalDir() });
@@ -165,8 +169,8 @@ describe('tolerant shared JSONL reader', () => {
     push.capture(task);
     expect(push.events()).toHaveLength(1);
     expect(push.events()[0]).toMatchObject({ runId });
-    expect(readOperatorEvents(runDirPath)).toEqual([event, failure]);
-    expect(readRunStateView(projectDir, runId).events).toEqual({ rows: [event, failure], malformedRecords: 2 });
+    expect(readOperatorEvents(runDirPath)).toEqual([...admission, event, failure]);
+    expect(readRunStateView(projectDir, runId).events).toEqual({ rows: [...admission, event, failure], malformedRecords: 2 });
   });
 
   it('keeps legacy campaign sequence positions when malformed rows precede a valid row and a torn tail', () => {
