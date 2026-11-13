@@ -704,7 +704,7 @@ export interface DashboardOptions {
 }
 
 const DashboardTaskCreateSchema = z.object({
-  brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank'),
+  brief: z.string(),
   projectDir: z.string().trim().min(1).optional(),
   maxIterations: z.number().int().min(1).optional(),
   noCampaign: z.boolean().optional(),
@@ -1085,7 +1085,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   app.post<{ Body: unknown }>('/api/brief-preflight', async (req, reply) => {
     const parsed = z.object({
-      brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank'),
+      brief: z.string(),
     }).safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? 'brief is required' });

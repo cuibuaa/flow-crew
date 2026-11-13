@@ -1,7 +1,6 @@
 /** Review routing receives facts from engine/git authorities, never author narrative. */
 import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
-import { readFileSync } from 'node:fs';
-import { runRecordPath } from './run-layout.js';
+import { readAdmittedContract } from './brief-criteria.js';
 import type { StoreState } from './store.js';
 import { POST_AUTHOR_PROMPT, CHOOSER_PROMPT } from './decision-graph.js';
 import type { StageConfig } from './scheduler/sched_admission/configuration.js';
@@ -23,8 +22,7 @@ export function changedPaths(projectDir: string, state: StoreState): string[] {
 
 /** Complete legacy facts, or bounded counts. Any unreadable piece makes the whole diff unavailable. */
 export function reviewFacts(projectDir: string, directory: string, state: StoreState, room: number) {
-  let brief = ''; try { brief = readFileSync(runRecordPath(directory, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
-  const fact = validationForTree(readEvidence(directory), captureProjectTree(projectDir, brief, directory).hash);
+  const fact = validationForTree(readEvidence(directory), captureProjectTree(projectDir, '', directory).hash);
   const validation = fact ? projectValidationFact(fact) : { status: 'No configured validation fact covers the current tree; validation unmeasured.' };
   let diff = '', files: string[] = [], pathsComplete = false;
   const counts = () => ({ files: pathsComplete ? files.length : null, diffChars: diff.length,
@@ -61,12 +59,13 @@ export function decisionInput(stage: StageConfig, projectDir: string, directory:
   const predecessor = stagePredecessor(readEvidence(directory), stage.id, state.stages[stage.id]?.attempts?.at(-1));
   if (stage.decision?.kind === 'shape') return { system: CHOOSER_PROMPT,
     user: JSON.stringify({ task: state.taskDescription, research: state.research ?? null, predecessor }) };
-  const room = inputLimit - INPUT_RESERVE_CHARS - JSON.stringify({ task: state.taskDescription, predecessor }).length;
+  const task = readAdmittedContract(directory).declaration.criteria ?? [];
+  const room = inputLimit - INPUT_RESERVE_CHARS - JSON.stringify({ task, predecessor }).length;
   const facts = reviewFacts(projectDir, directory, state, room);
   const system = POST_AUTHOR_PROMPT.replaceAll('review_full', stage.decision!.successors[1]).replaceAll('Select review (', `Select ${stage.decision!.successors[0]} (`);
-  if ('diff' in facts) return { system, user: JSON.stringify({ task: state.taskDescription, ...facts, predecessor }) };
+  if ('diff' in facts) return { system, user: JSON.stringify({ task, ...facts, predecessor }) };
   const code = 'unavailable' in facts ? 'diff_unavailable' : 'diff_exceeds_inline_bound';
-  return { system, user: JSON.stringify({ task: state.taskDescription, ...facts, inline_bound: room }),
+  return { system, user: JSON.stringify({ task, ...facts, inline_bound: room }),
     adapter: decidedBy(JSON.stringify({ successor: stage.decision!.successors[1], risk_areas: [],
       reason: `${code}: code decided review routing; measured at least ${facts.diffChars} diff characters (${facts.encodedDiffChars} JSON-encoded diff characters) and ${facts.nonDiffChars} non-diff JSON characters; ${facts.files === null ? 'changed-file count unavailable' : `${facts.files} changed files including untracked`}; inline bound ${room} against adapter limit ${inputLimit}. ${code === 'diff_unavailable' ? 'A diff piece or path list could not be read completely.' : 'The measured JSON exceeds the inline bound.'} The full independent review reads the worktree.` })) };
 }

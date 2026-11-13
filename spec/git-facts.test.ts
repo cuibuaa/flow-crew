@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -89,6 +90,8 @@ beforeEach(() => {
   };
   state = { runId: 'fixture', projectDir: project, workflowName: 'planner', status: 'running',
     startedAt: '2000-01-01T00:00:00Z', baseCommit: oid, stages: {}, taskDescription: 'fixture' };
+  state.briefAdmission = createBriefAdmission(inspectBrief('fixture'), { kind: 'not_required' });
+  writeFileSync(join(directory, 'run.json'), JSON.stringify(state));
   writeFileSync(join(directory, 'validation_baseline.json'), JSON.stringify({ baseCommit: oid }));
 });
 afterEach(() => {

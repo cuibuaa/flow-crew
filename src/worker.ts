@@ -34,6 +34,7 @@ import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
+import { admittedContract } from './brief-admission.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { normalizedProjectPath, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
 import { parseStageAbortSignal } from './abort-signal.js';
@@ -81,7 +82,7 @@ import {
   writeStageArtifactContractAudit,
   stageArtifactProduction,
 } from './stage-artifact-contract.js';
-import { readAdmittedBriefContract, externalOutputDirectory } from './ship-inputs.js';
+import { readAdmittedBriefContract } from './ship-inputs.js';
 import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.js';
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
@@ -317,10 +318,8 @@ export async function runStage(
   const isolatedDecision = Boolean(opts.decisionResult && opts.isolatedInput);
   let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !isolatedDecision
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
-  // Use the same raw declarations as configured validation, including ignored
-  // artifacts. The rendered task description has already lost frontmatter.
-  const evidenceBriefPath = runRecordPath(opts.runDir, 'task_brief.md');
-  const evidenceBrief = existsSync(evidenceBriefPath) ? readFileSync(evidenceBriefPath, 'utf8') : opts.taskDescription ?? '';
+  // Runtime tree capture reads the admitted declaration, not prompt text.
+  const evidenceBrief = ''; // Runtime tree capture consumes the admitted declaration.
   const evidenceTreeBefore = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
 
   const attribution = opts.attribution ?? {
@@ -455,8 +454,7 @@ export async function runStage(
   //     same role (cache_read_input_tokens benefits) because the system prompt
   //     prefix is byte-identical;
   //   - Codex `developer_instructions` similarly benefits from auto-caching.
-  // The brief lives at <run_dir>/task_brief.md and is written by the dispatcher
-  // (cli.ts cmdQuick or the dashboard). If absent, we skip prepending.
+  // Exact admitted bytes own this transport; the sidecar is only an export.
   const projectContract = opts.role.prompt.includes('{project_contract}')
     ? loadProjectContract(opts.projectDir) : 'none';
   let resolvedSystemPrompt = opts.role.prompt
@@ -472,15 +470,9 @@ export async function runStage(
     .replace(/\{project_contract\}/g, projectContract)
     .replace(/\{run_dir\}/g, stageWorkPath(opts.runDir))
     .replace(/\{project\}/g, opts.projectDir);
-  try {
-    const taskBriefPath = runRecordPath(opts.runDir, 'task_brief.md');
-    if (existsSync(taskBriefPath)) {
-      const brief = readFileSync(taskBriefPath, 'utf-8').trim();
-      if (brief) {
-        resolvedSystemPrompt = `# Task Brief\n\n${brief}\n\n---\n\n${resolvedSystemPrompt}`;
-      }
-    }
-  } catch { /* non-critical */ }
+  const briefState = readRunState(opts.projectDir, opts.runId);
+  const modelBrief = admittedContract(briefState.briefContinuationAdmission ?? briefState.briefAdmission).brief;
+  resolvedSystemPrompt = `# Task Brief\n\n${modelBrief}\n\n---\n\n${resolvedSystemPrompt}`;
 
   // Planner-only history remains target-filtered. An archived instruction for
   // an implementation or gate stage must not become a planner instruction.
@@ -529,7 +521,7 @@ export async function runStage(
   const recordedOutputSchema = opts.outputSchema === HANDOFF_SCHEMA ? { ...RECORDED_HANDOFF_SCHEMA,
     properties: { ...RECORDED_HANDOFF_SCHEMA.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } : undefined;
   if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length && attemptValidationPlan.source !== 'model-selection'
-    && opts.outputSchema === HANDOFF_SCHEMA && existsSync(runRecordPath(opts.runDir, 'task_brief.md'))) {
+    && opts.outputSchema === HANDOFF_SCHEMA) {
     // Reuse the author result, not a third decision stage or another model call.
     if (opts.outputSchema?.properties) opts = { ...opts, outputSchema: { ...opts.outputSchema,
       properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } };
@@ -910,9 +902,7 @@ export async function runStage(
         // launch uses the same no-REFER boundary as other shared directories.
         const briefContract = readAdmittedBriefContract(opts.runDir, evidenceBrief);
         const externalDirectories = opts.isGate || isolatedDecision ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
-          .map(output => externalOutputDirectory(output, opts.projectDir, undefined,
-            { runDir: opts.runDir, inputPaths: briefContract.inputs.map(input => input.path) }));
-        for (const directory of externalDirectories) mkdirSync(directory, { recursive: true });
+          .map(output => output.path);
         const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
           runDir: opts.runDir, stageId: opts.stageId, scope: opts.scope, artifacts: writableArtifacts, externalDirectories,
           home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };

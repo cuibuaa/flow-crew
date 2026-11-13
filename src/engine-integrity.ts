@@ -1,3 +1,4 @@
+import { readAdmittedBriefContract, externalOutputDirectory } from './ship-inputs.js';
 import { tmpdir } from 'node:os';
 import { createHash, type Hash } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
@@ -258,7 +259,13 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     throw new EngineStateError('ENGINE_STATE_REFUSED: engine database must be outside authored work');
   }
   const engine = run && engineDirectory(run);
-  if (run) assertSeparatedRunLayout(run);
+  if (run) {
+    assertSeparatedRunLayout(run);
+    const contract = readAdmittedBriefContract(input.runDir!);
+    const directories = contract.outputs.filter(output => isAbsolute(output.path)).map(output =>
+      externalOutputDirectory(output, input.projectDir, undefined, { runDir: input.runDir, inputPaths: contract.inputs.map(entry => entry.path) }));
+    for (const directory of directories) mkdirSync(directory, { recursive: true });
+  }
   const roots = [engine, run && join(run, 'run.json'), run && join(run, 'events.jsonl'), distribution]
     .filter((root): root is string => Boolean(root));
   if (run) {

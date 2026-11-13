@@ -217,8 +217,7 @@ export function projectCommit(projectDir: string): string | undefined {
 export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null, budget = Infinity): string {
   if (!existsSync(runRecordPath(runDir, EVIDENCE_LEDGER))) writeFileSync(runRecordPath(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
-  let brief = ''; try { brief = readFileSync(runRecordPath(runDir, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
-  const validation = validationForTree(entries, captureProjectTree(projectDir, brief, runDir).hash);
+  const validation = validationForTree(entries, captureProjectTree(projectDir, '', runDir).hash);
   const baselinePath = runRecordPath(runDir, 'validation_baseline.json');
   let commit: string | undefined;
   let selection: unknown;

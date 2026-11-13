@@ -125,9 +125,9 @@ requirement and cost no brief-writing model call. No confirmation prompt is adde
 ## Launch
 
 `quick <task-text|->` accepts joined positional text, `--task <text>` or stdin `-`.
-Positionals are task text, not a path, on earlier versions as well. A single positional
-that names an existing file refuses before any model call; use `quick - < file` to send
-its exact bytes. When no `criteria: [{id, text}]` declaration exists, the read-only `brief_writer`
+Positionals are literal task text, including text that happens to name an existing
+file. Use `quick - < file` to send its exact bytes. Empty or whitespace-only stdin is
+opaque model context; declaration validation alone controls admission. When no `criteria: [{id, text}]` declaration exists, the read-only `brief_writer`
 authors structured fields in one model call (at most two correction retries). Code emits the criterion declaration, preserves other metadata values and the exact original body,
 and appends the other fields as prose. Declared criteria skip authorship entirely.
 Other preflight findings are advisory and printed before project/run mutation.

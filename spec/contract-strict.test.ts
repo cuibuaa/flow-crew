@@ -231,6 +231,15 @@ describe('frozen run declaration', () => {
     expect(JSON.parse(readFileSync(path, 'utf8')).status).toBe('parked');
   });
 
+  it.each([null, [], { outputs: {} }, { terminal_states: { complete: null } }])('plain reads refuse malformed stored declarations with a typed error: %j', declaration => {
+    const created = parked(), path = runRecordPath(created.runDirPath, 'run.json');
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    raw.briefAdmission.contract.declaration = declaration;
+    writeFileSync(path, JSON.stringify(raw));
+    expect(() => readRunState(project, created.runId)).toThrow(admissionCodec.ContractRefusal);
+    expect(() => readRunState(project, created.runId)).toThrow('contract_hash_mismatch');
+  });
+
   it('refuses a tampered stored continuation receipt before changing run state', () => {
     const created = parked(), path = runRecordPath(created.runDirPath, 'run.json');
     const raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -251,8 +260,13 @@ describe('frozen run declaration', () => {
 
   it('keeps old records readable and refuses hashless resume without importing anything', async () => {
     const created = parked(), path = runRecordPath(created.runDirPath, 'run.json');
-    const raw = JSON.parse(readFileSync(path, 'utf8')); delete raw.briefAdmission.contract; writeFileSync(path, JSON.stringify(raw));
-    const before = readFileSync(path, 'utf8'); expect(readRunState(project, created.runId).status).toBe('parked');
+    const raw = JSON.parse(readFileSync(path, 'utf8')); delete raw.briefAdmission.contract;
+    raw.taskDescription = '# Historical body\n## Terminal states\ncomplete: legacy-body.md';
+    raw.terminalStates = { complete: { paths: ['legacy-body.md'] } }; raw.maxContinuations = 7;
+    writeFileSync(path, JSON.stringify(raw));
+    const before = readFileSync(path, 'utf8');
+    expect(readRunState(project, created.runId)).toMatchObject({ status: 'parked', maxContinuations: 7,
+      terminalStates: { complete: { paths: ['legacy-body.md'] } } });
     expect(() => assertContinuationCompatible(project, created.runId)).toThrow('contract_hash_missing');
     expect(() => prepareWorkflowLaunch(created.w, stringify(created.w), project, created.runId)).toThrow('contract_hash_missing');
     await expect(evaluateRealityGate(project, created.runId, 'complete')).rejects.toThrow('contract_hash_missing');

@@ -204,7 +204,7 @@ export async function executeSingleStage(
       stageSkills: stage.skills,
       availableRoles,
       availableSkills,
-      taskDescription: taskDescription || state.taskDescription,
+      taskDescription,
       isGate: stage.is_gate,
       gateContext: { authorIds: gateReviewedAuthorIds(stage, allStages), fixStageIds, roundDiffPath },
       gateReviewed: isGateReviewed(stage, allStages),

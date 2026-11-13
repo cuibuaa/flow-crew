@@ -10,7 +10,8 @@ import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 
 import { applyBasePrompt, inspectDispatchAdmission, loadBasePrompt, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { buildStagePrompt } from '../src/handoff.js';
-import { parseChecksFromMarkdown, parseDeclaredChecksFromBrief, parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
+import { parseChecksFromMarkdown, parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
+import { parseBriefDeclarations } from '../src/brief-declarations.js';
 import { parseBriefFrontmatterDocument } from '../src/brief-frontmatter.js';
 
 const projectRoot = resolve(import.meta.dirname, '..');
@@ -136,7 +137,7 @@ describe('published declaration inputs', () => {
       expect(block).toBeDefined();
       const briefPath = join(owned.root, 'brief.md');
       writeFileSync(briefPath, block!);
-      const checks = parseDeclaredChecksFromBrief(briefPath);
+      const checks = parseRealityChecks(parseBriefDeclarations(readFileSync(briefPath, 'utf8')).reality_checks ?? []);
       mkdirSync(join(owned.project, 'docs')); writeFileSync(join(owned.project, 'docs/output.md'), 'Measured output\n');
       const result = join(owned.project, 'result.json');
       writeFileSync(result, JSON.stringify({ metric: 'quality', value: 42, evidence: 'measured fixture' }));

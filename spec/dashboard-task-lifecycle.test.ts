@@ -674,9 +674,9 @@ it('serves positive live stage output through the mounted run-page stream', asyn
   });
 });
 
-it('leaves prose criteria opaque for dashboard consumers', async () => {
+it.each(['# Goal\nProduce a deliverable.\n', '', ' \n\t'])('leaves body text opaque for dashboard consumers: %j', async brief => {
   const response = await app!.inject({ method: 'POST', url: '/api/brief-preflight',
-    payload: { brief: '# Goal\nProduce a deliverable.\n' } });
+    payload: { brief } });
   expect(response.statusCode).toBe(200);
   expect(response.json().report).toMatchObject({ contractReady: true });
   expect(response.json().report.findings.some((finding: {code: string}) => finding.code === 'brief_criteria_missing')).toBe(false);

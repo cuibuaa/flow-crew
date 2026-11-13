@@ -1,3 +1,4 @@
+import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
@@ -68,7 +69,7 @@ describe('owned evidence waits for events unless its author declares an allowanc
   it('a declared reality allowance parks the candidate with resumable facts instead of failing its product', async () => {
     const f = owned(), projectDir = root();
     const { runId, runDirPath } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
-    writeFileSync(runRecordPath(runDirPath, 'reality_checks.md'), '## Reality checks\n```yaml\nchecks:\n  - name: check\n    type: exec-script-exit-zero\n    reads: []\n    params: {script: fixture, timeout_seconds: 2}\n```\n');
+    writeAdmittedRealityChecks(runRecordPath(runDirPath, 'reality_checks.md'), '## Reality checks\n```yaml\nchecks:\n  - name: check\n    type: exec-script-exit-zero\n    reads: []\n    params: {script: fixture, timeout_seconds: 2}\n```\n');
     const state = readRunState(projectDir, runId);
     const pending = concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     await f.ready; f.child.stdout.write('partial facts\n'); await vi.advanceTimersByTimeAsync(2000);

@@ -131,8 +131,7 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     skills: opts.skills ?? '',
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',
-    task_description: existsSync(runRecordPath(opts.runDir, 'task_brief.md'))
-      ? runRecordPath(opts.runDir, 'task_brief.md') : opts.taskDescription ?? '',
+    task_description: opts.taskDescription ?? '',
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {

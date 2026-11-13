@@ -34,7 +34,7 @@ beforeEach(() => {
   process.env.PATH = `${bin}:${process.env.PATH ?? ''}`;
   previousStore = fcGlobalDir();
   setFcGlobalDir(join(root, 'store'));
-  runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['owner', 'writer']).runId;
+  runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['owner', 'writer'], '---\nvalidation: {commands: {test: {command: "true", args: []}}}\n---\n').runId;
   directory = runDir(project, runId);
   writeFileSync(join(bin, 'codex'), `#!${process.execPath}\n` + String.raw`
 const fs = require('node:fs'), path = require('node:path');

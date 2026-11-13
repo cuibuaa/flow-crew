@@ -1,3 +1,4 @@
+import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -48,7 +49,7 @@ afterEach(() => {
 
 function writeExecCheck(runId: string, name: string, command: string): void {
   const indentedCommand = command.split('\n').map((line) => `        ${line}`);
-  writeFileSync(runRecordPath(runDir(projectDir, runId), 'reality_checks.md'), [
+  writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, runId), 'reality_checks.md'), [
     '## Reality checks',
     'checks:',
     `  - name: ${name}`,
@@ -57,7 +58,7 @@ function writeExecCheck(runId: string, name: string, command: string): void {
     '    params:',
     '      script: |-',
     ...indentedCommand,
-  ].join('\n'), 'utf-8');
+  ].join('\n'));
 }
 
 function replayExpectedExecution(

@@ -320,8 +320,8 @@ describe('admitted numeric contract and resume', () => {
     const load = vi.spyOn(adapterLoader, 'loadAdapterByName').mockResolvedValue(selected);
     const send = vi.spyOn(inputOwner, 'runAdapter');
     async function assess(limit: number) {
-      const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], `---\ninput_limit_chars: ${limit}\n---\n`);
-      updateRunState(project, created.runId, state => { state.inputLimitChars = limit; state.taskDescription = 'T'.repeat(700_000); });
+      const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], `---\ninput_limit_chars: ${limit}\ncriteria: [{id: review, text: ${JSON.stringify('T'.repeat(700_000))}}]\n---\n`);
+      updateRunState(project, created.runId, state => { state.inputLimitChars = limit; state.taskDescription = 'Transport-only task.'; });
       await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
         override ? { sessionKind: 'claude', run } : selected, new Map([['fixture', override ? { ...role, adapter: 'codex' } : role]]), project,
         new Map([['fixture', { name: 'fixture', description: '' }]]), new Map(), undefined, undefined, undefined, () => clock().value);

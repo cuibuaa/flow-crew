@@ -1,3 +1,4 @@
+import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -40,7 +41,7 @@ afterEach(() => {
 
 function createRealityRun(markdown: string) {
   const created = createRun(projectDir, 'test', 'name: test', []);
-  writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), markdown, 'utf-8');
+  writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), markdown);
   const state = readRunState(projectDir, created.runId);
   state.status = 'complete';
   return { ...created, state };

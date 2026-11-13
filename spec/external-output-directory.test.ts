@@ -195,6 +195,20 @@ describe('absolute directories in the declared output contract', () => {
 });
 
 describe('external output execution', () => {
+  it.each(['_research_instrument', '_reality', '_validation', '_terminal_hook', 'gate'])(
+    'validates and prepares output directories at the shared boundary for %s', async stageId => {
+      const valid = boundaryFixture();
+      expect(existsSync(output)).toBe(false);
+      await withEngineIntegrity({ ...valid.input, stageId }, async () => {
+        expect(existsSync(output)).toBe(true);
+      });
+      const invalid = boundaryFixture(brief(join(project, 'overlap')));
+      const action = vi.fn(async () => {});
+      await expect(withEngineIntegrity({ ...invalid.input, stageId }, action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
+      expect(action).not.toHaveBeenCalled();
+      expect(existsSync(join(project, 'overlap'))).toBe(false);
+    });
+
   it('retains ordinary filesystem access beyond declared output roots', async () => {
     const f = boundaryFixture();
     const paths = [join(output, 'result'), join(root, 'ordinary'), join(project, 'ordinary')];

@@ -11,6 +11,7 @@ import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapte
 import { providerFailureFromEvent } from '../src/provider-result.js';
 import { loadEngineDefaults } from '../src/config.js';
 import { adapterInputLimit, INPUT_RESERVE_CHARS } from '../src/adapter-input.js';
+import { readAdmittedContract } from '../src/brief-criteria.js';
 import { decisionInput } from '../src/decision-context.js';
 import { GitNotAnswered } from '../src/git-facts.js';
 import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
@@ -122,7 +123,7 @@ describe('the review decision gets the whole diff or none of it', () => {
     } else {
       const [, raw, encoded, nonDiff, files, bound] = record.reason.match(/^diff_exceeds_inline_bound: code decided review routing; measured at least (\d+) diff characters \((\d+) JSON-encoded diff characters\) and (\d+) non-diff JSON characters; (\d+) changed files including untracked; inline bound (\d+)/)!.map(Number);
       expect(files).toBe(1004);
-      expect(bound).toBe(CODEX_LIMIT - INPUT_RESERVE_CHARS - JSON.stringify({ task: state.taskDescription }).length);
+      expect(bound).toBe(CODEX_LIMIT - INPUT_RESERVE_CHARS - JSON.stringify({ task: readAdmittedContract(directory).declaration.criteria ?? [] }).length);
       expect(encoded + nonDiff).toBeGreaterThan(bound);
       expect(raw).toBeLessThan(encoded);
       expect(latestInvocationInput(directory, 'review_assess')).toBeUndefined();
@@ -135,7 +136,7 @@ describe('the review decision gets the whole diff or none of it', () => {
     expect(calls.at(-1)!.prompt).toContain('change.diff');
   }, 120_000);
 
-  it('a change that fits gives the assessor exactly the input it got before', () => {
+  it('a change that fits gives the assessor complete facts and declared criteria', () => {
     commitFile('src/other.ts', 'export const other = 1;\n');
     writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "changed";\n');
     writeFileSync(join(project, 'src/other.ts'), 'export const other = 2;\n');
@@ -145,7 +146,7 @@ describe('the review decision gets the whole diff or none of it', () => {
     const state = readRunState(project, created.runId);
     const input = decisionInput(stage, project, created.runDirPath, state, CODEX_LIMIT);
     expect(input.adapter).toBeUndefined();
-    expect(JSON.parse(input.user)).toEqual({ task: state.taskDescription, files: ['src/app.ts', 'src/other.ts', 'a_large.txt', 'b_small.txt'],
+    expect(JSON.parse(input.user)).toEqual({ task: [], files: ['src/app.ts', 'src/other.ts', 'a_large.txt', 'b_small.txt'],
       diff: legacyDiff(['a_large.txt', 'b_small.txt']), validation: { status: 'No configured validation fact covers the current tree; validation unmeasured.' } });
     // The prompt is the decision prompt as it was: no extra instruction, and still no tools.
     expect(input.system).toBe(POST_AUTHOR_PROMPT);

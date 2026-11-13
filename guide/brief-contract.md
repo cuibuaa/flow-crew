@@ -598,7 +598,9 @@ Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts
 
 Declare `reality_checks` as an array in leading frontmatter. Markdown headings and body
 examples create no executable checks, even when headed `## Reality checks`. Hashless historical runs stay readable but cannot execute checks or resume. The scheduler
-also consumes its admitted planner check snapshot. Each check supplies
+also consumes its durable admitted planner check snapshot; an incidental or edited
+`reality_checks.md` file cannot select terminal checks. The brief body is passed to model
+stages without engine interpretation. Review input budgeting uses declared criteria. Each check supplies
 `name`, `type`, `reads` (explicitly empty if it has no file inputs), `params`, and optional
 `advisory: true`. Rooted reads follow [agent protocol](agent-protocol.md#artifact-locations).
 Typed handler file parameters must agree with declared reads; shell text is not parsed to

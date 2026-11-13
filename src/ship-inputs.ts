@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { readAdmittedContract } from './brief-criteria.js';
 import { BriefDeclarationsSchema, parseBriefDeclarations, type BriefDeclarations } from './brief-declarations.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
@@ -129,8 +130,8 @@ export interface BriefOutputInventory {
 }
 
 function lineForPath(brief: string, path: string): number {
-  const index = brief.split(/\r?\n/).findIndex((line) => line.includes(path));
-  return index < 0 ? 1 : index + 1;
+  const index = splitBriefFrontmatter(brief)?.yaml.split(/\r?\n/).findIndex((line) => line.includes(path)) ?? -1;
+  return index < 0 ? 1 : index + 2;
 }
 
 /** All admission/setup readers consume the same strict declaration. */

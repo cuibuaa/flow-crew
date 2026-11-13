@@ -1,3 +1,4 @@
+import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -149,7 +150,7 @@ describe('terminal conclusions from settled evidence', () => {
 
   it('keeps the fc9ce3 missing JSON field behind the reality gate and publishes the failed status', async () => {
     writeFileSync(join(project, 'delivery.json'), JSON.stringify({ title: 'scrubbed delivery' }));
-    writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(directory, 'reality_checks.md'), [
       '## Reality checks', 'checks:', '  - name: delivery-required-fields', '    type: json-schema-match',
       '    reads:', '      - id: delivery', '        root: project', '        kind: file', '        path: delivery.json', '        source: {kind: input}',
       '    params:', '      file: delivery.json', '      schema:', '        type: object', '        required: [title, findings]',
@@ -168,7 +169,7 @@ describe('terminal conclusions from settled evidence', () => {
     settledReview('complete');
     writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify({ pass: false, study_complete: true, model_success: false, reason: 'study_complete_without_model_success' }));
     writeFileSync(join(project, 'delivery.json'), '{}');
-    writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(directory, 'reality_checks.md'), [
       '## Reality checks', 'checks:', '  - name: recovered-delivery', '    type: json-schema-match',
       '    reads: []', '    params:', '      file: delivery.json', '      schema:',
       '        type: object', '        required: [findings]',
@@ -194,7 +195,7 @@ describe('terminal conclusions from settled evidence', () => {
 
   it.each(['complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'cancelled', 'incomplete'] satisfies RunStatus[])(
     'publishes owner completion and status events for terminal %s', async status => {
-      writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
+      writeAdmittedRealityChecks(runRecordPath(directory, 'reality_checks.md'), [
         '## Reality checks', 'checks:', '  - name: count-terminal-checks',
         '    type: exec-script-exit-zero', '    reads: []',
         '    params:', '      script: printf invocation >> reality-executions.txt',

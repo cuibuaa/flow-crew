@@ -257,7 +257,8 @@ describe('independent post-author routing', () => {
     const state = await execute(config, adapter, task);
     expect(state.status, state.failureReason).toBe('complete');
     for (const id of ['assess', 'review']) {
-      expect(seen[id]).toContain('Coherent change'); expect(seen[id]).toContain('Actual diff greeting');
+      expect(seen[id]).toContain(id === 'assess' ? 'Produce docs/report.md with a greeting.' : 'Coherent change');
+      expect(seen[id]).toContain('Actual diff greeting');
       expect(seen[id]).toContain('validation'); expect(seen[id]).not.toContain('AUTHOR_TRANSCRIPT_SECRET_MARKER');
       expect(seen[id]).not.toContain('output_attempt_'); expect(seen[id]).not.toContain('handoff_implement');
       expect(seen[id]).not.toContain('Context from stage:');

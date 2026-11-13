@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 50 -->
+<!-- flowcrew-skill-revision: 51 -->
 
 # Ship a conversation to FlowCrew
 
@@ -231,3 +231,8 @@ removal/closure report; Git success with ledger failure still needs repair.
 Ledger closure is not an automatic reaction to terminal status, and terminal status alone does not
 authorize removal. [Operations](../guide/operations.md#preserve-and-reclaim) defines the
 preservation boundary and owns the full removal and closure contract.
+
+Engine decisions read only the admitted declaration. Put executable reality checks in
+frontmatter `reality_checks`, terminal conditions in `terminal_states`, validation commands
+in `validation`, and criterion identities in `criteria`. A `## Reality checks` section in
+the body is model context only. Editing prose cannot add or remove engine obligations.

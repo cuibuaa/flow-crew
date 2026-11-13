@@ -1,3 +1,4 @@
+import { BriefDeclarationsSchema } from './brief-declarations.js';
 import { declarationConfiguration } from './scheduler/sched_admission/brief-contract.js';
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { admitWriteGrant, legacyWriteGrant, WriteGrantContractSchema, type WriteGrantContract } from './write-grant.js';
@@ -21,7 +22,7 @@ import { renderRunSummary } from './run-summary.js';
 import { listRunIdsFromIndex, upsertRunIndex } from './run-index.js';
 import { projectPersistenceIdentity } from './project-identity.js';
 import { cancelledRunPublicationError, canonicalRunDirectory, requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
-import { parseChecksFromBrief, parseRealityChecks, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
+import { parseChecksFromMarkdown, parseRealityChecks, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import { readAdmittedContract } from './brief-criteria.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import { admittedContract, ContractRefusal, type BriefAdmissionRecord } from './brief-admission.js';
@@ -707,10 +708,10 @@ export async function evaluateRealityGate(
   const dir = runDir(projectDir, runId);
   const briefPath = runRecordPath(dir, 'task_brief.md');
   const checks = parseRealityChecks(readAdmittedContract(dir).declaration.reality_checks ?? []);
-  const plannerChecksPath = runRecordPath(dir, 'reality_checks.md');
-  if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
+  const plannerChecks = readRunState(projectDir, runId).admittedRealityChecks;
+  if (plannerChecks) checks.push(...parseChecksFromMarkdown(plannerChecks.markdown));
   if (checks.length === 0) return {};
-  const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath: existsSync(briefPath) ? briefPath : plannerChecksPath });
+  const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath });
   const artifactPath = runRecordPath(dir, REALITY_GATE_ARTIFACT_PATH);
   atomicWrite(artifactPath, JSON.stringify(report, null, 2) + '\n');
   const durableReport = readRealityGateReport(artifactPath);
@@ -1172,6 +1173,7 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
 function projectAdmittedConfiguration(state: StoreState): void {
   if (!state.briefAdmission?.contract) return;
   const { declaration } = state.briefAdmission.contract;
+  if (!BriefDeclarationsSchema.safeParse(declaration).success) throw new ContractRefusal('contract_hash_mismatch');
   const parsed = declarationConfiguration(declaration);
   state.maxContinuations = parsed.maxContinuations;
   state.terminalStates = parsed.terminalStates;

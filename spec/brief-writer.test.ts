@@ -367,6 +367,16 @@ it('a saved preview attaches evidence on a different target without another mode
   expect(adapter.run).toHaveBeenCalledTimes(1);
 });
 
+it.each(['', ' \n\t'])('explicit body text reaches declaration authoring rather than usage refusal: %j', body => {
+  const dir = project(), engine = join(project(), 'private-fc');
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'brief', '-', '--adapter', 'missing-fixture-adapter'], { cwd: dir, encoding: 'utf8', input: body,
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(engine, 'daemon.sock') } });
+  expect(child.status).toBe(1);
+  expect(child.stderr).not.toContain('Usage: flowcrew brief');
+  expect(child.stderr).toContain('missing-fixture-adapter');
+});
+
 it.each(['existing_file', 'dirty', 'non_git', 'unborn', 'occupied_output', 'no_task'])('refuses before any model call: %s', async kind => {
   const dir = project();
   if (kind === 'non_git') rmSync(join(dir, '.git'), { recursive: true });
@@ -385,8 +395,7 @@ it.each(['existing_file', 'dirty', 'non_git', 'unborn', 'occupied_output', 'no_t
     '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
     env: { ...process.env, HOME: process.env.HOME, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'), FLOWCREW_LAUNCH_RESULT_PATH: refusalRecord } });
   expect(child.status, child.stdout + child.stderr).toBe(1);
-  expect(child.stderr).toContain(kind === 'existing_file' ? 'through stdin with -'
-    : kind === 'dirty' ? 'source working tree is dirty' : kind === 'no_task' ? 'Usage: flowcrew brief'
+  expect(child.stderr).toContain(kind === 'existing_file' || kind === 'dirty' ? 'source working tree is dirty' : kind === 'no_task' ? 'Usage: flowcrew brief'
     : kind === 'occupied_output' ? 'Launch refused before brief writing' : 'committed HEAD');
   if (kind !== 'no_task') expect(JSON.parse(readFileSync(refusalRecord, 'utf8')).kind).toBe('launch_refused');
   if (kind === 'no_task') expect(child.stderr).not.toContain('--workflow');
@@ -454,7 +463,6 @@ it.each([
   { command: 'quick', kind: 'unknown_adapter' },
   { command: 'quick', kind: 'missing_adapter' },
   { command: 'quick', kind: 'continuation' },
-  { command: 'brief', kind: 'existing_file' },
 ])('$command refuses $kind at no model cost', ({ command, kind }) => {
   const dir = project(), root = project(), engine = join(root, 'fc');
   const record = join(root, 'refusal.json');

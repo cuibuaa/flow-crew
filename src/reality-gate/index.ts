@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { parseBriefDeclarations } from '../brief-declarations.js';
 import { result as checkResult } from './checks/_utils.js';
 import { REALITY_CHECK_REGISTRY } from './registry.js';
 import { inspectRealityHandlerReads } from './declared-reads.js';
@@ -26,20 +25,7 @@ export type {
   RealityGateReport,
 } from './types.js';
 
-export function parseChecksFromBrief(briefPath: string): CheckDecl[] {
-  return parseChecksFromMarkdown(readFileSync(briefPath, 'utf-8'));
-}
-
-/** New briefs declare checks in frontmatter; replaces terminal prose parsing.
- * The Markdown reader remains solely for already admitted legacy contracts. */
-export function parseDeclaredChecksFromBrief(briefPath: string): CheckDecl[] {
-  return parseRealityChecks(parseBriefDeclarations(readFileSync(briefPath, 'utf8')).reality_checks ?? []);
-}
-
-export function hasRealityChecksHeading(markdown: string): boolean {
-  return /^## Reality checks[^\n]*(?:\n|$)/m.test(markdown);
-}
-
+/** Decoder for the separately admitted planner artifact, never a task brief. */
 export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
   const headings = [...markdown.matchAll(/^## Reality checks[^\n]*(?:\n|$)/gm)];
   if (headings.length > 1) return [invalidBlockDeclaration('Multiple Reality checks sections are ambiguous')];

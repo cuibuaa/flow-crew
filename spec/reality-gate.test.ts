@@ -1,3 +1,4 @@
+import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
@@ -7,7 +8,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { parseChecksFromBrief, parseChecksFromMarkdown, runAllChecks, listCheckTypes, readRealityGateReport } from '../src/reality-gate/index.js';
+import { parseChecksFromMarkdown, runAllChecks, listCheckTypes, readRealityGateReport } from '../src/reality-gate/index.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
@@ -209,7 +210,7 @@ describe('reality gate parser and aggregation', () => {
       '## Next',
       'text',
     ].join('\n'));
-    expect(parseChecksFromBrief(brief)).toEqual([{ reads: [inputFile('file_0', 'artifact.txt')], name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
+    expect(parseChecksFromMarkdown(readFileSync(brief, 'utf8'))).toEqual([{ reads: [inputFile('file_0', 'artifact.txt')], name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
   });
 
   it('preserves only an explicitly boolean advisory declaration and defaults all others to hard', () => {
@@ -232,7 +233,7 @@ describe('reality gate parser and aggregation', () => {
       '    params: { paths: ["c"] }',
     ].join('\n'));
 
-    expect(parseChecksFromBrief(brief)).toEqual([
+    expect(parseChecksFromMarkdown(readFileSync(brief, 'utf8'))).toEqual([
       { reads: [inputFile('file_0', 'a')], name: 'advisory', type: 'file-exists-nonempty', advisory: true, params: { paths: ['a'] } },
       { reads: [inputFile('file_0', 'b')], name: 'default-hard', type: 'file-exists-nonempty', params: { paths: ['b'] } },
       { reads: [inputFile('file_0', 'c')], name: 'string-is-hard', type: 'file-exists-nonempty', params: { paths: ['c'] } },
@@ -293,7 +294,7 @@ describe('store integration', () => {
     expect(existsSync(stageEnvironment.scratch)).toBe(true);
 
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'),
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'),
       `## Reality checks\n\`\`\`yaml\n${JSON.stringify({ checks: [{ name: 'scratch', type: 'exec-script-exit-zero', reads: [], params: { script } }] })}\n\`\`\`\n`);
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
@@ -328,7 +329,7 @@ describe('store integration', () => {
   it('records a real command-not-found exit 127 as advisory and allows the terminal verdict', async () => {
     const missingCommand = 'flowcrew_e3_tool_that_does_not_exist';
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: unavailable-tool',
@@ -373,7 +374,7 @@ describe('store integration', () => {
 
   it('keeps an ordinary exit 1 as a hard failure that blocks the terminal verdict', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: genuine-failure',
@@ -399,7 +400,7 @@ describe('store integration', () => {
 
   it('persists executor-owned diagnostics when a failing script deletes its only logs', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: deleted-log-failure',
@@ -431,7 +432,7 @@ describe('store integration', () => {
 
   it('persists a named hard-failure reason and structured diagnostics in run.json', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: required-build-proof',
@@ -466,7 +467,7 @@ describe('store integration', () => {
 
   it('stores bounded ANSI-free stdout and stderr tails for a failed check', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: noisy-check',
@@ -504,7 +505,7 @@ describe('store integration', () => {
 
   it('keeps a bare exit 127 without command-not-found evidence as a hard failure', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: unexplained-127',
@@ -530,7 +531,7 @@ describe('store integration', () => {
 
   it('attaches advisory failure evidence without blocking the terminal state', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: optional-environment-check',
@@ -579,7 +580,7 @@ describe('store integration', () => {
 
   it('still blocks when a hard failure appears alongside an advisory failure', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeAdmittedRealityChecks(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: optional-wording',

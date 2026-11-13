@@ -173,7 +173,7 @@ export async function executeOrdinaryStage(
         availableSkills,
         contextInventory,
         ledgerDigest,
-        taskDescription: taskDescription || state.taskDescription,
+        taskDescription,
         isGate: stage.is_gate,
         gateContext: { authorIds: fixStageIds ?? gateReviewedAuthorIds(stage, sorted), fixStageIds, roundDiffPath },
         gateReviewed: isGateReviewed(stage, sorted),

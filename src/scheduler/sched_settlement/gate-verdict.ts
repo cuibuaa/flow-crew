@@ -106,8 +106,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const parsed = AuditFindingsSchema.safeParse(document.value.audit_findings);
   let attemptIndex = 0;
   try { attemptIndex = readStageStatus(projectDir, runId, stageId).attempts?.at(-1)?.index ?? 0; } catch { /* legacy verdict without stage status: no confirmed finding */ }
-  let brief = ''; try { brief = readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { /* legacy */ }
-  const treeHash = captureProjectTree(projectDir, brief, base).hash;
+  const treeHash = captureProjectTree(projectDir, '', base).hash;
   const findings = assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
   const regressions = currentValidationRegressions(projectDir, runId);
   findings.confirmed.push(...regressions);

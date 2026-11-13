@@ -850,15 +850,7 @@ async function cmdQuick(preview = false) {
   }
   if (value('brief-admission-record') !== undefined) transportedAdmission = decodeBriefAdmission(value('brief-admission-record')!);
   if (transport === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; }
-  if (!task && parsed.positionals.length) {
-    if (parsed.positionals.length === 1 && existsSync(resolve(parsed.positionals[0]))
-        && statSync(resolve(parsed.positionals[0])).isFile()) {
-      const refusal = `Positional arguments are task text. Send an existing file through stdin with -: flowcrew ${preview ? 'brief' : 'quick'} - < file`;
-      if (!preview) recordLaunchRefusal(refusal);
-      console.error(refusal);
-      process.exitCode = EXIT_CODE.failed;
-      return;
-    }
+  if (!taskSupplied && parsed.positionals.length) {
     task = parsed.positionals.join(' '); taskSupplied = true;
   }
 
@@ -888,7 +880,7 @@ async function cmdQuick(preview = false) {
 
   }
 
-  if (!task.trim()) {
+  if (!taskSupplied && !existingRunInitialized) {
     if (preview) {
       console.error(commandUsage('brief'));
       console.error('  --project <path>  Repository (default: cwd)\n  --adapter <name>  Agent backend\n  --task <text>     Task text\n  -                 Read task from stdin');
