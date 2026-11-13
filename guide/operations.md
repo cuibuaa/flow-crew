@@ -134,10 +134,14 @@ read-only gates and isolated chooser/assessment decisions receive no write grant
 for them. Their declarations do not grant parents or siblings.
 
 Each stage also receives its own agent home, invocation scratch and `/dev/null`.
-For Git, the engine supplies a private index and worktree metadata, the shared
-object directory, and only the stage's branch and reflog directories under
-`fc/<run-directory-hash>/<stage>/head`. Other branch refs, shared Git configuration
-and hooks are outside the grant. The shared object directory remains writable:
+For Git, the engine supplies private metadata, an index, refs and reflogs under
+the stage work directory, with a branch named
+`fc/<run-directory-hash>/<stage>/head`. Only the object directory is shared.
+Shared branch refs, configuration, hooks and `packed-refs` are outside the grant.
+Stage commits remain on the private branch; inspect them using the stage's
+`GIT_DIR` and `GIT_OBJECT_DIRECTORY`. Repository settings are included from the
+source configuration, and the stage environment disables automatic maintenance
+of the shared object store. The shared object directory remains writable:
 this is branch-ref isolation, not protection of existing Git objects from a
 writer granted that directory. Shared Git objects and declared shared caches
 receive no Landlock `REFER` permission. A link or rename between different
@@ -148,7 +152,7 @@ files atomically within one directory still work. Private project, home and
 scratch directories retain ordinary internal moves. Use engine-prepared linked
 worktrees; a project scope containing the common Git directory refuses preparation.
 An unborn repository is admitted with a null base commit. The engine prepares an
-unborn private stage branch using the same linked-worktree metadata layout, so a
+unborn private stage branch using the same private metadata layout, so a
 first commit need not create or change the primary checkout's HEAD. Shared Git
 storage must still lie outside the granted project root. The null base is a
 recorded Git state, not an unavailable-kernel fallback.

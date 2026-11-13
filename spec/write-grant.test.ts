@@ -271,6 +271,30 @@ console.log(JSON.stringify({branch:git('symbolic-ref','--short','HEAD'),files:gi
     expect(git(project, ['symbolic-ref', '--short', 'HEAD'])).toBe('base');
   });
 
+  it('keeps ref deletion private across invocations and disables automatic shared-object maintenance', async () => {
+    if (!supported()) return;
+    const { common, checkout } = await linkedWorktree();
+    const grant = { ...declaration(), projectDir: checkout, scope: ['.'], contract: admitWriteGrant(checkout) };
+    const invoke = (operation: string) => withStageWriteGrant(grant, () => execWithStdin(process.execPath, ['-e', `
+const cp=require('node:child_process'),fs=require('node:fs');
+const git=(...args)=>cp.execFileSync('git',args,{encoding:'utf8'}).trim();
+const disposable=git('symbolic-ref','--short','HEAD').replace(/head$/,'disposable');
+${operation}
+let denied;try{fs.writeFileSync(${JSON.stringify(join(common, 'packed-refs.lock'))},'bad');}catch(error){denied=error.code;}
+console.log(JSON.stringify({maintenance:git('config','--bool','maintenance.auto'),refs:git('for-each-ref','--format=%(refname)'),denied}));
+`], '', { cwd: checkout, timeout_ms: 60_000 }));
+    const first = await invoke("git('branch',disposable,'HEAD');");
+    expect(first.exitCode, first.output).toBe(0);
+    expect(parsed(first.output)).toMatchObject({ maintenance: 'false', refs: expect.stringContaining('/left/disposable'), denied: 'EACCES' });
+    // Even deleting an absent AUTO_MERGE takes packed-refs.lock on newer Git.
+    // A real branch deletion exercises that lock on older Git as well.
+    const second = await invoke("git('update-ref','-d','AUTO_MERGE');git('branch','-D',disposable);");
+    expect(second.exitCode, second.output).toBe(0);
+    expect(parsed(second.output)).toEqual({ maintenance: 'false', refs: expect.stringMatching(/^refs\/heads\/fc\/[^/]+\/left\/head$/), denied: 'EACCES' });
+    expect(git(checkout, ['for-each-ref', '--format=%(refname)', 'refs/heads/fc'])).toBe('');
+    expect(git(checkout, ['symbolic-ref', '--short', 'HEAD'])).toBe('fixture');
+  });
+
   it.each(['git', 'cache', 'output'] as const)('prevents live cross-stage hard links and renames through shared %s directories', async kind => {
     if (!supported()) return;
     let shared: string;

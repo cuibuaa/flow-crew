@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { closeSync, mkdirSync, openSync, publishEngineFiles, writeFileSync } from './engine-fs.js';
 import { stageWorkPath } from './run-layout.js';
@@ -213,9 +213,9 @@ function literalPath(root: string, path: string, tree: boolean): string {
 function gitEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 }
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
   return gitSync(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
-    { cwd, env: gitEnvironment(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    { cwd, env: { ...gitEnvironment(), ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 /** An unborn repository has no commit yet. Git's quiet verification reports
@@ -225,9 +225,9 @@ function gitHead(projectDir: string): string | null {
   catch (error) { if ((error as { status?: number }).status === 1) return null; throw error; }
 }
 
-/** A stage gets its own linked-worktree metadata and index, with the source
- * worktree as GIT_WORK_TREE. Its ref and lock live in an exclusive namespace.
- * No shared refs/heads, logs, config, hooks or other worktree metadata grant. */
+/** A stage owns its Git metadata, refs and index, sharing only objects with the
+ * source repository. Ref deletion (including Git's post-commit AUTO_MERGE
+ * cleanup) can lock packed-refs even when the ref never existed. */
 function prepareStageGit(grant: StageWriteGrant, writable: WriteGrantRoot[], shared: string[]): NodeJS.ProcessEnv {
   const repository = grant.contract.git;
   if (!repository) {
@@ -238,38 +238,30 @@ function prepareStageGit(grant: StageWriteGrant, writable: WriteGrantRoot[], sha
   const common = literalPath(dirname(repository.commonDir), repository.commonDir, false);
   if ([...writable.map(root => root.path), ...shared].some(path => contains(path, common) || contains(common, path))) throw new WriteGrantError({ kind: 'unsafe_path', path: common });
   const namespace = createHash('sha256').update(realpathSync(grant.runDir)).digest('hex');
-  const branchRoot = `fc/${namespace}/${grant.stageId}`;
-  const branch = `${branchRoot}/head`;
-  const checkout = stageWorkPath(grant.runDir, 'stages', grant.stageId, `git-worktree-${namespace}-${grant.stageId}`);
-  const metadata = join(common, 'worktrees', basename(checkout));
+  const branch = `fc/${namespace}/${grant.stageId}/head`;
+  const metadata = stageWorkPath(grant.runDir, 'stages', grant.stageId, 'git');
   try {
+    const objects = literalPath(common, join(common, 'objects'), true);
+    const env: NodeJS.ProcessEnv = {
+      GIT_DIR: metadata, GIT_COMMON_DIR: metadata, GIT_WORK_TREE: repository.worktree, GIT_INDEX_FILE: join(metadata, 'index'),
+      GIT_OBJECT_DIRECTORY: objects, GIT_NAMESPACE: undefined,
+      // Stages write shared objects, but must never maintain that object store.
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false',
+    };
     if (!existsSync(metadata)) {
-      mkdirSync(dirname(checkout), { recursive: true });
-      if (repository.baseCommit === null) {
-        // Older Git releases cannot `worktree add --orphan`. Prepare the same
-        // linked-worktree layout for an unborn, stage-exclusive branch without
-        // inventing a commit or granting the primary repository's metadata.
-        mkdirSync(metadata, { recursive: true }); mkdirSync(checkout, { recursive: true });
-        writeFileSync(join(metadata, 'HEAD'), `ref: refs/heads/${branch}\n`, { flag: 'wx' });
-        writeFileSync(join(metadata, 'commondir'), `${common}\n`, { flag: 'wx' });
-        writeFileSync(join(metadata, 'gitdir'), `${join(checkout, '.git')}\n`, { flag: 'wx' });
-        writeFileSync(join(checkout, '.git'), `gitdir: ${metadata}\n`, { flag: 'wx' });
-      } else {
-        git(grant.projectDir, ['--git-dir', common, 'worktree', 'add', '--no-checkout', '-b', branch, '--', checkout, repository.baseCommit]);
-      }
-      // The unique engine-owned basename must be Git's selected metadata
-      // identity. Never derive later authority from a mutable .git pointer.
-      if (realpathSync(git(checkout, ['rev-parse', '--absolute-git-dir'])) !== metadata) throw new Error('Git metadata identity mismatch');
-      git(grant.projectDir, ['--git-dir', metadata, 'read-tree', repository.baseCommit ?? '--empty']);
+      const ref = join(metadata, 'refs', 'heads', branch);
+      literalPath(grant.runDir, dirname(ref), true);
+      writeFileSync(join(metadata, 'HEAD'), `ref: refs/heads/${branch}\n`, { flag: 'wx' });
+      if (repository.baseCommit !== null) writeFileSync(ref, `${repository.baseCommit}\n`, { flag: 'wx' });
+      // Preserve repository settings (including object format and identity)
+      // without granting writes to the source configuration.
+      git(grant.projectDir, ['config', 'include.path', join(common, 'config')], env);
+      git(grant.projectDir, ['read-tree', repository.baseCommit ?? '--empty'], env);
     }
-    const refs = join(common, 'refs', 'heads', branchRoot);
-    const logs = join(common, 'logs', 'refs', 'heads', branchRoot);
-    for (const path of [refs, logs]) writable.push({ path: literalPath(common, path, true), kind: 'directory' });
-    shared.push(literalPath(common, join(common, 'objects'), true));
-    writable.push({ path: literalPath(common, metadata, false), kind: 'directory' });
-    return { GIT_DIR: metadata, GIT_COMMON_DIR: common, GIT_WORK_TREE: repository.worktree, GIT_INDEX_FILE: join(metadata, 'index'),
-      GIT_OBJECT_DIRECTORY: join(common, 'objects'), GIT_NAMESPACE: undefined };
-  } catch (cause) { throw new WriteGrantError({ kind: 'git_preparation_failed', path: checkout }, { cause }); }
+    shared.push(objects);
+    writable.push({ path: literalPath(grant.runDir, metadata, false), kind: 'directory' });
+    return env;
+  } catch (cause) { throw new WriteGrantError({ kind: 'git_preparation_failed', path: metadata }, { cause }); }
 }
 
 export interface WriteGrantRoot { path: string; kind: 'file' | 'directory' | 'device' }
