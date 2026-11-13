@@ -268,7 +268,7 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     expect(existsSync(runRecordPath(another.runDirPath, 'run.json'))).toBe(false);
   });
 
-  it('keeps terminal store publication synchronous and leaves the previous verdict when summary Git is terminated', () => {
+  it('keeps terminal publication synchronous and retains the recorded decision when summary Git is terminated', () => {
     const reserved = reserveRun(project);
     const created = initializeReservedRun(project, reserved.runId, 'fixture', '', []);
     const before = readFileSync(runRecordPath(created.runDirPath, 'run.json'), 'utf8');
@@ -276,8 +276,12 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     expect(() => updateRunState(project, created.runId, current => { current.status = 'complete'; })).toThrow(GitNotAnswered);
     expect(readFileSync(runRecordPath(created.runDirPath, 'run.json'), 'utf8')).toBe(before);
     expect(existsSync(runRecordPath(created.runDirPath, 'summary.md'))).toBe(false);
+    expect(readRunState(project, created.runId).status).toBe('complete');
     driver.answer = () => success();
-    const terminal = readRunState(project, created.runId); terminal.status = 'complete';
+    const terminal = readRunState(project, created.runId);
+    // Lock-entry replay already repairs the status cache. Publish actual
+    // conclusion metadata so this still exercises a synchronous Git wait.
+    terminal.completedAt = new Date().toISOString();
     expect(heldSync(() => writeRunState(project, created.runId, terminal))).toBeUndefined();
     expect(readRunState(project, created.runId).status).toBe('complete');
   });

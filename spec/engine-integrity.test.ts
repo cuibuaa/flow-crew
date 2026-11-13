@@ -3,7 +3,7 @@ import * as rollbackFiles from '../src/rollback-content-store.js';
 import * as engineFs from '../src/engine-fs.js';
 import { atomicWrite, renameSync as publishRename } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import fs, { closeSync, cpSync, ftruncateSync, openSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import fs, { appendFileSync, closeSync, cpSync, ftruncateSync, openSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -627,7 +627,7 @@ describe('structural engine state protection', () => {
   });
 
   it('accepts concurrent parent publications without accepting child changes', async () => {
-    const path = runRecordPath(run, 'events.jsonl'); write(path, 'original\n');
+    const path = runRecordPath(run, 'events.jsonl'); appendFileSync(path, 'original\n');
     await withEngineIntegrity(input(), async () => {
       await withEngineIntegrity({ ...input(), stageId: '_observer' }, async () => {
         appendTextRecord(path, 'parent');
@@ -638,7 +638,7 @@ describe('structural engine state protection', () => {
   });
 
   it('does not let a later parent overwrite or append hide tampering', async () => {
-    const path = runRecordPath(run, 'events.jsonl'); write(path, 'original\n');
+    const path = runRecordPath(run, 'events.jsonl'); appendFileSync(path, 'original\n');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { appendTextRecord(path, 'parent'); } catch { /* observer may ignore display failure */ } });
     expect(readFileSync(path, 'utf8')).toBe('counterfeit');
     write(path, 'original\n');

@@ -109,6 +109,7 @@ function writeSnapshot(directory: string, record: LifecycleRecord): void {
 export function recordRunLifecycle(directory: string, record: LifecycleRecord, previous?: LifecycleRecord): void {
   const declared = hasLifecycleAuthority(record);
   if (previous && hasLifecycleAuthority(previous) && !declared) throw new Error('Cannot remove lifecycle authority');
+  if (previous && declared && !hasLifecycleAuthority(previous)) throw new Error('Legacy lifecycle authority requires an accepted resume import');
   const bytes = readLog(directory);
   completeLifecycleNotices(directory, bytes);
   const prior = declared && previous ? requireFold(bytes) : foldRunLifecycle(bytes);

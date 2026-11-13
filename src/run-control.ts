@@ -1,4 +1,4 @@
-import { projectRunLifecycle } from './run-lifecycle.js';
+import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { runRecordPath } from './run-layout.js';
 import { cancelRunStateAtPath } from './scheduler/sched_policy/run-completion.js';
 import { readFileSync } from 'node:fs';
@@ -541,7 +541,7 @@ export class RunCancellationCoordinator {
       if (!isAbsolute(runIdOrPath)) requireSafeRunId(runIdOrPath);
       const identity = resolveRunIdentity(isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath), isAbsolute(runIdOrPath) ? undefined : this.runsDir);
       const runPath = identity.directory;
-      const state = projectRunLifecycle(runPath, JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as StoreState);
+      const state = projectRunLifecycle(runPath, readRunSnapshot(runPath) as unknown as StoreState);
       if (!state || typeof state.projectDir !== 'string' || typeof state.status !== 'string') return undefined;
       const status = resolveRunStatus(state.status);
       if (status.kind === 'known') state.status = status.status;

@@ -10,6 +10,8 @@ import { appendDurableTextRecord, appendTextRecord } from '../src/append-boundar
 import { recordRunEvent, readRunEvents } from '../src/run-events.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { RUN_STATUS, fcGlobalDir, initializeReservedRun, reserveRun, readRunState, readArchivedRunState, readOperationalRunState, setFcGlobalDir, updateRunState, updateOperationalRunState, updateStageStatusUnderRunLock, withRunStateLock, writeRunState, importRunLifecycleForResume } from '../src/store.js';
+import { RunCancellationCoordinator } from '../src/run-control.js';
+import { TaskRegistry } from '../src/task-registry.js';
 import { cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
@@ -189,6 +191,25 @@ describe('lifecycle durability and failure retry', () => {
     expect(record).toMatchObject({ status: folded?.status, lifecycleCursor: folded });
     expect(JSON.parse(readFileSync(runRecordPath(reserved.runDirPath, 'run_event_status.json'), 'utf8'))).toEqual(folded);
   });
+  it('cancels through the public coordinator after the first event but before the first snapshot', async () => {
+    const reserved = reserveRun(project);
+    io.target = join(reserved.runDirPath, 'events.jsonl'); io.fail = 'file-sync';
+    expect(() => initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture', [])).toThrow('injected');
+    expect(existsSync(join(reserved.runDirPath, 'run.json'))).toBe(false);
+    io.fail = '';
+    const control = new RunCancellationCoordinator({
+      registry: new TaskRegistry({ baseDir: join(root, 'registry') }),
+      units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never,
+      runsDir: join(root, 'fc', 'runs'), timeoutMs: 0, signalGraceMs: 0,
+      now: () => new Date('2030-01-01T00:00:00.000Z'), clockMs: () => 0,
+    });
+    await expect(Promise.resolve().then(() => control.cancelRun(reserved.runId))).resolves.toMatchObject({
+      ok: true, status: 'cancelled', observation: { runReadable: true },
+    });
+    expect(readRunState(project, reserved.runId).status).toBe('cancelled');
+    expect(JSON.parse(readFileSync(join(reserved.runDirPath, 'run.json'), 'utf8')).lifecycleCursor)
+      .toEqual(foldRunLifecycle(readFileSync(io.target)));
+  });
   it('retains a torn append as evidence and records the next complete decision on a separate line', () => {
     appendFileSync(join(directory, 'events.jsonl'), '{"type":"run_status_changed","lifecycleVersion":1');
     updateRunState(project, runId, state => { state.status = 'parked'; });
@@ -244,6 +265,13 @@ describe('explicit legacy exception and one-time import', () => {
     ]);
     expect(cached().lifecycleAuthority).toBe(LIFECYCLE_AUTHORITY); assertCaches();
     corruptCaches('complete'); expect(readRunState(project, runId).status).toBe('parked');
+  });
+  it('refuses authority adoption by an operational mutation without the resume import', () => {
+    legacy('parked'); const snapshot = bytes('run.json'), log = bytes('events.jsonl');
+    expect(() => updateOperationalRunState(directory, state => {
+      state.lifecycleAuthority = LIFECYCLE_AUTHORITY;
+    })).toThrow('resume import');
+    expect(bytes('run.json')).toBe(snapshot); expect(bytes('events.jsonl')).toBe(log);
   });
   it('imports on accepted resume and never imports again on repeated resume', () => {
     legacy('parked');

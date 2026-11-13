@@ -466,8 +466,10 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
             copyFileSync(value.backing, temporary, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
             if (hashRollbackFileSync(temporary).sha256 !== value.hash!.copy().digest('hex')) { rmSync(temporary); continue; }
             if (path === join(run, 'run.json')) {
-              const restored = JSON.parse(readFileSync(temporary, 'utf8'));
-              if (hasLifecycleAuthority(restored)) {
+              let restored: { lifecycleAuthority?: unknown } | undefined;
+              try { restored = JSON.parse(readFileSync(temporary, 'utf8')); }
+              catch { /* Opaque legacy preimages must still be restored byte for byte. */ }
+              if (restored && typeof restored === 'object' && hasLifecycleAuthority(restored)) {
                 // A preceding parent append may have failed its own flush.
                 flushTextRecords(join(run, 'events.jsonl'));
                 writeFileSync(temporary, JSON.stringify(projectRunLifecycle(run, restored)) + '\n', { flush: true });
