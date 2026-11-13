@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import * as bootFacts from '../src/checkpoint-liveness.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -56,7 +57,8 @@ let realFcHome: string;
 /** Advance the injected clock past any deferred-queue backoff window. */
 const advance = (ms: number) => { clock += ms; };
 
-function admittedBrief(brief_text: string) {
+function admittedBrief(brief_text: string, target = tempDir) {
+  writeReadySetupRecord(target, brief_text, fcGlobalDir());
   const report = inspectBrief(brief_text);
   return {
     brief_text,
@@ -966,7 +968,7 @@ describe('Orchestrator', () => {
 
   it('registers and cancels a launched task', async () => {
     mkdirSync(join(tempDir, 'project'), { recursive: true });
-    const task = await orchestrator.register({ ...admittedBrief('task'), projectDir: join(tempDir, 'project') });
+    const task = await orchestrator.register({ ...admittedBrief('task', join(tempDir, 'project')), projectDir: join(tempDir, 'project') });
 
     expect(systemd.runs[0].unit).toBe('flowcrew-task-1.service');
     expect(registry.get(task.id)?.status).toBe('running');

@@ -29,15 +29,16 @@ import { archiveDeclaredOutputs } from '../src/declared-output-archive.js';
 import { readEvidence } from '../src/evidence-ledger.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import {
-  findGateRecoveryStages,
-  loadWorkflow,
-  readGateEvaluation,
-  runWorkflow,
-  tryTerminateOnTerminalState,
-  writeCampaignEntry,
-  type CampaignEntry,
-  type StageConfig,
+ findGateRecoveryStages,
+ loadWorkflow,
+ readGateEvaluation,
+
+ tryTerminateOnTerminalState,
+ writeCampaignEntry,
+ type CampaignEntry,
+ type StageConfig,
 } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import {
   campaignsRoot,
@@ -143,9 +144,10 @@ describe('independent engine-remediation verification', () => {
     const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Audit the validation delta.\"}]\n---\n# Goal\n## What the report must show\n1. Audit the validation delta.\n";
     const readyPath = writeReadySetupRecord(projectDir, brief, globalRoot);
     const ready = JSON.parse(readFileSync(readyPath, 'utf-8')) as {
-      validationBaseline: { discovery: { commands: Array<{ args: string[] }> } };
+      validationBaseline: { discovery: { commands: Array<{ args: string[] }> }; results: Array<{ args: string[] }> };
     };
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
+    ready.validationBaseline.results[0].args = ['validation-probe.mjs'];
     write(readyPath, `${JSON.stringify(ready, null, 2)}\n`);
     const stagesRun: string[] = [];
     const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true });

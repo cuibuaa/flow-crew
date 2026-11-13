@@ -23,7 +23,8 @@ import {
 } from '../src/orchestrator-rpc.js';
 import { invalidateRunLockCache, writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import type { CancellationResult } from '../src/run-control.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,

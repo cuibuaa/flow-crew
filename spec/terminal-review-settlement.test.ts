@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { parseDispatchedStageConfig, runWorkflow, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
+import { parseDispatchedStageConfig, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, isSuccessfulRunStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { artifacts, producedRead } from './spec_contracts/declared-fixtures.js';
 

@@ -254,9 +254,9 @@ A completed record with any nonzero exit always returns the work to repair, what
 tree, the failure identity or the review verdict was; an unfinished record is a resource state
 the engine reruns within its allowance, never a finding or a repair reason. A run completes only
 when the final tree's record is complete with exit 0 for every declared command. The gate does
-not decide whether a failing or unfinished command may stand. A baseline that already exits
-nonzero is admitted, so the task may be to make it pass; setup shows one advisory line saying so.
-A project with failures unrelated to the task declares a validation command that exits 0 at base.
+not decide whether a failing or unfinished command may stand. Setup measures and shows every declared command once. If any command has no completed exit 0,
+first launch requires the launching operator’s explicit acknowledgement of that measured setup.
+An acknowledged base changes launch permission only; final validation must still exit 0.
 An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
 skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.

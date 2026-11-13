@@ -9,7 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
-import { runWorkflow, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { readRunEvents } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';

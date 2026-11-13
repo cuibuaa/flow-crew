@@ -50,9 +50,11 @@ isolate target writes; internal
 links are relocated within the target tree. Existing target entries resolving outside it or
 content/type collisions refuse. Do not replace a refusal with manual source symlinks.
 
-Setup reads project/brief validation declarations without executing a baseline. The ready
+Setup reads project/brief validation declarations and executes every declared validation command once in the prepared target. The ready
 record binds selection to the exact brief and target. Authors and repairs finish their code,
 deliverables and related tests, then return. They do not run or poll configured validation.
+
+Setup records and shows every declared command's identity and result. If any command has no completed exit 0 (including missing exits or unfinished execution), first launch requires the launching operator's explicit `--acknowledge-brief-warnings[=<digest>]` after measurement. A changed target or measured result invalidates the acknowledgement. An empty declared list needs none. Old unmeasured setups require rerunning setup for a first launch; initialized retries retain their historical baseline. Final validation must still exit 0 for every declared command. `ship-preflight` discovers validation commands but does not execute a baseline.
 
 The scheduler validates the settled tree outside the author deadline. One durable completed
 record per content hash supplies all stages, reviews, gates and resumes. Records live under

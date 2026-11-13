@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Adapter } from '../src/adapters/base.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { runProjectCommand } from '../src/project-validation.js';
 import { readEvidence } from '../src/evidence-ledger.js';
 import { runDir } from '../src/store.js';

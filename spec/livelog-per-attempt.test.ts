@@ -11,7 +11,8 @@ import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { parseStreamJsonToText, startDashboard } from '../src/dashboard.js';
 import { readOperationalProjection } from '../src/cli-events.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus,
   resetStageLiveAttemptAliases, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';

@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { runWorkflow, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
+import { tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, runDir, setFcGlobalDir, terminalArtifactSnapshotName } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';

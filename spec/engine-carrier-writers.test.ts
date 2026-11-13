@@ -16,7 +16,8 @@ import { StageWatchdog } from '../src/stage-watchdog.js';
 
 import { runStage } from '../src/worker.js';
 import { execWithStdin, type Adapter, type AgentConfig } from '../src/adapters/base.js';
-import { runWorkflow } from '../src/scheduler.js';
+
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 
 let root: string, project: string, run: string, runId: string, previous: string;
 const contract = { version: 1 as const, produces: [], reads: [], groups: [] };

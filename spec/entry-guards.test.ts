@@ -57,6 +57,7 @@ function explicitAdmission(brief: string): BriefAdmissionRecord {
 }
 
 async function preflight(server: NonNullable<typeof app>, brief: string) {
+  writeReadySetupRecord(projectDir, brief, fcGlobalDir());
   const response = await server.inject({
     method: 'POST',
     url: '/api/brief-preflight',
@@ -147,6 +148,41 @@ describe('Dashboard admission handshake', () => {
     expect(changed.statusCode).toBe(409);
     expect(changed.json().report.digest).not.toBe(checked.report.digest);
     expect(registrations).toHaveLength(1);
+  });
+
+  it.each(['red', 'green', 'empty'] as const)('dashboard %s setup uses the existing target-bound 409 receipt round trip', async scenario => {
+    const registrations: TaskCreateInput[] = [];
+    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
+      registerTask: async task => { registrations.push(task); return { id: 1, unit: 'fixture.service', pid: process.pid, build: 'fixture' }; },
+      isProjectBusy: () => null,
+    });
+    const brief = '# Measured dashboard';
+    const before = (await app.inject({ method: 'POST', url: '/api/brief-preflight', payload: { brief } })).json();
+    const path = writeReadySetupRecord(projectDir, brief, fcGlobalDir());
+    const setup = JSON.parse(readFileSync(path, 'utf8'));
+    if (scenario === 'red') setup.validationBaseline.results[0].exitCode = 1;
+    if (scenario === 'empty') { setup.validationBaseline.discovery.commands = []; setup.validationBaseline.results = []; }
+    writeFileSync(path, JSON.stringify(setup));
+    const initial = (await app.inject({ method: 'POST', url: '/api/brief-preflight', payload: { brief } })).json();
+    const submit = (checked: typeof initial, target = projectDir) => app!.inject({ method: 'POST', url: '/api/tasks',
+      payload: { brief, projectDir: target, ...admissionFields(checked) } });
+    const held = await submit(scenario === 'red' ? before : initial);
+    expect(held.statusCode).toBe(scenario === 'red' ? 409 : 201);
+    const checked = scenario === 'red' ? held.json() : initial;
+    expect(checked.report.findings.find((f: { code: string }) => f.code === 'setup_baseline').message)
+      .toContain(scenario === 'red' ? 'Setup acknowledgement: REQUIRED' : 'Setup acknowledgement: not required');
+    if (scenario === 'red') { expect(registrations).toHaveLength(0); expect((await submit(checked)).statusCode).toBe(201); }
+    expect(registrations).toHaveLength(1);
+    if (scenario === 'red') {
+      setup.validationBaseline.results[0].exitCode = 2; writeFileSync(path, JSON.stringify(setup));
+      expect((await submit(checked)).statusCode).toBe(409);
+      const another = join(fixtureRoot, 'another-target'); mkdirSync(another);
+      const otherPath = writeReadySetupRecord(another, brief, fcGlobalDir());
+      const other = JSON.parse(readFileSync(otherPath, 'utf8')); other.validationBaseline.results[0].exitCode = 1;
+      writeFileSync(otherPath, JSON.stringify(other));
+      expect((await submit(checked, another)).statusCode).toBe(409);
+      expect(registrations).toHaveLength(1);
+    }
   });
 
   it('invalidates an old receipt when the Dashboard process changes', async () => {
@@ -252,6 +288,7 @@ describe('durable daemon boundary', () => {
     expect(systemd.commands).toHaveLength(0);
 
     const brief = 'admitted prose';
+    writeReadySetupRecord(projectDir, brief, fcGlobalDir());
     const task = await orchestrator.register({
       brief_text: brief,
       brief_admission: explicitAdmission(brief),
@@ -361,6 +398,38 @@ describe('quick and operator entry behavior', () => {
     expect(wrong.status).toBe(1);
     expect(`${wrong.stdout}${wrong.stderr}`).toContain('digest mismatch');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
+  });
+
+  it.each(['red', 'green', 'empty', 'unmeasured'] as const)('CLI background %s setup checks results before registration', async scenario => {
+    const isolated = cliFixture(); const exact = '---\ncriteria: [{id: fixture_1, text: Preserve launch permission.}]\n---\n# Controlled background launch';
+    const path = writeReadySetupRecord(isolated.project, exact, isolated.fcHome);
+    const setup = JSON.parse(readFileSync(path, 'utf8'));
+    if (scenario === 'red') setup.validationBaseline.results[0].exitCode = 1;
+    if (scenario === 'empty') { setup.validationBaseline.discovery.commands = []; setup.validationBaseline.results = []; }
+    if (scenario === 'unmeasured') delete setup.validationBaseline.execution;
+    writeFileSync(path, JSON.stringify(setup));
+    const requests: RpcRequest[] = []; const socket = join(isolated.fcHome, 'daemon.sock');
+    const server = await startRpcServer(socket, request => { requests.push(request); return { id: 1, unit: 'fixture.service', pid: process.pid, build: 'fixture' }; });
+    try {
+      const args = ['quick', '--background', '--project', isolated.project, '--adapter', 'mock', '-'];
+      const first = await runQuick(isolated, args, exact, socket);
+      expect(first.code).toBe(scenario === 'red' || scenario === 'unmeasured' ? 1 : 0);
+      if (scenario === 'red') {
+        expect(first.stderr).toContain('setup_acknowledgement_required'); expect(requests).toHaveLength(0);
+        const prior = Buffer.from(JSON.stringify(explicitAdmission(exact))).toString('base64url');
+        const transported = await runQuick(isolated, [...args, '--brief-admission-record', prior], exact, socket);
+        expect(transported.code).toBe(1); expect(transported.stderr).toContain('setup_acknowledgement_required');
+        expect(requests).toHaveLength(0);
+        const accepted = await runQuick(isolated, [...args, '--acknowledge-brief-warnings'], exact, socket);
+        expect(accepted.code, accepted.stderr).toBe(0);
+        expect(requests).toHaveLength(1);
+        const task = (requests[0] as Extract<RpcRequest, {cmd: 'register'}>).task;
+        expect(task.brief_admission?.acknowledgement).toMatchObject({ kind: 'explicit', measuredSetupIdentity: expect.any(String) });
+      } else if (scenario === 'unmeasured') {
+        expect(first.stderr).toContain('setup_unmeasured'); expect(first.stderr).toContain('Rerun flowcrew ship-setup');
+        expect(requests).toHaveLength(0);
+      } else expect(requests).toHaveLength(1);
+    } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 
   it('prints advisory findings and registers exact stdin bytes from an explicit launch', async () => {

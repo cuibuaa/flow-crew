@@ -9,7 +9,8 @@ import { beginStageAttempt, readRunState, readStageStatus, writeRunState } from 
 import { runProjectValidationBaseline, runValidationCommand } from '../src/project-validation.js';
 import { inspectStageExecutionFacts, StageWatchdog } from '../src/stage-watchdog.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { CommandActivityTracker } from '../src/command-activity.js';

@@ -2,6 +2,7 @@ import { createTerminalEvaluator } from '../src/scheduler/sched_policy/terminal.
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runPreparedWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -67,7 +68,7 @@ async function run(
   const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'planner.yaml'));
   config.defaults.max_iterations = 3;
   const adapter = new ScriptedAdapter(script);
-  const state = await scheduler.runWorkflow(
+  const state = await runPreparedWorkflow(
     config, raw, projectDir, adapter, new Map(), undefined,
     join(PROJECT_ROOT, 'config', 'agents'), undefined, brief,
     true, undefined, false,
@@ -134,7 +135,7 @@ describe('terminal artifact freshness', () => {
     const before = statSync(artifact).mtimeMs;
     const adapter = new ScriptedAdapter({});
 
-    const state = await scheduler.runWorkflow(
+    const state = await runPreparedWorkflow(
       workflow, JSON.stringify(workflow), projectDir, adapter, new Map(), undefined,
       join(PROJECT_ROOT, 'config', 'agents'), created.runId,
     );
@@ -176,7 +177,7 @@ describe('terminal artifact freshness', () => {
       deliver: { projectFiles: { 'docs/task_summary.md': '# delivered after deploy\n' } },
     });
 
-    const state = await scheduler.runWorkflow(
+    const state = await runPreparedWorkflow(
       config, raw, projectDir, adapter, new Map(), undefined,
       join(PROJECT_ROOT, 'config', 'agents'), created.runId, `---
 terminal_states:

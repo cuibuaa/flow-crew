@@ -10,7 +10,8 @@ import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/b
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { appendGuidanceEnvelope, readGuidanceForStage } from '../src/guidance.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 
 import { runDir } from '../src/store.js';
 

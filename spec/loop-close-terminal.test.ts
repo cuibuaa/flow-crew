@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { AgentConfig } from '../src/adapters/base.js';
 import { ScriptedAdapter, type StageScript } from '../src/adapters/scripted.js';
 import { readRunEvents } from '../src/run-events.js';
-import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 const coder: AgentConfig = {

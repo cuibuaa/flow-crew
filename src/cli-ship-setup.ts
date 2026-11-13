@@ -1,3 +1,4 @@
+import { measuredSetupSummary } from './ship-setup-record.js';
 import { errorMessage, within } from './source_services/cli-inputs.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { createHash } from 'node:crypto';
@@ -10,9 +11,7 @@ import { briefDeclarationFailures } from './brief-preflight.js';
 import {
   runProjectValidationBaseline,
   VALIDATION_ADVICE,
-  projectValidationResult,
   parseBriefValidationCommands,
-  unmeasured,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
 } from './project-validation.js';
@@ -1186,8 +1185,7 @@ export async function runShipSetup(
 
   const validationFs = { exists: deps.fs.exists, readText: deps.fs.readText };
   const validationBaseline = await runProjectValidationBaseline(targetDir, {
-    fs: validationFs, declaredCommands: declaredValidation.commands, skipExecution: true,
-    skipReason: 'Configured validation is deferred to the end of each author/repair attempt',
+    fs: validationFs, declaredCommands: declaredValidation.commands, runCommand: deps.runValidationCommand,
   });
   facts = { ...facts, validationBaseline };
 
@@ -1261,9 +1259,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   renderVerification(report, writer);
   if (report.state === 'ready') {
     writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
-    for (const result of report.validationBaseline.results) {
-      writer.write(`  ${result.role}: ${unmeasured(result) ? 'UNVERIFIED' : projectValidationResult(result).state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
-    }
+    writer.write(measuredSetupSummary(report.validationBaseline));
     if (report.validationBaseline.discovery.commands.length) writer.write(VALIDATION_ADVICE);
     writer.write(`Ready record: ${report.readyRecordPath}\n`);
     return;

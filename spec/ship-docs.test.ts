@@ -137,7 +137,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '52', digest: '6db648f9811e' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '53', digest: '6297479c6225' });
   });
 
   it('documents declared command allowances and the unfinished handoff', () => {

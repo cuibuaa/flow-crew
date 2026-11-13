@@ -7,7 +7,8 @@ import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 
 import { readRunEvents } from '../src/run-events.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';

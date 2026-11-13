@@ -9,13 +9,14 @@ import { randomBytes } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import {
-  findAllReady,
-  runWorkflow,
-  selectRunnableBatch,
-  StageConfigSchema,
-  WorkflowConfigSchema,
-  type StageConfig,
+ findAllReady,
+
+ selectRunnableBatch,
+ StageConfigSchema,
+ WorkflowConfigSchema,
+ type StageConfig,
 } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import {
   runDir,

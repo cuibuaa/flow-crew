@@ -7,6 +7,8 @@ import type {
   ValidationCommandResult,
   ValidationRole,
 } from './project-validation.js';
+import { canonicalJson } from './canonical-json.js';
+import type { BriefAdmissionRecord } from './brief-admission.js';
 import { fcGlobalDir } from './store.js';
 
 const VALIDATION_ROLES = new Set<ValidationRole>(['build', 'test', 'lint']);
@@ -166,4 +168,46 @@ export function inspectShipSetupRecord(
     return { state: 'invalid', recordPath: expectedPath, reason: 'record is neither a valid ready record nor a valid refused record' };
   }
   return { state: 'ready', recordPath: expectedPath, validationBaseline: parsed.validationBaseline, record: parsed };
+}
+
+/** Launch permission depends only on measured command identities and completed exits. */
+export function measuredSetupFacts(baseline: ProjectValidationBaseline) {
+  if (baseline.execution !== 'executed') throw new SetupLaunchRefusal('setup_unmeasured',
+    'Setup baseline is unmeasured. Rerun flowcrew ship-setup for this target and exact brief.');
+  const identity = (command: Pick<ValidationCommandResult, 'role' | 'command' | 'args' | 'env'>) =>
+    canonicalJson({ role: command.role, command: command.command, args: command.args, env: command.env ?? {} });
+  const acknowledgementRequired = baseline.discovery.commands.some(command => !baseline.results.some(result =>
+    identity(result) === identity(command) && result.exitCode === 0 && !result.unfinished));
+  return { identity: createHash('sha256').update(canonicalJson(baseline)).digest('hex'), acknowledgementRequired };
+}
+
+export class SetupLaunchRefusal extends Error {
+  constructor(readonly code: 'setup_not_ready' | 'setup_unmeasured' | 'setup_acknowledgement_required', message: string) {
+    super(`${code}: ${message}`); this.name = 'SetupLaunchRefusal';
+  }
+}
+
+/** Shared by every first-launch route; initialized runs retain their historical baseline. */
+export function assertMeasuredSetupLaunch(targetDir: string, brief: string, admission?: BriefAdmissionRecord) {
+  const setup = inspectShipSetupRecord(targetDir, brief);
+  if (setup.state !== 'ready') throw new SetupLaunchRefusal('setup_not_ready',
+    `Setup is ${setup.state}. Run flowcrew ship-setup for this target and exact brief.`);
+  const facts = measuredSetupFacts(setup.validationBaseline);
+  const acknowledgement = admission?.acknowledgement;
+  if (facts.acknowledgementRequired && (acknowledgement?.kind !== 'explicit'
+    || acknowledgement.measuredSetupIdentity !== facts.identity)) {
+    throw new SetupLaunchRefusal('setup_acknowledgement_required',
+      'Some declared validation command has no completed exit 0. Review the measured setup results, then launch with --acknowledge-brief-warnings.');
+  }
+  return facts;
+}
+
+/** Show the same command facts wherever the launching operator reviews them. */
+export function measuredSetupSummary(baseline: ProjectValidationBaseline): string {
+  const facts = measuredSetupFacts(baseline);
+  return baseline.discovery.commands.map(command => {
+    const result = baseline.results.find(result => result.role === command.role && result.command === command.command
+      && canonicalJson(result.args) === canonicalJson(command.args) && canonicalJson(result.env ?? {}) === canonicalJson(command.env ?? {}));
+    return `  ${command.role}: ${command.display} exit=${result?.exitCode ?? 'missing'}${result?.unfinished ? ' unfinished' : ''}\n`;
+  }).join('') + `Setup acknowledgement: ${facts.acknowledgementRequired ? 'REQUIRED' : 'not required'}\n`;
 }

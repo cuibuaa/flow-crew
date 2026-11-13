@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { stringify, parse } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { planRetryRequirement } from '../src/plan-retry-monotone.js';
-import { runWorkflow, StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
+import { StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 

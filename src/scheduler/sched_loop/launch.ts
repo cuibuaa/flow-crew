@@ -1,3 +1,4 @@
+import { assertMeasuredSetupLaunch } from '../../ship-setup-record.js';
 import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { admitStageDuration, stageDurationLimit } from '../../stage-duration.js';
 import { RESEARCH_PROTOCOL } from '../../research-instrument.js';
@@ -108,6 +109,7 @@ export function prepareWorkflowLaunch(
       );
     }
   }
+  if (!launchState) assertMeasuredSetupLaunch(projectDir, taskDescription ?? '', briefAdmission);
   // The run-local workflow is the normalized executable contract, including
   // inferred gate/dependency facts, not the stale input text.
   workflowYaml = stringifyYaml(workflow);

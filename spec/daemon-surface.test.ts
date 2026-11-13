@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,7 @@ const git: GitAdapter = {
 };
 function input() {
   const brief = '# Goal\nAn admitted deterministic queue task.\n';
+  writeReadySetupRecord(root, brief, fcGlobalDir());
   return { projectDir: root, brief_text: brief, brief_admission: createBriefAdmission(inspectBrief(brief), {
     kind: 'explicit' as const, source: 'cli_current_input_flag' as const, at: '2026-01-01T00:00:00.000Z',
   }), launch_args: ['--adapter', 'mock'] };

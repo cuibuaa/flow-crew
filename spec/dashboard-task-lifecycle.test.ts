@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { startDashboard } from '../src/dashboard.js';
 import { RpcRemoteError, RpcOutcomeUnknownError, RpcInProgress } from '../src/orchestrator-rpc.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
@@ -192,7 +193,8 @@ function writeRun(runId: string, status: string, campaignId?: string): string {
   return runPath;
 }
 
-async function admittedTaskPayload(brief: string, fields: Record<string, unknown>) {
+async function admittedTaskPayload(brief: string, fields: Record<string, unknown> = {}) {
+  writeReadySetupRecord(projectDir, brief, fcGlobalDir());
   const checked = await app!.inject({
     method: 'POST',
     url: '/api/brief-preflight',

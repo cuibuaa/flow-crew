@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,8 @@ import {
   RunCancellationCoordinator,
   type CancellationResult,
 } from '../src/run-control.js';
-import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import {
   fcGlobalDir,
   readRunState,
@@ -93,6 +95,7 @@ function writeRun(
 }
 
 function admittedBrief(text: string) {
+  writeReadySetupRecord(projectDir, text, fcGlobalDir());
   const report = inspectBrief(text);
   return {
     brief_text: text,

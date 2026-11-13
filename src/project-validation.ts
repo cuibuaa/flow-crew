@@ -233,8 +233,8 @@ export interface ValidationCommandResult extends Pick<ValidationRunResponse, 're
   reason?: string;
 }
 
-/** The one rule, as advice: a baseline that already exits nonzero is admitted, never refused. */
-export const VALIDATION_ADVICE = '  Advice: the run completes only when every declared validation command exits 0 on the final tree; a command that already exits nonzero at base is admitted, so declare commands that exit 0 at base for failures unrelated to the task.\n';
+/** Setup acknowledgement changes launch permission only. */
+export const VALIDATION_ADVICE = '  Advice: a declared command without a completed exit 0 at setup requires the launching operator’s explicit acknowledgement; the run completes only when every declared validation command exits 0 on the final tree.\n';
 
 export interface ProjectValidationBaseline {
   version: 1;

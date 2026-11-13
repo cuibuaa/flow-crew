@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,8 @@ import { runShipSetup } from '../src/cli-ship-setup.js';
 import { rehearseBrief } from '../src/rehearse.js';
 import { Orchestrator, buildCommand } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { WorkflowConfigSchema, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { assertContinuationCompatible } from '../src/engine-continuation.js';
@@ -122,6 +124,7 @@ describe('frozen run declaration', () => {
     const admission = createBriefAdmission(inspectBrief(brief), { kind: 'not_required' });
     const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
     const daemon = new Orchestrator({ registry, now: () => new Date() });
+    writeReadySetupRecord(project, brief, fcGlobalDir());
     const task = daemon.enqueue({ name: 'first', projectDir: project, brief_path: path, brief_admission: admission });
     if (change === 'deleted') rmSync(path); else writeFileSync(path, envelope('outputs: [other.md]'));
     expect(buildCommand(task, join(process.cwd(), 'dist/cli.js'))).toContain(Buffer.from(brief).toString('base64url'));

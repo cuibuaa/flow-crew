@@ -25,24 +25,24 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
-// Outcome A supersedes the former eager setup cache and its invalidation table.
-// The end-of-attempt lifecycle, not a cached setup measurement, owns freshness.
-describe('setup records declarations without executing or caching validation', () => {
-  it('keeps repeated setup ready without running even a failing or missing command', async () => {
+// Each setup measures anew; no legacy cache supplies launch evidence.
+describe('setup measures declarations without caching validation', () => {
+  it('measures every repeated setup and keeps failing commands ready', async () => {
     const runCommand = vi.fn(() => ({ exitCode: 1, stdout: 'FAIL existing.test' }));
     for (let retry = 0; retry < 2; retry++) {
       const report = await runShipSetup(args(), { globalDir: () => state, runValidationCommand: runCommand });
       expect(report.state, JSON.stringify(report)).toBe('ready'); expect(report.baselineReuse).toBeUndefined();
-      expect(report.validationBaseline).toMatchObject({ execution: 'skipped', results: expect.arrayContaining([
-        expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown', reason: expect.stringContaining('deferred') }),
+      expect(runCommand).toHaveBeenCalledTimes(retry + 1);
+      expect(report.validationBaseline).toMatchObject({ execution: 'executed', results: expect.arrayContaining([
+        expect.objectContaining({ role: 'test', exitCode: 1, state: 'failed', failureIdentity: 'unknown' }),
       ]) });
     }
-    expect(runCommand).not.toHaveBeenCalled(); expect(existsSync(join(state, 'ship-setups/baselines'))).toBe(false);
-    expect(readShipSetupReadyValidationBaseline(target, readFileSync(brief, 'utf8'), state)?.execution).toBe('skipped');
+    expect(runCommand).toHaveBeenCalledTimes(2); expect(existsSync(join(state, 'ship-setups/baselines'))).toBe(false);
+    expect(readShipSetupReadyValidationBaseline(target, readFileSync(brief, 'utf8'), state)?.execution).toBe('executed');
   });
 
   it.each(['base commit', 'base tree', 'commands', 'lockfile', 'working source', 'environment', 'declared inputs'])(
-    'discovers current declarations without an eager measurement after %s changes', async dimension => {
+    'measures current declarations again after %s changes', async dimension => {
       const runner = vi.fn(() => ({ exitCode: 0 }));
       const setup = () => runShipSetup(args(), { globalDir: () => state, runValidationCommand: runner });
       expect((await setup()).state).toBe('ready');
@@ -56,7 +56,7 @@ describe('setup records declarations without executing or caching validation', (
       else if (dimension === 'environment') vi.stubEnv('SETUP_ORDINARY_INPUT', 'changed');
       else for (const directory of [project, target]) write(join(directory, 'data/input.txt'), 'changed declared input\n');
       const report = await setup(); expect(report.state, JSON.stringify(report)).toBe('ready');
-      expect(report.validationBaseline?.execution).toBe('skipped'); expect(runner).not.toHaveBeenCalled();
+      expect(report.validationBaseline?.execution).toBe('executed'); expect(runner).toHaveBeenCalledTimes(2);
       expect(report.validationBaseline?.discovery.commands[0].args).toEqual(dimension === 'commands' ? ['--changed'] : []);
     },
   );
@@ -66,27 +66,27 @@ describe('setup records declarations without executing or caching validation', (
       write(join(state, 'ship-setups/baselines/stale.json'), corruption === 'invalid JSON' ? '{' : JSON.stringify({ version: 1, results: [], cached: corruption }));
       const runner = vi.fn(() => ({ exitCode: 0 }));
       const report = await runShipSetup(args(), { globalDir: () => state, runValidationCommand: runner });
-      expect(report.state).toBe('ready'); expect(report.validationBaseline?.execution).toBe('skipped');
-      expect(report.baselineReuse).toBeUndefined(); expect(runner).not.toHaveBeenCalled();
+      expect(report.state).toBe('ready'); expect(report.validationBaseline?.execution).toBe('executed');
+      expect(report.baselineReuse).toBeUndefined(); expect(runner).toHaveBeenCalledTimes(1);
     },
   );
 
   it.each(['PWD', 'OLDPWD', 'SHLVL', 'TMUX', 'TMUX_PANE', '_', 'WSL_INTEROP', 'WT_SESSION', 'WINDOWID'])(
-    'retains ordinary %s command inputs without running a setup command', async name => {
+    'retains ordinary %s command inputs across setup measurements', async name => {
       vi.stubEnv(name, 'first');
       const runner = vi.fn(() => ({ exitCode: 0 }));
       expect((await runShipSetup(args(), { globalDir: () => state, runValidationCommand: runner })).state).toBe('ready');
       vi.stubEnv(name, 'second');
       expect((await runShipSetup(args(), { globalDir: () => state, runValidationCommand: runner })).state).toBe('ready');
       expect(validationEnvironment(join(state, 'validation-env'), process.env).env[name]).toBe('second');
-      expect(runner).not.toHaveBeenCalled();
+      expect(runner).toHaveBeenCalledTimes(2);
     },
   );
 
   it('keeps separate worktrees and brief identities separate without sharing validation results', async () => {
-    const first = await runShipSetup(args(), { globalDir: () => state });
+    const first = await runShipSetup(args(), { globalDir: () => state, runValidationCommand: () => ({ exitCode: 0 }) });
     target = join(root, 'another-target'); write(brief, readFileSync(brief, 'utf8') + '\nAnother task.\n');
-    const second = await runShipSetup(args().map(value => value === 'trial' ? 'another-trial' : value), { globalDir: () => state });
+    const second = await runShipSetup(args().map(value => value === 'trial' ? 'another-trial' : value), { globalDir: () => state, runValidationCommand: () => ({ exitCode: 0 }) });
     expect(first.state).toBe('ready'); expect(second.state).toBe('ready');
     if (first.state !== 'ready' || second.state !== 'ready') throw new Error('setup did not become ready');
     expect(first.readyRecordPath).not.toBe(second.readyRecordPath);

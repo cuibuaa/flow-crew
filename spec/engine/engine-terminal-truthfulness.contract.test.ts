@@ -20,7 +20,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
+import { type WorkflowConfig } from '../../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from '../test-support/ready-setup.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
 import { createRun } from '../test-support/create-run.js';
 import { fcGlobalDir, readRunState, runDir, runsRoot, setFcGlobalDir, writeRunState } from '../../src/store.js';

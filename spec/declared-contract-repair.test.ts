@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,8 @@ import { captureProjectTree } from '../src/evidence-ledger.js';
 import { observeEnginePublications } from '../src/engine-fs.js';
 import { releaseLaunchIntent } from '../src/run-lock.js';
 import { runRecordPath } from '../src/run-layout.js';
-import { WorkflowConfigSchema, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { removeSchedulerPidIfOwned } from '../src/scheduler/sched_policy/identity.js';
@@ -70,6 +72,7 @@ it('declared reality checks retain refusal power while body check examples have 
 it.each([false, true])('preparation interruption retains the complete first brief contract (interrupted=%s)', interrupted => {
   const dir = project('preparation'), config = workflow();
   const text = brief('outputs: [required.txt]\nmax_continuations: 2\nterminal_states: {complete: {paths: [required.txt]}}');
+  writeReadySetupRecord(dir, text, fcGlobalDir());
   let launch = prepareWorkflowLaunch(config, '', dir, undefined, text);
   if (launch.kind !== 'ready') throw new Error('Expected launch preparation');
   try {
@@ -96,6 +99,7 @@ it.each(['snapshot', 'criterion coverage', 'frozen settlement'])('recovers inter
   const text = brief(`inputs: [{path: ${source}, frozen: true}]\noutputs: []`
     + (property === 'frozen settlement' ? '' : '\ncriteria: [{id: preserved, text: Preserve the result.}]'),
     '## Reality checks\nThis is explanatory prose. Expected: 42. 不需要额外义务。');
+  writeReadySetupRecord(dir, text, fcGlobalDir());
   interruptSnapshot = true;
   expect(() => prepareWorkflowLaunch(config, '', dir, undefined, text)).toThrow('interrupted before declaration snapshot');
   const [runId] = listRuns(dir);

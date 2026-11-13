@@ -40,7 +40,8 @@ import type {
 } from '../src/project-validation.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
-import { appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import {
   inspectShipSetupRecord,
   shipSetupBriefDigest,

@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 52 -->
+<!-- flowcrew-skill-revision: 53 -->
 
 # Ship a conversation to FlowCrew
 
@@ -148,6 +148,8 @@ On nonzero, inspect the refusal; do not bypass it with manual links/worktrees.
 Setup records estimated declared-input copy bytes before creating the worktree or copying inputs.
 It invokes no operator capacity executable. Resolve estimate/copy refusals before retrying.
 Unsupported population comparison remains unverified; do not claim source-suite parity.
+
+Setup measures every declared validation command once in the prepared target and displays its identity and exit. Setup remains ready when a command fails or is unfinished. If any declared command has no completed exit 0, the launching operator must review these measured results and explicitly use `--acknowledge-brief-warnings[=<digest>]` on launch. An earlier brief admission does not acknowledge a later measurement; changed target or results require fresh acknowledgement. An empty command list requires none. An old unmeasured setup must be rerun before first launch; initialized retries retain their historical baseline. The run still completes only when final validation exits 0 for every declared command.
 
 ### Register or run
 

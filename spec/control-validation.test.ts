@@ -7,7 +7,8 @@ import { isolatedProjectCommand } from './test-support/isolated-project-command.
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Adapter } from '../src/adapters/base.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { runDir, readRunState, readStageStatus, writeStageStatus } from '../src/store.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { createRun } from './test-support/create-run.js';

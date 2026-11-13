@@ -20,10 +20,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  cmdShipSetupWithDeps,
+  cmdShipSetupWithDeps as executeSetup,
   createGitWorktree,
   nodeShipSetupFileSystem,
-  runShipSetup,
+  runShipSetup as measureSetup,
   type GitCommandRequest,
   type GitCommandRunner,
   type GitWorktreeCreator,
@@ -36,6 +36,11 @@ import { execWithStdin } from '../src/adapters/base.js';
 import { runStage } from './test-support/stage-deadline.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
+
+
+// Filesystem cases use controlled commands unless they supply their own runner.
+const runShipSetup: typeof measureSetup = (args, deps) => measureSetup(args, { runValidationCommand: () => ({ exitCode: 0 }), ...deps });
+const cmdShipSetupWithDeps: typeof executeSetup = (args, deps) => executeSetup(args, { runValidationCommand: () => ({ exitCode: 0 }), ...deps });
 
 
 // Temporary projects and outputs share this repository as a container, while
@@ -671,8 +676,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       base: 'release-base',
       branch: 'autonomous-result',
     });
-    expect(runner).toHaveBeenCalledTimes(0);
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner.mock.calls.every(([request]) => request.cwd === fixture.target)).toBe(true);
 
 
     const linkedFile = join(fixture.target, 'data', 'frozen.csv');
@@ -705,7 +710,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(record.sourceVerification.inputs).toHaveLength(3);
     expect(record.targetVerification.inputs).toHaveLength(3);
     expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'unverified', failureIdentity: 'unknown',
+      role: 'test', state: 'failed', failureIdentity: 'unknown',
     }));
   });
 
@@ -721,22 +726,22 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
     expect(report.state).toBe('ready');
     expect(report.validationBaseline?.discovery.commands.map(command => command.display)).toEqual(['npm run build', 'npm run test', 'npm run lint']);
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it.each([
-    ['TAP version 13\nok 1 - passes\nnot ok 2 - fails\n1..2', 'known', ['fails']],
+    ['TAP version 13\nok 1 - passes\nnot ok 2 - fails\n1..2', 'unknown', []],
     ['custom runner stopped', 'unknown', []],
-  ])('defers target failure evidence until an author attempt (%s)', async (output, identity, failures) => {
+  ])('records target failure evidence at setup (%s)', async (output, identity, failures) => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: { test: 'custom-test-runner' } }));
     writeBrief(['# Goal', 'Record existing test failures.']);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stdout: output as string }));
     const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
     expect(report).toMatchObject({ state: 'ready', validationBaseline: {
-      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unverified',
-        failureIdentity: 'unknown', failureIdentifiers: [] })]),
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'failed',
+        failureIdentity: identity, failureIdentifiers: failures })]),
     } });
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('defers command selection for an undeclared Python project to the repository-reading model', async () => {
@@ -776,7 +781,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(existsSync(report.readyRecordPath)).toBe(true);
   });
 
-  it('discovers a brief-declared pytest command with provenance and deferred measurement', async () => {
+  it('measures a brief-declared pytest command with provenance', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     const declaredPython = '/opt/research-environment/bin/python';
@@ -820,11 +825,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
           })],
         },
         results: [
-          expect.objectContaining({ role: 'test', state: 'unverified' }),
+          expect.objectContaining({ role: 'test', state: 'passed' }),
         ],
       },
     });
-    expect(baseline).not.toHaveBeenCalled();
+    expect(baseline).toHaveBeenCalledTimes(1);
     if (report.state !== 'ready') throw new Error('declared-validation setup unexpectedly refused');
     const record = JSON.parse(readFileSync(report.readyRecordPath, 'utf-8')) as Record<string, any>;
     expect(record.validationBaseline.discovery.commands[0].provenance).toEqual({
@@ -862,7 +867,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: runner });
     expect(report).toMatchObject({ state: 'ready', worktreeCreated: true, blockers: [] });
     expect(git).toHaveBeenCalledTimes(1);
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('refuses malformed and structurally invalid validation declarations before creating a worktree', async () => {
@@ -928,7 +933,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     }
   });
 
-  it('records a missing brief-declared command for the author attempt without eager execution', async () => {
+  it('records a missing brief-declared command without refusing setup', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     writeBrief([
@@ -953,9 +958,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
     });
 
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(1);
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
-      execution: 'skipped', discovery: { commands: [expect.objectContaining({ role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'] })] },
+      execution: 'executed', discovery: { commands: [expect.objectContaining({ role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'] })] },
       results: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unverified', failureIdentity: 'unknown' })]),
     } });
     expect(noReadyRecord()).toBe(false);
@@ -1032,7 +1037,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
         },
       },
     });
-    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).toHaveBeenCalledTimes(3);
     expect(report.validationBaseline?.discovery.commands.map(command => [command.command, command.args])).toEqual([
       ['npm', ['run', 'build']],
       ['npm', ['run', 'test']],
@@ -1092,8 +1097,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       branch: 'default-project-result',
     }));
     expect(stdout.value).toContain('Ship setup: READY');
-    expect(stdout.value).toContain('build: UNVERIFIED');
-    expect(stdout.value).toContain('test: UNVERIFIED');
+    expect(stdout.value).toContain('build: npm run build exit=0');
+    expect(stdout.value).toContain('test: npm run test exit=0');
     expect(noReadyRecord()).toBe(false);
   });
 
@@ -1319,7 +1324,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       fs: { ...nodeShipSetupFileSystem, writeAtomic },
     });
 
-    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).toHaveBeenCalledTimes(3);
     // The ready write fails, then the fail-closed path makes one best-effort
     // attempt to persist the distinct refused outcome for launch diagnostics.
     expect(writeAtomic).toHaveBeenCalledTimes(2);
@@ -1339,19 +1344,29 @@ describe('ship-setup fail-closed worktree transaction', () => {
     { exitCode: null, error: 'spawn validation ENOENT' },
     { exitCode: 127, stderr: 'sh: validation-tool: command not found' },
     { exitCode: 1, stderr: '/usr/bin/python: No module named pytest' },
-  ])('records unmeasurable inferred baselines as environment gaps: %j', async response => {
+  ])('records actual command exits without inferring environment causes: %j', async response => {
     writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const runner = vi.fn<ValidationCommandRunner>(() => response);
     const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
-    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).toHaveBeenCalledTimes(3);
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
       results: expect.arrayContaining([expect.objectContaining({ role: 'test', failureIdentity: 'unknown',
-        output: '', state: 'unverified', reason: expect.stringContaining('deferred') })]),
+        exitCode: response.exitCode, output: response.stderr ?? '', state: response.exitCode === null ? 'unverified' : 'failed' })]),
     } });
     expect(noReadyRecord()).toBe(false);
   });
 
-  it('reports a missing inferred pytest module as an environment gap at setup', async () => {
+  it('shows unfinished command identities and exits without refusing setup', async () => {
+    writeBrief(['# Goal', 'Measure the declared commands.']);
+    const stdout = new Capture();
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: null, unfinished: true, error: 'controlled interruption' }));
+    const code = await cmdShipSetupWithDeps(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner, stdout: stdout.writer });
+    expect(code).toBe(0); expect(runner).toHaveBeenCalledTimes(3);
+    expect(stdout.value).toContain('test: npm run test exit=missing unfinished');
+    expect(stdout.value).toContain('Setup acknowledgement: REQUIRED');
+  });
+
+  it('shows a nonzero command exit and acknowledgement requirement at setup', async () => {
     writeBrief(['# Goal', 'Change the project.']);
     const stdout = new Capture();
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stderr: '/usr/bin/python: No module named pytest' }));
@@ -1359,11 +1374,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       createWorktree: successfulGit(), runValidationCommand: runner, stdout: stdout.writer,
     });
     expect(code).toBe(0);
-    expect(stdout.value).toContain('test: UNVERIFIED');
+    expect(stdout.value).toContain('test: npm run test exit=1');
     expect(noReadyRecord()).toBe(false);
   });
 
-  it('defers identity judgment on a brief-declared command until an author attempt', async () => {
+  it('records a nonzero brief-declared command at setup', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     writeBrief(['---', 'validation:', '  commands:', '    test:', '      command: python',
@@ -1374,9 +1389,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
     });
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
-      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown' })]),
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'failed', failureIdentity: 'unknown' })]),
     } });
-    expect(runner).not.toHaveBeenCalled(); expect(noReadyRecord()).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1); expect(noReadyRecord()).toBe(false);
   });
 
   it('records a project command that cannot run here while the others run, and reaches READY', async () => {
@@ -1395,8 +1410,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       blockers: [],
       validationBaseline: {
         results: expect.arrayContaining([
-          expect.objectContaining({ role: 'build', state: 'unverified' }),
-          expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown' }),
+          expect.objectContaining({ role: 'build', state: 'passed' }),
+          expect.objectContaining({ role: 'test', state: 'failed', failureIdentity: 'unknown' }),
         ]),
       },
     });
@@ -1510,7 +1525,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state, JSON.stringify(report.blockers)).toBe('ready');
     expect(readFileSync(target).equals(contents)).toBe(true);
     expect(readBytes.mock.calls.some(([path]) => path === source || path === target)).toBe(false);
-    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('does not blame materialization for an independent source membership update', async () => {
@@ -1529,7 +1544,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state).toBe('ready');
     expect(readFileSync(join(fixture.target, 'data', 'a.txt'), 'utf8')).toBe('A');
     expect(existsSync(join(fixture.target, 'data', 'added.txt'))).toBe(false);
-    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {
@@ -1559,7 +1574,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeFileSync(join(fixture.target, 'checks', 'private.test.ts'), 'target-only edit\n');
     expect(readFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'utf-8'))
       .toContain('privateTest = true');
-    expect(baseline).toHaveBeenCalledTimes(0);
+    expect(baseline).toHaveBeenCalledTimes(3);
   });
 
   it('refuses a content collision inside a declared directory without overwriting the target', async () => {

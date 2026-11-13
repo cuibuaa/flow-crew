@@ -8,7 +8,8 @@ import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { engineConfigDir, loadEngineDefaults } from '../src/config.js';
 
-import { applyBasePrompt, loadBasePrompt, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { applyBasePrompt, loadBasePrompt, WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { cmdPlanCheck } from '../src/plan-interface.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';

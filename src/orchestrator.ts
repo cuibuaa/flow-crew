@@ -1,3 +1,4 @@
+import { assertMeasuredSetupLaunch } from './ship-setup-record.js';
 import { parseBriefDeclarations } from './brief-declarations.js';
 import { gitAsync, rethrowGitNotAnswered } from './git-facts.js';
 import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
@@ -273,6 +274,7 @@ export class Orchestrator {
       parseBriefDeclarations(brief);
       const verification = verifyBriefAdmission(brief, input.brief_admission);
       if (verification.status !== 'valid') throw new Error(admissionFailureMessage(verification.status, verification.digest));
+      if (!input.run_id) assertMeasuredSetupLaunch(input.projectDir, brief, input.brief_admission);
     }
     if (input.run_id) {
       const bound = this.registry.list({ status: TASK_LIST_STATUS.ALL }).reverse().find(task =>

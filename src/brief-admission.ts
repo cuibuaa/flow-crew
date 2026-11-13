@@ -8,6 +8,7 @@ export type BriefAdmissionAcknowledgement =
       kind: 'explicit';
       source: 'cli_current_input_flag' | 'cli_digest_flag' | 'dashboard_receipt';
       at: string;
+      measuredSetupIdentity?: string;
     };
 
 export interface FrozenBriefContract {

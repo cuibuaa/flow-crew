@@ -12,7 +12,8 @@ import { assertContinuationCompatible } from '../src/engine-continuation.js';
 import { deploymentHeld, parkAtDeploymentBoundary, readDeploymentHold, requestDeploymentHold } from '../src/deployment-hold.js';
 import { Orchestrator, type SupervisorBackend } from '../src/orchestrator.js';
 import { captureEngineCheckpoint, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
-import { normalizeStageContracts, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { normalizeStageContracts, WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow, writeReadySetupRecord } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, rependStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -126,7 +127,9 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
     expect(held.deploymentHold?.heldAt).toBeTruthy();
     expect((await orchestrator.deploymentStatus()).ready).toBe(true);
     expect(held.stages[gate ? 'review' : 'later'].attempts).toBeUndefined();
-    const queued = await orchestrator.register({ ...admitted(), projectDir: join(root, 'other-project') });
+    const other = join(root, 'other-project'); mkdirSync(other);
+    writeReadySetupRecord(other, brief, fcGlobalDir());
+    const queued = await orchestrator.register({ ...admitted(), projectDir: other });
     await orchestrator.tickOnce();
     expect(launches).toEqual([]);
     expect(registry.get(queued.id)?.status).toBe('pending');
@@ -581,6 +584,7 @@ it('SI abandoning an unsettled hold keeps the running owner and permits new laun
   expect(deploymentHeld()).toBe(false);
   expect(readStageStatus(project, runId, 'active')).toEqual(before);
   const second = join(root, 'second'); mkdirSync(second);
+  writeReadySetupRecord(second, brief, fcGlobalDir());
   const launched = await orchestrator.register({ ...admitted(), projectDir: second });
   expect(launched.status, launched.notes).toBe('running');
   expect(launches).toHaveLength(1);

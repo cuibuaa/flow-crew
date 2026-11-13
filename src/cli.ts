@@ -899,7 +899,7 @@ async function cmdQuick(preview = false) {
     console.error('  --task "text"           Task description as flag');
     console.error('  --background            Register and launch under the flowcrew daemon');
     console.error('  --session <id>          Session ledger for registration (default: CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID)');
-    console.error('  --acknowledge-brief-warnings[=<digest>]  Confirm changed-run continuation (never skips inspection)');
+    console.error('  --acknowledge-brief-warnings[=<digest>]  Acknowledge measured setup results or changed-run continuation (never skips inspection)');
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads the admitted task record)');
     process.exit(EXIT_CODE.failed);
@@ -1076,7 +1076,7 @@ async function cmdQuick(preview = false) {
     ? verifyBriefAdmission(task, priorAdmission)
     : undefined;
   let briefAdmission: BriefAdmissionRecord;
-  if (priorVerification?.status === 'valid') {
+  if (priorVerification?.status === 'valid' && !acknowledgementPresent) {
     briefAdmission = priorAdmission!;
   } else {
     const continuationNeedsFreshDecision = Boolean(existingRunId || transportedAdmission);
@@ -1142,6 +1142,19 @@ async function cmdQuick(preview = false) {
       console.error(refusal);
       process.exitCode = EXIT_CODE.failed;
       return;
+    }
+    const { measuredSetupFacts, measuredSetupSummary, assertMeasuredSetupLaunch } = await import('./ship-setup-record.js');
+    try {
+      console.error(measuredSetupSummary(setup.validationBaseline).trimEnd());
+      const facts = measuredSetupFacts(setup.validationBaseline);
+      if (acknowledgementPresent && briefAdmission.acknowledgement.kind === 'explicit') {
+        briefAdmission.acknowledgement.measuredSetupIdentity = facts.identity;
+      }
+      assertMeasuredSetupLaunch(projectDir, task, briefAdmission);
+    } catch (error) {
+      const refusal = error instanceof Error ? error.message : String(error);
+      recordLaunchRefusal(refusal); console.error(refusal);
+      process.exitCode = EXIT_CODE.failed; return;
     }
   }
 

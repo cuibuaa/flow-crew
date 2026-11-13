@@ -19,6 +19,9 @@ import { gateValidationRefusal, currentValidationResults, recordAttemptValidatio
 import { stageFixtureCommand } from './test-support/stage-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
+import { measuredSetupFacts } from '../src/ship-setup-record.js';
+
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) {
   for (const leaf of ['source/data', 'target/data']) if (existsSync(join(root, leaf))) chmodSync(join(root, leaf), 0o700);
@@ -64,8 +67,13 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
   // Setup merges this input with a Git-created directory; establish the actual
   // pre-author read-only environment rather than assuming copy preserves mode.
   if (options.readonlyInput) { chmodSync(join(target, 'data/value.txt'), 0o640); chmodSync(join(target, 'data'), 0o555); }
-  // Semantic mutation kill: eager setup must not execute even a successful suite.
-  expect(existsSync(counter), 'setup discovers commands without running them').toBe(false);
+  // Setup is a separate measurement; all existing counters below still measure final-tree ownership.
+  const setupCalls = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n').length : 0;
+  expect(setupCalls).toBe(options.noValidation ? 0 : 1);
+  rmSync(counter, { force: true });
+  if (setup.state !== 'ready') throw new Error('Fixture setup refused');
+  const receipt = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag',
+    at: new Date().toISOString(), measuredSetupIdentity: measuredSetupFacts(setup.validationBaseline).identity });
   const baselineTree = captureProjectTree(target, brief);
   const calls: Array<{ stage: string; prompt: string; resume?: string; schema: RunOpts['outputSchema'] }> = [];
   let writes = 0, reviews = 0;
@@ -117,7 +125,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       sessionId: '12345678-1234-4234-8234-123456789abc' };
   } };
   const { config, raw } = loadWorkflow(join(engine, 'config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true);
+  const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true, undefined, true, receipt);
   const rd = runDir(target, final.runId), ledger = readEvidence(rd);
   // Base evidence appends a supplement; expose the latest fact for each judged tree.
   const validations = [...new Map(ledger.filter((entry): entry is ValidationFact & typeof entry => entry.kind === 'validation').map(fact => [fact.treeHash, fact])).values()];
@@ -153,7 +161,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.validations[0].failures).toEqual([]);
   });
 
-  it.each([false, true])('retains ignored descendant identity and modes without executing a base tree (readonly=%s)', async readonlyInput => {
+  it.each([false, true])('retains ignored descendant identity and modes without replaying a base tree after setup (readonly=%s)', async readonlyInput => {
     const result = await fixture({ input: 'mixed', readonlyInput });
     expect(result.final.status).toBe('incomplete');
     expect(result.executions.every(value => value.cwd === result.target)).toBe(true);
@@ -181,7 +189,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     ]);
   });
 
-  it('runs a successful suite once without a base replay, including an unchanged tree', async () => {
+  it('runs the final suite once after setup, including an unchanged tree', async () => {
     const result = await fixture({ unchanged: true });
     expect(result.final.status, result.final.failureReason).toBe('complete'); expect(result.executions).toHaveLength(1);
     expect(result.validations[0].treeHash).toBe(result.baselineTree.hash);

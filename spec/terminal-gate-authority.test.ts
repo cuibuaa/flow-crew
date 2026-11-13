@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { WorkflowConfigSchema, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { setFcGlobalDir, fcGlobalDir, runDir } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';

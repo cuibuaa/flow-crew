@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { statusExplanation } from '../src/campaign-page.js';
 import type { Adapter } from '../src/adapters/base.js';
-import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { isActiveRunStatus } from './test-support/lifecycle-status.js';
 import { isRunMutationBlockedStatus } from './test-support/lifecycle-status.js';
 import {

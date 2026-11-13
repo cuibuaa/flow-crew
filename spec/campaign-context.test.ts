@@ -20,7 +20,8 @@ import {
 import { summarizeLedger } from '../src/campaign-ledger.js';
 import { assessCampaignHygiene } from '../src/campaign-hygiene.js';
 import type { CampaignHistoryEntry } from '../src/campaigns.js';
-import { checkCampaignHealth, loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { checkCampaignHealth, loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..');

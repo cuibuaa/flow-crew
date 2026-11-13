@@ -18,7 +18,9 @@ import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordS
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, runDir, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, tryTerminateOnTerminalState, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow, writeReadySetupRecord } from './test-support/ready-setup.js';
+import { fcGlobalDir } from '../src/store.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 import { recordGateValidationDelta, settledGateValidationExecution } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../src/scheduler/sched_policy/terminal.js';
@@ -208,6 +210,7 @@ describe('durable bounded continuation', () => {
       expect(() => WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations }, stages: [{ id: 'work', role: 'coder' }] })).toThrow();
   });
   it('B33 direct launch enforces the finite iteration bound before allocating a run', () => {
+    writeReadySetupRecord(project, '', fcGlobalDir());
     const { workflow } = workflowFixture();
     for (const maxIterations of [Infinity, NaN, 0, -1, 1.5]) {
       workflow.defaults.max_iterations = maxIterations;

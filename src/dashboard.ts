@@ -1,3 +1,4 @@
+import { assertMeasuredSetupLaunch, inspectShipSetupRecord, measuredSetupFacts, measuredSetupSummary } from './ship-setup-record.js';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { readProtocolResearchRecord } from './research-history.js';
@@ -986,21 +987,40 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     })));
   });
   const briefReceiptSecret = randomBytes(32);
-  const issueBriefReceipt = (report: BriefPreflightReport): string => createHmac('sha256', briefReceiptSecret)
-    .update(`flowcrew-dashboard-brief-preflight:v${report.version}:${report.digest}`, 'utf8')
+  const issueBriefReceipt = (report: BriefPreflightReport, setupIdentity = ''): string => createHmac('sha256', briefReceiptSecret)
+    .update(`flowcrew-dashboard-brief-preflight:v${report.version}:${report.digest}:${setupIdentity}`, 'utf8')
     .digest('hex');
-  const receiptMatches = (report: BriefPreflightReport, candidate: string | undefined): boolean => {
+  const receiptMatches = (report: BriefPreflightReport, candidate: string | undefined, setupIdentity = ''): boolean => {
     if (!candidate || !/^[0-9a-f]{64}$/i.test(candidate)) return false;
-    const expected = Buffer.from(issueBriefReceipt(report), 'hex');
+    const expected = Buffer.from(issueBriefReceipt(report, setupIdentity), 'hex');
     const actual = Buffer.from(candidate, 'hex');
     return expected.length === actual.length && timingSafeEqual(expected, actual);
+  };
+  const inspectDashboardBrief = (exactBrief: string, targetDir: string) => {
+    const report = inspectBrief(exactBrief);
+    let setupIdentity = '';
+    let setupError: string | undefined;
+    const setup = inspectShipSetupRecord(targetDir, exactBrief);
+    try {
+      if (setup.state !== 'ready') assertMeasuredSetupLaunch(targetDir, exactBrief);
+      if (setup.state === 'ready') {
+        const facts = measuredSetupFacts(setup.validationBaseline);
+        setupIdentity = facts.identity;
+        report.findings.push({ code: 'setup_baseline', fingerprint: setupIdentity,
+          level: facts.acknowledgementRequired ? 'warn' : 'ok', consequential: facts.acknowledgementRequired,
+          message: `Target: ${setup.validationBaseline.projectDir}\n${measuredSetupSummary(setup.validationBaseline)}` });
+      }
+    } catch (error) { setupError = error instanceof Error ? error.message : String(error); }
+    const receipt = issueBriefReceipt(report, setupIdentity);
+    return { report, receipt, setupIdentity, setupError };
   };
   const admitDashboardBrief = (
     exactBrief: string,
     fields: DashboardBriefAdmissionFields,
+    targetDir: string,
   ): DashboardBriefAdmissionResult => {
-    const report = inspectBrief(exactBrief);
-    const receipt = issueBriefReceipt(report);
+    const { report, receipt, setupIdentity, setupError } = inspectDashboardBrief(exactBrief, targetDir);
+    if (setupError) return { ok: false, exactBrief, report, receipt, error: setupError };
     if (fields.briefPreflightDigest !== report.digest) {
       return {
         ok: false,
@@ -1012,19 +1032,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           : 'Brief preflight is required before starting a run.',
       };
     }
-    if (!receiptMatches(report, fields.briefPreflightReceipt)) {
-      return { ok: false, exactBrief, report, receipt, error: 'The brief preflight receipt is missing, invalid, or from an earlier dashboard process.' };
+    if (!receiptMatches(report, fields.briefPreflightReceipt, setupIdentity)) {
+      return { ok: false, exactBrief, report, receipt, error: 'The brief preflight receipt is missing, invalid, or from an earlier dashboard process or measured setup. Review the current target and setup results before starting.' };
     }
-    return {
-      ok: true,
-      exactBrief,
-      report,
-      receipt,
-      admission: createBriefAdmission(
-        report,
-        { kind: 'explicit', source: 'dashboard_receipt', at: new Date().toISOString() },
-      ),
-    };
+    const admission = createBriefAdmission(report,
+      { kind: 'explicit', source: 'dashboard_receipt', at: new Date().toISOString(), measuredSetupIdentity: setupIdentity });
+    assertMeasuredSetupLaunch(targetDir, exactBrief, admission);
+    return { ok: true, exactBrief, report, receipt, admission };
   };
   let cleanupComplete = false;
   let signalShutdownStarted = false;
@@ -1090,8 +1104,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? 'brief is required' });
     }
-    const report = inspectBrief(parsed.data.brief);
-    return { report, receipt: issueBriefReceipt(report) };
+    const { report, receipt } = inspectDashboardBrief(parsed.data.brief, projectDir);
+    return { report, receipt };
   });
 
   // --- Static file serving ---
@@ -1152,7 +1166,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
     const body = parsed.data;
     const brief = body.brief;
-    const admission = admitDashboardBrief(brief, body);
+    const targetProjectDir = body.projectDir ?? projectDir;
+    const admission = admitDashboardBrief(brief, body, targetProjectDir);
     if (!admission.ok || !admission.admission) {
       return reply.code(409).send({
         error: admission.error,
@@ -1160,8 +1175,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         receipt: admission.receipt,
       });
     }
-
-    const targetProjectDir = body.projectDir ?? projectDir;
 
     const requestedCampaign = body.campaignId
       ?? (body.campaign !== 'standalone' && body.campaign !== 'new' ? body.campaign : undefined)

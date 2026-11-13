@@ -9,7 +9,8 @@ import { execWithStdin, type Adapter, type AgentConfig } from '../src/adapters/b
 
 import { readRunEvents } from '../src/run-events.js';
 import { loadWorkflow } from '../src/scheduler.js';
-import { runWorkflow } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
+
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 

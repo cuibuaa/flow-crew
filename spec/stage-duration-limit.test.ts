@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -77,6 +78,7 @@ describe('stage duration admission and recorded contract', () => {
   it.each([undefined, 40_000, 20_000])('records only an author-declared allowance (%s)', declared => {
     const brief = declared === undefined ? 'Task' : `---\nstage_duration_ms: ${declared}\n---\nTask`;
     expect(admitStageDuration(brief)).toBe(declared);
+    writeReadySetupRecord(project, brief, fcGlobalDir());
     const launch = prepareWorkflowLaunch(workflow(), '', project, undefined, brief);
     try { expect(launch.kind).toBe('ready'); if (launch.kind === 'ready')
       expect(readRunState(project, launch.runId).stageDurationLimitMs).toBe(declared);

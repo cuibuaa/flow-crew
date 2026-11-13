@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { readEvidence } from '../src/evidence-ledger.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
@@ -116,6 +117,7 @@ describe('direct workflow', () => {
     const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
     const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
+    ready.validationBaseline.results[0].args = ['validation-probe.mjs'];
     writeFileSync(readyPath, JSON.stringify(ready));
     writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
     const prompts: string[] = [];

@@ -59,7 +59,7 @@ function metadataServer(calls: any[]) {
   });
 }
 
-it.each(['claude', 'codex'] as const)('foreground %s quick completes locally with registration, progress, delivery and explicit-only ACK gating', async frontend => {
+it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'empty'] as const).map(baseline => [frontend, baseline] as const)))('foreground %s quick on %s base completes locally with registration, progress, delivery and explicit-only ACK gating', async (frontend, baseline) => {
   const root = mkdtempSync(join(tmpdir(), 'fc-qf-'));
   roots.push(root);
   const project = join(root, 'project');
@@ -103,7 +103,19 @@ it.each(['claude', 'codex'] as const)('foreground %s quick completes locally wit
     });
     expect(result.status, result.stderr).toBe(0);
   }
-  writeReadySetupRecord(project, brief, engine);
+  const setupPath = writeReadySetupRecord(project, brief, engine);
+  const setup = JSON.parse(readFileSync(setupPath, 'utf8'));
+  if (baseline === 'red') setup.validationBaseline.results[0].exitCode = 1;
+  if (baseline === 'empty') { setup.validationBaseline.discovery.commands = []; setup.validationBaseline.results = []; }
+  writeFileSync(setupPath, JSON.stringify(setup));
+  if (baseline === 'red') {
+    const held = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(packageRoot, 'src', 'cli.ts'),
+      'quick', '-', '--project', project, '--adapter', 'mock', '--no-campaign'], {
+      cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, input: brief, encoding: 'utf8', timeout: 10_000 });
+    expect(held.status, held.stderr).toBe(1);
+    expect(held.stderr).toContain('setup_acknowledgement_required');
+    expect(new TaskRegistry({ baseDir: engine }).list({ status: 'all' })).toHaveLength(0);
+  }
   const calls: any[] = [];
   const frames: string[] = [];
   const server = frontend === 'codex' ? metadataServer(calls) : createServer(socket => {
@@ -114,7 +126,7 @@ it.each(['claude', 'codex'] as const)('foreground %s quick completes locally wit
   servers.push(server);
   await new Promise<void>(resolve => server.listen(frontend === 'codex' ? env.CODEX_APP_SERVER_SOCKET : env.CLAUDE_CODE_MESSAGING_SOCKET, resolve));
   const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(packageRoot, 'src', 'cli.ts'),
-    'quick', '-', '--project', project, '--adapter', 'mock', '--no-campaign', '--acknowledge-brief-warnings'], {
+    'quick', '-', '--project', project, '--adapter', 'mock', '--no-campaign', ...(baseline === 'red' ? ['--acknowledge-brief-warnings'] : [])], {
     cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 25_000,
   });
   let output = '';

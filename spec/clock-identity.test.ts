@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -124,6 +125,7 @@ describe('pre-publication identities', () => {
   });
 
   it('H07 retains malformed ownership across age and clock skew', async () => {
+    writeReadySetupRecord(root, '', fcGlobalDir());
     claimLaunchIntent(root, 'first');
     const path = join(fcGlobalDir(), 'launch-intents', `${createHash('sha256').update(root).digest('hex')}.json`);
     for (const raw of ['{', JSON.stringify({ version: 1, projectDir: root, ownerRunId: 'first', claimedAt: new Date(Date.now() + longWait).toISOString() })]) {

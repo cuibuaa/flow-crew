@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter } from '../../src/adapters/base.js';
-import { runWorkflow, WorkflowConfigSchema } from '../../src/scheduler.js';
+import { WorkflowConfigSchema } from '../../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from '../test-support/ready-setup.js';
 import { readRunState, writeRunState } from '../../src/store.js';
 import { prepareFixtureRun } from './run-fixture.js';
 

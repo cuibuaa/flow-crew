@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { appendEvidence, captureProjectTree, readEvidence, stagePredecessor } from '../src/evidence-ledger.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { decisionInput } from '../src/decision-context.js';

@@ -8,9 +8,10 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { readCampaignEntries } from '../src/campaigns.js';
 import {
-  runWorkflow,
-  type WorkflowConfig,
+
+ type WorkflowConfig,
 } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { createRun } from './test-support/create-run.js';
 import { readRunState, runDir, writeRunState } from '../src/store.js';

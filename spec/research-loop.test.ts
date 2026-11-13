@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { createHash } from 'node:crypto';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { loadWorkflow, } from '../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, setFcGlobalDir, runDir, readRunState, writeRunState, writeStageStatus, writeStageOutput } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { parseBriefFrontmatter, entryWorkflow } from '../src/scheduler/sched_admission/brief-contract.js';
@@ -645,7 +646,8 @@ describe('terminal publication is separate and never recovered into project file
     writeFileSync(script, `
       import { writeFileSync, readFileSync } from 'node:fs';
       import { join } from 'node:path';
-      import { loadWorkflow, runWorkflow } from ${JSON.stringify(join(repo, 'src/scheduler.ts'))};
+      import { loadWorkflow } from ${JSON.stringify(join(repo, 'src/scheduler.ts'))};
+      import { runPreparedWorkflow as runWorkflow } from ${JSON.stringify(join(repo, 'spec/test-support/ready-setup.ts'))};
       import { setFcGlobalDir } from ${JSON.stringify(join(repo, 'src/store.ts'))};
       import { makeInstrument } from ${JSON.stringify(join(repo, 'spec/test-support/research-instrument-fixture.ts'))};
       const project = process.argv[2]; setFcGlobalDir(process.argv[3]);
@@ -712,7 +714,8 @@ describe('terminal publication is separate and never recovered into project file
     writeFileSync(script, `
       import { writeFileSync, readFileSync } from 'node:fs';
       import { join } from 'node:path';
-      import { loadWorkflow, runWorkflow } from ${JSON.stringify(join(repo, 'src/scheduler.ts'))};
+      import { loadWorkflow } from ${JSON.stringify(join(repo, 'src/scheduler.ts'))};
+      import { runPreparedWorkflow as runWorkflow } from ${JSON.stringify(join(repo, 'spec/test-support/ready-setup.ts'))};
       import { setFcGlobalDir } from ${JSON.stringify(join(repo, 'src/store.ts'))};
       import { makeInstrument } from ${JSON.stringify(join(repo, 'spec/test-support/research-instrument-fixture.ts'))};
       const project = process.argv[2]; setFcGlobalDir(process.argv[3]);

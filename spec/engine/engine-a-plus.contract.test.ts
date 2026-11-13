@@ -26,7 +26,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { isTerminalStatus, parseBriefFrontmatter, runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
+import { isTerminalStatus, parseBriefFrontmatter, type WorkflowConfig } from '../../src/scheduler.js';
+import { runPreparedWorkflow as runWorkflow } from '../test-support/ready-setup.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
 import { createRun } from '../test-support/create-run.js';
 import {
