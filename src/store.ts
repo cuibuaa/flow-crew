@@ -1237,6 +1237,10 @@ function mergeStateHistories(current: StoreState | undefined, incoming: StoreSta
   return {
     ...incoming,
     ...(graph ? { decisionGraph: graph } : {}),
+    ...(current?.dispatchAdmission ? { dispatchAdmission: {
+      refusals: Math.max(current.dispatchAdmission.refusals, incoming.dispatchAdmission?.refusals ?? 0),
+      maxRefusals: current.dispatchAdmission.maxRefusals,
+    } } : {}),
     retiredStageUsage: mergeImmutableHistory(
       'retiredStageUsage',
       current?.retiredStageUsage ?? [],

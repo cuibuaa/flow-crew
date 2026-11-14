@@ -221,8 +221,8 @@ export function createDispatchAdmission() {
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
     errors.push(...artifactDeclarationFindings({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
     errors.push(...inspectStageGraph(all).errors);
-    if (input.state?.planControl && input.projectDir) {
-      const prior = input.state.planControl.stages;
+    if (input.state && input.projectDir) {
+      const prior = input.state.planControl?.stages ?? input.baseStages;
       const previousIds = new Set(prior.map(stage => stage.id));
       const rejected = collectGateRuntimeFacts(prior, input.state, input.projectDir, input.state.runId).rejectedGateIds;
       for (const gateId of rejected) {
@@ -230,7 +230,9 @@ export function createDispatchAdmission() {
         // while an acceptance edge to the old gate remains blocked.
         const acceptanceEdges = new Map(all.map(stage => [stage.id, stage.retry_to?.includes(gateId)
           ? { ...stage, depends_on: [] } : stage]));
-        for (const stage of input.dispatched.filter(stage => !previousIds.has(stage.id))) {
+        for (const stage of input.dispatched.filter(stage => !previousIds.has(stage.id)
+          || !input.state!.stages[stage.id]?.attempts?.length
+            && ![STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, STAGE_STATUS.RUNNING, 'suspended'].includes(input.state!.stages[stage.id]?.status ?? ''))) {
           if (transitivelyDependsOn(stage.id, gateId, acceptanceEdges)) {
             errors.push(admissionError('stage_dependency_rejected',
               `stage_dependency_rejected: ${stage.id} depends on previously rejected gate ${gateId} without a repair return route`,

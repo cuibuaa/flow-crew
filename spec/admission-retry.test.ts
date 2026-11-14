@@ -61,6 +61,20 @@ it('does not reset spent refusals or the first ceiling after a successful comple
   expect(ctx.propose('third', 3).state.dispatchAdmission).toEqual({ refusals: 2, maxRefusals: 2 });
 });
 
+it.each(['lower', 'omit'])('keeps spent admission budget and its first ceiling when stale writers %s it', staleKind => {
+  setEngineDefaults({ plan_stage_retries: 2 });
+  const ctx = setup();
+  const absent = readRunState(ctx.project, ctx.runId);
+  ctx.propose();
+  const older = readRunState(ctx.project, ctx.runId);
+  ctx.propose('second', 2);
+  older.dispatchAdmission!.maxRefusals = 99;
+  writeRunState(ctx.project, ctx.runId, staleKind === 'lower' ? older : absent);
+  expect(readRunState(ctx.project, ctx.runId).dispatchAdmission).toEqual({ refusals: 2, maxRefusals: 3 });
+  expect(ctx.propose('third', 3).state.dispatchAdmission).toEqual({ refusals: 3, maxRefusals: 3 });
+  expect(ctx.propose('fourth', 4, true).state.failureReason).toContain('dispatch_retry_exhausted');
+});
+
 it('keeps the admission budget in guarded run storage', async () => {
   const ctx = setup(); ctx.propose();
   const path = runRecordPath(ctx.runDirPath, 'run.json');
@@ -98,9 +112,10 @@ it('refuses a corrupted admission budget with a typed reason', () => {
   expect(ctx.propose().state.failureReason).toContain('dispatch_budget_invalid');
 });
 
-it('keeps legacy retry records readable in status, listing, summary and UI while refusing continuation with a typed reason', async () => {
+it.each(['plan_retry_state.json', 'dispatchedStages'])('keeps legacy %s readable in status, listing, summary and UI while refusing continuation with a typed reason', async carrier => {
   const ctx = setup();
-  writeFileSync(runRecordPath(ctx.runDirPath, 'plan_retry_state.json'), '{retained legacy bytes');
+  if (carrier === 'plan_retry_state.json') writeFileSync(runRecordPath(ctx.runDirPath, carrier), '{retained legacy bytes');
+  else { const state = readRunState(ctx.project, ctx.runId); state.dispatchedStages = []; writeRunState(ctx.project, ctx.runId, state); }
   expect(readRunState(ctx.project, ctx.runId).runId).toBe(ctx.runId);
   expect(listRuns(ctx.project)).toContain(ctx.runId);
   expect(readRunStateView(ctx.project, ctx.runId)).toBeDefined();
@@ -109,7 +124,8 @@ it('keeps legacy retry records readable in status, listing, summary and UI while
   try { expect((await app.inject({ method: 'GET', url: `/api/runs/${ctx.runId}` })).statusCode).toBe(200); }
   finally { await app.close(); }
   expect(ctx.propose().state.failureReason).toContain('legacy_retry_state_unsupported');
-  expect(readFileSync(runRecordPath(ctx.runDirPath, 'plan_retry_state.json'), 'utf8')).toBe('{retained legacy bytes');
+  if (carrier === 'plan_retry_state.json') expect(readFileSync(runRecordPath(ctx.runDirPath, carrier), 'utf8')).toBe('{retained legacy bytes');
+  else expect(readRunState(ctx.project, ctx.runId).dispatchedStages).toEqual([]);
 });
 
 it.each(['attempt_timeout', 'exit'])('uses ordinary retry facts after a %s inside an admission refusal chain', cause => {

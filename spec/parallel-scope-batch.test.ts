@@ -10,21 +10,19 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { type WorkflowConfig } from '../src/scheduler.js';
-import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
+import { runWorkflow, stationaryStageClock } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
-  readStageStatus,
-  runDir,
+  readRunState,
   setFcGlobalDir,
 } from '../src/store.js';
-import { runStage } from '../src/worker.js';
-import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js';
-import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
+import * as worker from '../src/worker.js';
+import { executeOrdinaryStage } from '../src/scheduler/sched_loop/ordinary-stage.js';
+import { selectRunnableBatch } from '../src/scheduler/sched_admission/frontier.js';
 
 let projectDir: string;
 let stateDir: string;
@@ -127,8 +125,9 @@ describe('scheduler scope waves', () => {
   });
 
   for (const preloaded of [false, true]) for (const parallel of [false, true]) {
-    it(`delivers topology boundaries with ${preloaded ? 'preloaded' : 'lazy'} roles in ${parallel ? 'parallel' : 'serialized'} waves, then reuses the role serially`, { timeout: 15_000 }, async () => {
-      seedProject();
+    it(`loads ${preloaded ? 'preloaded' : 'lazy'} roles for ${parallel ? 'disjoint' : 'overlapping'} stage scopes and reuses the role without topology instructions`, { timeout: 15_000 }, async () => {
+      mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
+      writeFileSync(join(projectDir, 'config', 'agents', 'coder.yaml'), stringify(role()));
       const stage = (id: string, scope: string[], depends_on: string[] = []) => ({
         id, role: 'coder', scope, depends_on, prompt_template: 'inspect', skills: [],
         dynamic_dispatch: false, is_gate: false, criterion_refs: [],
@@ -141,20 +140,28 @@ describe('scheduler scope waves', () => {
       const created = createRun(projectDir, workflow.name, '', workflow.stages.map(item => item.id));
       const roles = preloaded ? new Map([['coder', role()]]) : new Map<string, AgentConfig>();
       const received = new Map<string, string>();
-      let entered = 0;
-      let bothEntered!: () => void;
-      const barrier = new Promise<void>(resolve => { bothEntered = resolve; });
-      const adapter: Adapter = { async run(_prompt, agent, opts) {
-        received.set(opts.stageId, agent.prompt);
-        if (opts.stageId !== 'later') {
-          if (++entered === 2) bothEntered();
-          await Promise.race([barrier, new Promise(resolve => setTimeout(resolve, 50))]);
-        }
-        return fixtureResult({ output: 'inspected', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-      } };
-      const final = await runWorkflow(workflow, '', projectDir, adapter, roles, undefined,
-        join(projectDir, 'config', 'agents'), created.runId);
-      expect(final.status).toBe('complete');
+      // Exercise the real role loader and prompt builder. Worker lifecycle and
+      // project ownership have their integration case above; neither a timer
+      // race nor repeated workflow settlement is needed to inspect role input.
+      vi.spyOn(worker, 'runStage').mockImplementation(async (_adapter, opts) => {
+        received.set(opts.stageId, opts.role.prompt);
+        return { output: 'inspected', exitCode: 0, duration_ms: 1 };
+      });
+      const state = readRunState(projectDir, created.runId);
+      const technicalRetries = new Map();
+      const execute = async (item: typeof workflow.stages[number]) => executeOrdinaryStage(
+        item, workflow.stages, state, projectDir, created.runId, created.runDirPath,
+        { run: async () => { throw new Error('Worker stub must own adapter execution'); } },
+        roles, join(projectDir, 'config', 'agents'), new Map(), technicalRetries,
+        undefined, undefined, undefined, stationaryStageClock);
+      let pending = workflow.stages.slice(0, 2);
+      while (pending.length) {
+        const { selected, deferred } = selectRunnableBatch(pending);
+        await Promise.all(selected.map(execute));
+        pending = deferred.map(({ stage }) => stage);
+      }
+      await execute(workflow.stages[2]);
+      expect(received.size).toBe(3);
       for (const id of ['left', 'right']) {
         expect(received.get(id)?.includes('# Parallel execution boundary')).toBe(false);
       }
