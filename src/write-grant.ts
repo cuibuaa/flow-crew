@@ -75,6 +75,7 @@ def apply_write_grant(paths, abi, opened=None, no_refer=()):
         _fields_ = [('access', ctypes.c_uint64)]
     class Beneath(ctypes.Structure):
         _pack_ = 1
+        _layout_ = 'ms' # the kernel struct is packed; newer Python requires the layout to be stated
         _fields_ = [('access', ctypes.c_uint64), ('parent', ctypes.c_int)]
     rules = Ruleset(writes)
     fd = checked(libc.syscall(444, ctypes.byref(rules), ctypes.sizeof(rules), 0))
