@@ -11,7 +11,7 @@ import { runProjectValidationBaseline, runValidationCommand } from '../src/proje
 import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { bindReviewedGateValidation, currentValidationResults, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { currentValidationResults, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
@@ -69,8 +69,8 @@ describe('configured validation has one attempt owner and read-only gate binding
     expect(counts).toEqual([0, 0, 0]);
     const receipts = readdirSync(runRecordPath(f.runDirPath, '.')).filter(name => /^validation_delta_review_attempt_/.test(name))
       .map(name => JSON.parse(readFileSync(runRecordPath(f.runDirPath, name), 'utf8')));
-    // Immutable bind copies are evidence, not additional command executions.
-    expect(new Set(receipts.map(receipt => receipt.checkedAt)).size).toBe(3);
+    // All review references consume the same ledger fact.
+    expect(new Set(receipts.map(receipt => receipt.ledgerSequence)).size).toBe(1);
   });
 
   it('waits for peer closure and exposes a later failed command as unverified', async () => {
@@ -107,7 +107,7 @@ describe('configured validation has one attempt owner and read-only gate binding
   });
 
   it.each(['gate-write', 'peer-write', 'peer-unknown', 'generated-write', 'baseline-change', 'prior-write'])(
-    'invalidates only changes relevant to the current review (%s)', async kind => {
+    'reads ledger coverage after review and baseline changes (%s)', async kind => {
       const f = await fixture();
       const start = '2026-01-02T00:00:00.000Z', end = '2026-01-02T00:00:02.000Z';
       const prior = { index: 1, status: 'failed', startedAt: '2026-01-01T00:00:00.000Z', completedAt: '2026-01-01T00:00:02.000Z', writes: ['product.ts'], writeAttribution: 'snapshot' as const };
@@ -125,9 +125,11 @@ describe('configured validation has one attempt owner and read-only gate binding
       ] });
       if (kind !== 'prior-write' && kind !== 'baseline-change') writeFileSync(join(project, kind === 'generated-write' ? 'generated.js' : 'product.ts'), 'actual bytes changed');
       if (kind === 'baseline-change') appendFileSync(runRecordPath(f.runDirPath, 'validation_baseline.json'), '\n');
-      const bound = bindReviewedGateValidation(project, f.runId, 'review', kind.startsWith('peer-') ? ['review', 'peer'] : ['review']);
-      expect(bound).toBe(kind === 'prior-write');
-      if (!bound) await recordGateValidationDelta(project, f.runId, 'review');
+      const receipt = await recordGateValidationDelta(project, f.runId, 'review');
+      expect(receipt?.pass).toBe(kind === 'prior-write' || kind === 'baseline-change');
+      expect(receipt).not.toHaveProperty('baselineSha256');
+      expect(receipt).not.toHaveProperty('executionId');
+      expect(receipt).not.toHaveProperty('attemptStartedAt');
       expect(readFileSync(f.counter, 'utf8')).toBe('');
       if (kind !== 'prior-write' && kind !== 'baseline-change') expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'unverified', exitCode: null })]);
     },

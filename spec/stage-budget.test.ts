@@ -1,4 +1,3 @@
-import { closedGateValidationExecution } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { readEvidence } from '../src/evidence-ledger.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
@@ -837,7 +836,6 @@ describe('retained contracts under declared allowances', () => {
     atomicWrite(runRecordPath(created.runDirPath, RUN_VALIDATION_BASELINE_FILE), JSON.stringify({ version: 1,
       capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline: { version: 1,
         projectDir: project, discovery: { state: 'not_configured', commands: [], missingRoles: ['build', 'test', 'lint'] }, results: [] } }));
-    expect(closedGateValidationExecution(project, created.runId, 'work')).toBeUndefined();
     expect(await recordGateValidationDelta(project, created.runId, 'work')).toBeUndefined();
     expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_work.json'))).toBe(false);
   });

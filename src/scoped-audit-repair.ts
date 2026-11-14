@@ -51,3 +51,14 @@ export function assessFindings(findings: AuditFinding[], ledger: EvidenceEntry[]
   }
   return { confirmed, unconfirmed };
 }
+
+/** Replay and gate settlement share the same receipt acceptance rule. */
+export function repairReproductionClosed(sequence: number, ledger: EvidenceEntry[], treeHash: string | null,
+  accepted: EvidenceEntry[] = []): boolean {
+  const original = ledger.find(entry => entry.sequence === sequence);
+  const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === sequence).at(-1);
+  return original?.kind === 'command' && !!original.context && closure?.kind === 'command' && closure.owner === 'code'
+    && !closure.unfinished && closure.exitCode === 0 && !!closure.outputDigest && !!treeHash && !!closure.treeHash && closure.treeAfterHash === closure.treeHash
+    && (closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
+    && closure.command === original.command && closure.context?.cwd === original.context.cwd && closure.context?.shell === original.context.shell;
+}

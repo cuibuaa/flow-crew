@@ -20,7 +20,7 @@ import { validationEnvironment } from '../src/validation-environment.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { createRun } from './test-support/create-run.js';
 import { writeStageStatus } from '../src/store.js';
-import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 function memoryFs(files: Record<string, string>): ValidationFileSystem {
   return {
@@ -234,7 +234,7 @@ describe('configuration-driven project validation baseline', () => {
         for (const writes of [['input.txt'], []]) {
           if (writes.length) writeFileSync(join(projectDir, 'input.txt'), `peer write ${role}`);
           writeStageStatus(projectDir, runId, 'peer', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', writes }] });
-          expect(bindReviewedGateValidation(projectDir, runId, 'review', ['review', 'peer'])).toBe(false);
+          expect((await recordGateValidationDelta(projectDir, runId, 'review'))?.pass).toBe(false);
         }
         configure(JSON.stringify(join(projectDir, `missing-${role}`)));
         const current = await runProjectValidationBaseline(projectDir);

@@ -1,7 +1,6 @@
 import { writeAdmittedRealityChecks } from './test-support/admitted-reality-checks.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +16,6 @@ import { completePlainWorkflow, concludeWorkflowIteration } from '../src/schedul
 import { concludeRun, cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
 import { recoverTerminalStudyCompletion } from '../src/scheduler/sched_settlement/completion.js';
 import { writeCampaignEntry } from '../src/scheduler/sched_loop/services.js';
-import { validationExecutionId } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { campaignsRoot, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState, writeRunState, writeStageStatus, type RunStatus } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 
@@ -75,9 +73,7 @@ describe('terminal conclusions from settled evidence', () => {
     writeFileSync(runRecordPath(directory, 'validation_baseline.json'), baseline);
     writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify({
       version: 2, stageId: 'review', checkedAt: completedAt, pass: false,
-      baselineSha256: createHash('sha256').update(baseline).digest('hex'),
       attemptIndex: 1, attemptStartedAt: startedAt, attemptCompletedAt: completedAt,
-      executionId: validationExecutionId(runId, 'review', 1, startedAt, completedAt),
       current: [], delta: [{ role: 'test', state: 'unresolved', reason: 'vitest ENOENT; failure identity/count is unavailable', newFailureIdentifiers: [] }],
     }));
     const state = await finishIteration();

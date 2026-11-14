@@ -17,7 +17,6 @@ import { campaignsRoot, fcGlobalDir, readRunState, readStageStatus, runDir, setF
 import { readRunEvents, recordStageOutcome } from '../src/run-events.js';
 import { classifyGateRecoveryFact } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { readGateEvaluation, settleGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { validationExecutionId } from '../src/scheduler/sched_settlement/gate-validation.js';
 import * as gateValidation from '../src/scheduler/sched_settlement/gate-validation.js';
 import * as projectValidation from '../src/project-validation.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
@@ -70,9 +69,7 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
   writeFileSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
     treeHash: captureProjectTree(projectDir).hash, ...(fact ? { ledgerSequence: fact.sequence } : {}),
     version: 2, stageId: gateId, checkedAt: completedAt, pass: state === 'pass',
-    baselineSha256: createHash('sha256').update(baselineBytes).digest('hex'),
     attemptIndex: 1, attemptStartedAt: startedAt, attemptCompletedAt: completedAt,
-    executionId: validationExecutionId(runId, gateId, 1, startedAt, completedAt),
     current: [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed',
       exitCode: state === 'unresolved' ? null : state === 'pass' ? 0 : 1, durationMs: 1, output: '',
       failureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [],
@@ -288,18 +285,17 @@ describe('settled gate results', () => {
 
 
 describe('stage group settlement boundaries', () => {
-  it('contains a validation launch exception during settlement', async () => {
+  it('settles from ledger facts without republishing validation references', async () => {
     writeVerdict({ pass: true });
     writeValidation('pass');
     unlinkSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`));
-    vi.spyOn(gateValidation, 'bindReviewedGateValidation').mockReturnValue(false);
     const record = vi.spyOn(gateValidation, 'recordGateValidationDelta');
     record.mockRejectedValue(new Error('fixture validation launch exception'));
     const gate = parseDispatchedStageConfig({ id: gateId, role: 'qa', is_gate: true });
     await expect(settleStageGroup(projectDir, runId, [gate])).resolves.toBeUndefined();
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
       gate: { pass: true, kind: 'pass' } });
-    expect(record).toHaveBeenCalledOnce();
+    expect(record).not.toHaveBeenCalled();
   });
 
   function serializedGroup() {
@@ -323,7 +319,7 @@ describe('stage group settlement boundaries', () => {
       existsSync(join(projectDir, 'product.ts'))
         ? { exitCode: 1, stdout: 'FAILED tests/test_product.py::test_missing_result\n1 failed' }
         : { exitCode: 0 });
-    const bind = vi.spyOn(gateValidation, 'bindReviewedGateValidation');
+    const reference = vi.spyOn(gateValidation, 'recordGateValidationDelta');
     const runner = createScopeSafeStageRunner({
       reconcileCompletedStageAttempts: () => ({ violation: false }),
     });
@@ -343,7 +339,7 @@ describe('stage group settlement boundaries', () => {
         seedAttemptValidation(projectDir, runId, measured.results, { stageId: 'deferred' });
       }
     };
-    return { stages, runner, execute, executed, commands, bind };
+    return { stages, runner, execute, executed, commands, reference };
   }
 
   it('settles the complete serialized group using the later author writes', async () => {
@@ -357,7 +353,7 @@ describe('stage group settlement boundaries', () => {
     const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
     expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
     expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'audit_findings' });
-    expect(f.bind).toHaveBeenCalledOnce();
+    expect(f.reference).not.toHaveBeenCalled();
     expect(f.commands).toHaveBeenCalledOnce();
   });
 

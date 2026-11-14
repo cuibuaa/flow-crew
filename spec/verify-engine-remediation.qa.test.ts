@@ -178,7 +178,6 @@ describe('independent engine-remediation verification', () => {
       delta: Array<{ state: string }>;
       version: number;
       attemptIndex: number;
-      executionId: string;
       immutablePath: string;
       ledgerSequence: number;
     };
@@ -186,7 +185,6 @@ describe('independent engine-remediation verification', () => {
       version: 2,
       pass: false,
       attemptIndex: 1,
-      executionId: expect.any(String),
       immutablePath: expect.any(String),
       ledgerSequence: expect.any(Number),
       delta: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unverified', newFailureIdentifiers: [] })]),

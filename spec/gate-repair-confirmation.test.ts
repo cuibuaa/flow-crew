@@ -13,6 +13,8 @@ import { loadWorkflow } from '../src/scheduler.js';
 import { runDir, writeStageStatus, readRunState, writeRunState } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
+import { validateSettledTree } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { appendEvidence, captureProjectTree, readEvidence, type EvidenceEntry } from '../src/evidence-ledger.js';
 import { assessFindings, type AuditFinding } from '../src/scoped-audit-repair.js';
@@ -259,6 +261,62 @@ describe('repair requires a reviewer reproduction', () => {
     expect(value.final.stages[last].gate?.pass).toBe(true);
     expect(value.final.status).toBe('complete');
   });
+
+  it.each(['stable-output', 'two-obligations', 'changing-output', 'nonzero', 'unfinished', 'declared-bound'] as const)(
+    'settles a reproduction with bounded replay and the same closure predicate (%s)', async mode => {
+      setEngineDefaults({ validation_attempts: 3 });
+      const project = mkdtempSync(join(tmpdir(), 'closure-replay-')); roots.push(project);
+      const brief = '---\ncriteria: [{id: C1, text: Value is repaired}]\n---\nRepair value';
+      const run = createRun(project, 'closure', 'name: closure\nstages: []\n', ['repair', 'review'], brief);
+      writeFileSync(join(project, 'value.txt'), 'repaired');
+      const context = { cwd: project, shell: '/bin/sh' };
+      const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
+        commandId: 'probe', command: 'fixture reproduction', context, exitCode: 1,
+        outputDigest: 'original', treeHash: 'old-tree', treeAfterHash: 'old-tree' });
+      const originals = [original];
+      if (mode === 'two-obligations') originals.push(appendEvidence(run.runDirPath, { kind: 'command', owner: 'code',
+        stageId: 'review', attemptIndex: 1, commandId: 'other', command: 'fixture other reproduction', context,
+        exitCode: 1, outputDigest: 'original', treeHash: 'old-tree', treeAfterHash: 'old-tree' }));
+      if (mode === 'declared-bound') writeFileSync(runRecordPath(run.runDirPath, 'validation_baseline.json'), JSON.stringify({
+        version: 1, limits: { attempts: 1 }, baseline: { version: 1, projectDir: project,
+          discovery: { state: 'configured', commands: [], missingRoles: [] }, results: [] },
+      }));
+      const state = readRunState(project, run.runId); state.status = 'running';
+      state.gateRetryRound = { iteration: 1, round: 1 };
+      state.planControl = { version: 1, stages: [
+        { id: 'repair', role: 'coder', is_gate: false, dynamic_dispatch: false, retry_to: ['review'], artifact_contract: { version: 1, produces: [], reads: [] } },
+        { id: 'review', role: 'qa', is_gate: true, dynamic_dispatch: false, artifact_contract: { version: 1, produces: [], reads: [] } },
+      ] }; writeRunState(project, run.runId, state);
+      for (const id of ['repair', 'review']) writeStageStatus(project, run.runId, id, { status: 'complete', retries: 0,
+        attempts: [{ index: 1, status: 'complete', startedAt: 'start', completedAt: 'end', exitCode: 0 }] });
+      appendEvidence(run.runDirPath, { kind: 'attempt', stageId: 'repair', attemptIndex: 1, attemptStartedAt: 'start',
+        exitCode: 0, status: 'complete', treeHash: captureProjectTree(project).hash, files: [],
+        measurements: { inputTokens: 0, outputTokens: 0, durationMs: 0, provenance: 'adapter-reported' } });
+      const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
+      writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ engine_effective_pass: false,
+        findings: { confirmed: originals.map(record => ({ ...finding(`value_${record.sequence}`, record.sequence), record })), unconfirmed: [] } }));
+      writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Repaired',
+        criteria: { C1: { status: 'pass', evidence: 'value.txt' } } }));
+      let calls = 0;
+      vi.spyOn(validation, 'runProjectCommand').mockImplementation(async request => {
+        calls++;
+        writeFileSync(join(project, request.args[1] === 'fixture other reproduction' ? 'other-receipt.txt' : 'receipt.txt'), mode === 'changing-output' ? String(calls) : 'evidence');
+        return { exitCode: mode === 'nonzero' ? 1 : 0, ...(mode === 'unfinished' ? { unfinished: true } : {}), stdout: 'fixture' };
+      });
+      await validateSettledTree(project, run.runId);
+      await validateSettledTree(project, run.runId);
+      expect(calls).toBe(mode === 'stable-output' ? 2 : mode === 'two-obligations' ? 5 : mode === 'declared-bound' ? 1 : 3);
+      const verdict = readGateEvaluation(project, 'review', run.runId);
+      expect(verdict?.pass).toBe(mode === 'stable-output' || mode === 'two-obligations');
+      if (mode !== 'stable-output' && mode !== 'two-obligations') expect(verdict?.refusal?.kind).toBe('audit_findings');
+      if (mode === 'stable-output') {
+        writeFileSync(join(project, 'value.txt'), 'later change');
+        expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(false);
+        await validateSettledTree(project, run.runId);
+        expect(calls).toBe(3);
+        expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(true);
+      }
+    });
 
   it('checks numeric contracts before accepting unconfirmed observations with passing criteria', () => {
     const project = mkdtempSync(join(tmpdir(), 'observation-contract-')); roots.push(project);

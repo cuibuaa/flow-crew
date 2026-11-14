@@ -1,6 +1,6 @@
 import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
-import { bindReviewedGateValidation, recordGateValidationDelta, validateSettledTree } from '../sched_settlement/gate-validation.js';
+import { validateSettledTree } from '../sched_settlement/gate-validation.js';
 // Run serialized shared-tree authors and settle each closed attempt.
 import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
 import { attemptEventFields, recordRunEvent, recordStageOutcome } from "../../run-events.js";
@@ -168,22 +168,12 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
   return { runScopeSafeStageGroup };
 }
 
-/** Both ordinary and repair waves bind validation and publish the same gate result. */
+/** Ordinary and repair waves consume ledger validation and publish the gate result. */
 export async function settleStageGroup(projectDir: string, runId: string, stages: StageConfig[]): Promise<void> {
   if (!await validateSettledTree(projectDir, runId)) return;
   for (const stage of stages.filter(stage => stage.is_gate)) {
     const status = readStageStatus(projectDir, runId, stage.id);
     if (status.status !== STAGE_STATUS.COMPLETE && status.status !== STAGE_STATUS.FAILED) continue;
-    try {
-      if (!bindReviewedGateValidation(projectDir, runId, stage.id, stages.map(peer => peer.id))) {
-        await recordGateValidationDelta(projectDir, runId, stage.id);
-      }
-    } catch (error) {
-      rethrowGitNotAnswered(error);
-      // A missing bound receipt fails closed in gate evaluation. Keep launch
-      // failures inside settlement so the scheduler can publish that refusal.
-      log.error({ stage: stage.id, error: error instanceof Error ? error.message : String(error) }, 'Could not settle gate validation');
-    }
     settleGateEvaluation(projectDir, runId, stage.id);
   }
 }

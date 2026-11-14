@@ -347,7 +347,7 @@ describe('engine self-collision after-state replays and controls', () => {
     expect(JSON.parse(immutableFailure)).toMatchObject({
       attemptIndex: 1,
       pass: false,
-      executionId: failed?.executionId,
+      ledgerSequence: failed?.ledgerSequence,
     });
     expect(passing).toMatchObject({ attemptIndex: 2, pass: true });
 

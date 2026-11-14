@@ -176,9 +176,13 @@ export function measuredSetupFacts(baseline: ProjectValidationBaseline) {
     'Setup baseline is unmeasured. Rerun flowcrew ship-setup for this target and exact brief.');
   const identity = (command: Pick<ValidationCommandResult, 'role' | 'command' | 'args' | 'env'>) =>
     canonicalJson({ role: command.role, command: command.command, args: command.args, env: command.env ?? {} });
-  const acknowledgementRequired = baseline.discovery.commands.some(command => !baseline.results.some(result =>
-    identity(result) === identity(command) && result.exitCode === 0 && !result.unfinished));
-  return { identity: createHash('sha256').update(canonicalJson(baseline)).digest('hex'), acknowledgementRequired };
+  const commands = baseline.discovery.commands.map(command => ({ command: identity(command),
+    results: baseline.results.filter(result => identity(result) === identity(command)).map(result => ({
+      exitCode: result.exitCode ?? null, unfinished: result.unfinished === true,
+    })),
+  }));
+  const acknowledgementRequired = commands.some(command => !command.results.some(result => result.exitCode === 0 && !result.unfinished));
+  return { identity: createHash('sha256').update(canonicalJson({ projectDir: baseline.projectDir, commands })).digest('hex'), acknowledgementRequired };
 }
 
 export class SetupLaunchRefusal extends Error {

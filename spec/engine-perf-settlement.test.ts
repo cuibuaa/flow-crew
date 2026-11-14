@@ -17,7 +17,7 @@ import { StageConfigSchema } from '../src/scheduler/sched_admission/configuratio
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { removeSchedulerPidIfOwned } from '../src/scheduler/sched_policy/identity.js';
-import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 let root: string, project: string, previousStore: string;
 beforeEach(() => {
@@ -237,7 +237,7 @@ describe('mixed language validation retains all measured commands', () => {
     const receipt = await recordGateValidationDelta(project, runId, 'review', { runCommand: () => { throw new Error('gate must consume recorded results'); } });
     expect(receipt?.delta.filter(result => result.role === 'test').map(result => result.display)).toEqual(['npm run test', 'python -m pytest']);
     writeStageStatus(project, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
-    expect(bindReviewedGateValidation(project, runId, 'review')).toBe(true);
+    expect((await recordGateValidationDelta(project, runId, 'review'))?.ledgerSequence).toBe(receipt?.ledgerSequence);
     const durable = JSON.parse(readFileSync(runRecordPath(runDirPath, 'validation_delta_review.json'), 'utf8'));
     expect(durable.delta).toHaveLength(baseline.results.length);
     expect(durable).not.toHaveProperty('current');

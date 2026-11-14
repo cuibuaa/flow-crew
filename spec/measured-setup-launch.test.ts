@@ -61,6 +61,25 @@ describe('measured setup launch rule', () => {
       expect(() => assertMeasuredSetupLaunch(project, brief, acknowledge(item.baseline))).not.toThrow();
     });
 
+  it('retains acknowledgement across output, duration and diagnostic remeasurement', () => {
+    const item = seed(); const receipt = acknowledge(item.baseline);
+    Object.assign(item.baseline.results[0], { output: 'new diagnostic output', durationMs: 321,
+      state: 'launch_error', reason: 'different diagnosis', failureIdentifiers: ['different'], failureCount: 7 });
+    item.baseline.discovery.reason = 'new discovery explanation'; item.save();
+    expect(() => assertMeasuredSetupLaunch(project, brief, receipt)).not.toThrow();
+  });
+
+  it.each(['command', 'args', 'env', 'completion'] as const)('requires fresh acknowledgement after changed %s', field => {
+    const item = seed(); const receipt = acknowledge(item.baseline);
+    if (field === 'completion') item.baseline.results[0].unfinished = true;
+    else {
+      const patch = field === 'command' ? { command: 'different' } : field === 'args' ? { args: ['different'] } : { env: { DIFFERENT: 'value' } };
+      Object.assign(item.baseline.discovery.commands[0], patch); Object.assign(item.baseline.results[0], patch);
+    }
+    item.save();
+    expect(() => assertMeasuredSetupLaunch(project, brief, receipt)).toThrow('setup_acknowledgement_required');
+  });
+
   it('admits completed zero exits despite failed labels, reporter totals and cause text', () => {
     const item = seed(0); Object.assign(item.baseline.results[0], { state: 'failed', failureCount: 99,
       failureIdentity: 'unknown', reason: 'unrelated text', reportError: 'unreadable reporter' }); item.save();

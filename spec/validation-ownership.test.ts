@@ -207,7 +207,8 @@ describe('scheduler owns validation after author settlement', () => {
     expect(readEvidence(runDir(root, final.runId)).filter(entry => entry.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 
-  it('engine-runs-it: covers repair-closure writes before review and never replays the closure at repeated barriers', async () => {
+  it('engine-runs-it: spends the closure allowance on changing trees before review without resetting it at repeated barriers', async () => {
+    setEngineDefaults({ validation_attempts: 3 });
     const root = project(); projectValidation(root); const counter = join(project(), 'closure-count');
     const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
     const program = `const fs=require('node:fs'),v=fs.readFileSync('value.txt','utf8');if(v==='good'){const p=${JSON.stringify(counter)},n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8'))+1:1;fs.writeFileSync(p,String(n));fs.writeFileSync('stamp.txt',String(n));}process.exit(v==='good'?0:1);`;
@@ -232,13 +233,16 @@ describe('scheduler owns validation after author settlement', () => {
         audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Value should be good', reproduction, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } });
-    expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('1');
+    expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('3');
     const ledger = readEvidence(runDir(root, final.runId));
-    const closure = ledger.find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)!;
+    const closures = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
+    expect(closures).toHaveLength(3);
+    const closure = closures.at(-1)!;
     const validation = ledger.filter(entry => entry.kind === 'validation').at(-1)!;
     expect(closure.sequence).toBeLessThan(validation.sequence); expect(closure.treeAfterHash).toBe(validation.treeHash);
     // A source-writing reproduction cannot itself prove a read-only closure.
     expect(final.status).toBe('incomplete');
+    expect(final.stages.review.gate?.refusal?.kind).toBe('audit_findings');
   });
   it('engine-runs-it and review-reads-record: author and repair end first; each tree has one execution and independent review consumes it', async () => {
     const root = project(); projectValidation(root); const calls: string[] = [];

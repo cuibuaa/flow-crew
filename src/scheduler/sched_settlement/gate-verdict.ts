@@ -2,7 +2,7 @@ import { runRecordPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult } from '../../project-validation.js';
-import { assessFindings, AuditFindingsSchema, projectLegacyFindings } from '../../scoped-audit-repair.js';
+import { assessFindings, AuditFindingsSchema, projectLegacyFindings, repairReproductionClosed } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
@@ -129,12 +129,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
     if (finding.record.validationRecord !== undefined) {
       return results.length === 0 || results.some(result => projectValidationResult(result).state !== 'passed');
     }
-    const original = ledger.find(entry => entry.sequence === finding.record.sequence);
-    const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence).at(-1);
-    return original?.kind !== 'command' || !original.context || closure?.kind !== 'command' || closure.owner !== 'code'
-      || closure.unfinished || closure.exitCode !== 0 || !closure.outputDigest || !treeHash || !closure.treeHash || closure.treeAfterHash !== closure.treeHash
-      || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
-      || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
+    return !repairReproductionClosed(finding.record.sequence, ledger, treeHash, accepted);
   });
   const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${validationNote}`;
   return { ...authored, ...(regressions.length && !authored.repairability ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Completed engine validation has a nonzero command exit' } } : {}),

@@ -310,7 +310,7 @@ describe('engine generalization runtime bindings', () => {
     const settled = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
     const { current: _current, ...reference } = first!;
     expect(settled).toEqual(reference);
-    expect(settled.pass).toBe(true); expect(settled.validationAttemptIndex).toBe(1);
+    expect(settled.pass).toBe(true); expect(settled.ledgerSequence).toBe(first?.ledgerSequence);
     expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
     expect(readFileSync(runRecordPath(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
     expect(readRunState(projectDir, created.runId).stages.qa.attempts).toEqual(status.attempts);

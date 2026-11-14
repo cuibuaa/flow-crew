@@ -6,6 +6,8 @@ import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeFileSync } from '../../engine-fs.js';
 import { engineValidation } from '../../engine-validation.js';
+import { loadEngineDefaults } from '../../config.js';
+import { repairReproductionClosed } from '../../scoped-audit-repair.js';
 import { confirmedRepairFindings } from './gate-archives.js';
 import { runProcessAbortSignal } from '../../adapters/base.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
@@ -27,40 +29,20 @@ export interface RunValidationBaselineArtifact {
   limits?: ValidationLimits;
   baseline: ProjectValidationBaseline;
 }
-export interface GateValidationExecutionIdentity {
-  attemptIndex: number; attemptStartedAt: string; attemptCompletedAt: string; executionId: string;
-}
-export interface GateValidationDeltaArtifact extends Partial<GateValidationExecutionIdentity> {
+export interface GateValidationDeltaArtifact {
   version: 1 | 2;
   stageId: string;
   checkedAt: string;
   pass: boolean;
-  baselineSha256: string;
   current: ProjectValidationBaseline['results'];
   delta: ValidationDeltaResult[];
   immutablePath?: string;
-  validationAttemptIndex?: number;
+  attemptIndex?: number;
   treeHash?: string | null;
   ledgerSequence?: number;
 }
 
 function briefAt(base: string): string { return readAdmittedContract(base).brief; }
-export function validationExecutionId(runId: string, stageId: string, index: number, start: string, end: string): string {
-  return createHash('sha256').update([runId, stageId, String(index), start, end].join('\0')).digest('hex');
-}
-function gateExecution(projectDir: string, runId: string, stageId: string, statuses: string[]): GateValidationExecutionIdentity | undefined {
-  try {
-    const stage = readStageStatus(projectDir, runId, stageId), attempt = stage.attempts?.at(-1);
-    if (!attempt || stage.continuation || !statuses.includes(attempt.status)) return undefined;
-    const end = attempt.status === STAGE_STATUS.RUNNING ? '' : attempt.completedAt;
-    if (end === undefined) return undefined;
-    return { attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, attemptCompletedAt: end,
-      executionId: validationExecutionId(runId, stageId, attempt.index, attempt.startedAt, end) };
-  } catch { return undefined; }
-}
-export function closedGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
-  return gateExecution(projectDir, runId, stageId, ['complete', 'failed']);
-}
 export function readRunValidationBaseline(base: string): RunValidationBaselineArtifact | undefined {
   try {
     const value = JSON.parse(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), 'utf8')) as RunValidationBaselineArtifact;
@@ -183,13 +165,16 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
     if (!await validate()) return false;
     const stage = state.planControl?.stages.find(stage => stage.id === author.stageId);
     const findings = stage?.retry_to && state.gateRetryRound ? confirmedRepairFindings(base, stage.retry_to, state.gateRetryRound) : [];
-    for (const finding of findings) {
-      if (!finding.record.context || control.signal.aborted) continue;
-      const before = captureProjectTree(projectDir, briefAt(base), base);
-      if (readEvidence(base).some(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence
-        && entry.sequence > author.sequence)) continue;
-      const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell,
-        args: ['-c', finding.record.command!], display: finding.record.command!, cwd: finding.record.context.cwd, runDir: base,
+    const attempts = plan?.limits?.attempts ?? loadEngineDefaults().validation_attempts;
+    while (findings.length && !control.signal.aborted) {
+      const ledger = readEvidence(base), before = captureProjectTree(projectDir, briefAt(base), base);
+      const finding = findings.find(finding => finding.record.context
+        && !repairReproductionClosed(finding.record.sequence, ledger, before.hash)
+        && ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence
+          && entry.sequence > author.sequence).length < attempts);
+      if (!finding) break;
+      const replay = await runProjectCommand({ role: 'test', command: finding.record.context!.shell,
+        args: ['-c', finding.record.command!], display: finding.record.command!, cwd: finding.record.context!.cwd, runDir: base,
         timeoutMs: finding.record.timeoutMs, abortSignal: control.signal });
       appendEvidence(base, { kind: 'command', owner: 'code', stageId: author.stageId, attemptIndex: author.attemptIndex,
         commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode, unfinished: replay.unfinished,
@@ -216,8 +201,10 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
   _dependencies: ProjectValidationDependencies = {}): Promise<GateValidationDeltaArtifact | undefined> {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   if (!plan || !plan.baseline.discovery.commands.length) return undefined;
-  const execution = closedGateValidationExecution(projectDir, runId, stageId) ?? gateExecution(projectDir, runId, stageId, ['running']);
-  if (!execution) return undefined;
+  let stage;
+  try { stage = readStageStatus(projectDir, runId, stageId); } catch { return undefined; }
+  const attempt = stage.attempts?.at(-1);
+  if (!attempt || stage.continuation || ![STAGE_STATUS.RUNNING, STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED].some(status => status === attempt.status)) return undefined;
   const tree = captureProjectTree(projectDir, briefAt(base), base);
   const fact = validationForTree(readEvidence(base), tree.hash);
   const projected = fact && projectValidationFact(fact);
@@ -227,28 +214,16 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
     && current.commands.length === plan.baseline.discovery.commands.length
     && current.commands.every(command => Number.isInteger(command.exitCode) && !command.unfinished);
   const delta: ValidationDeltaResult[] = valid ? projected!.delta : [{ role: 'test', state: 'unverified', reason: 'No completed engine validation covers the current source tree', newFailureIdentifiers: [] }];
-  const artifact: GateValidationDeltaArtifact = { version: 2, stageId, checkedAt: new Date().toISOString(),
-    pass: valid ? projected!.pass : false, baselineSha256: createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex'),
-    current: valid ? current!.commands : [], delta, ...execution, treeHash: tree.hash,
-    ...(valid ? { ledgerSequence: fact.sequence } : {}), validationAttemptIndex: 1 };
-  artifact.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(artifact)).digest('hex').slice(0, 16)}.json`;
+  const artifact: GateValidationDeltaArtifact = { version: 2, stageId, checkedAt: fact?.at ?? attempt.startedAt,
+    pass: valid ? projected!.pass : false,
+    current: valid ? current!.commands : [], delta, attemptIndex: attempt.index, treeHash: tree.hash,
+    ...(valid ? { ledgerSequence: fact.sequence } : {}) };
+  artifact.immutablePath = `validation_delta_${stageId}_attempt_${attempt.index}_${createHash('sha256').update(JSON.stringify(artifact)).digest('hex').slice(0, 16)}.json`;
   const { current: _current, ...reference } = artifact;
   const stored = valid ? reference : artifact;
   publishJsonCreateOnly(runRecordPath(base, artifact.immutablePath), stored);
   writeFileSync(runRecordPath(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
   return artifact;
-}
-export function bindReviewedGateValidation(projectDir: string, runId: string, stageId: string, _waveStageIds?: string[]): boolean {
-  const base = runDir(projectDir, runId), prior = readValidationDelta(runRecordPath(base, `validation_delta_${stageId}.json`));
-  const execution = closedGateValidationExecution(projectDir, runId, stageId);
-  if (!prior || !execution || prior.baselineSha256 !== createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex') || !prior.treeHash || prior.treeHash !== captureProjectTree(projectDir, briefAt(base), base).hash
-    || prior.attemptIndex !== execution.attemptIndex || prior.attemptStartedAt !== execution.attemptStartedAt) return false;
-  const { current: _current, ...bound } = { ...prior, ...execution };
-  bound.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(bound)).digest('hex').slice(0, 16)}.json`;
-  const stored = bound.ledgerSequence === undefined ? { ...bound, current: prior.current } : bound;
-  publishJsonCreateOnly(runRecordPath(base, bound.immutablePath), stored);
-  writeFileSync(runRecordPath(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
-  return true;
 }
 /** Missing or stale facts expose each selected command as unrun. */
 export function currentValidationResults(projectDir: string, runId: string): ProjectValidationBaseline['results'] {
