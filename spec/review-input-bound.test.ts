@@ -38,6 +38,7 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(prior); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 it('declares the codex limit with its reason in configuration', () => {
+  expect(readFileSync(join(import.meta.dirname, '../config/defaults.yaml'), 'utf8')).toMatch(/codex: 1048576/);
   expect(loadEngineDefaults().adapter_input_limit_chars.codex).toBe(CODEX_LIMIT);
   expect(adapterInputLimit({ sessionKind: 'codex' })).toBe(CODEX_LIMIT);
   expect(adapterInputLimit({})).toBe(Math.min(...Object.values(loadEngineDefaults().adapter_input_limit_chars)));

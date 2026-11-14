@@ -210,6 +210,44 @@ describe('independent post-author review', () => {
 });
 
 describe('in-iteration replanning through the revision authority', () => {
+  it.each(['default', 'replan'])('lets a retry_to-only planner repair choose its gate or replan (choice=%s)', async selection => {
+    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    const proposal = [
+      { id: 'implement', role: 'coder', scope: [], artifact_contract: contract },
+      { id: 'review', role: 'qa', scope: [], depends_on: ['implement'], is_gate: true, artifact_contract: contract },
+      { id: 'repair', role: 'coder', scope: [], retry_to: ['review'], artifact_contract: contract },
+    ];
+    const calls: string[] = [];
+    let repaired = false;
+    const state = await execute(config, { async run(_user, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'plan') {
+        const current = readRunState(project, opts.runDir.split('/').at(-1)!);
+        return plannerReply(opts, current.planControl?.stages.filter(stage => !stage.dynamic_dispatch) ?? proposal);
+      }
+      let output = delivered;
+      if (opts.stageId === 'review') output = gate(opts, repaired);
+      if (opts.stageId === 'repair') {
+        expect(opts.outputSchema).toMatchObject({ properties: { successor: { enum: ['review', 'replan'] } } });
+        repaired = true;
+        output = selection === 'default' ? '{}' : choice('replan');
+      }
+      return { output, exitCode: 0, duration_ms: 0 };
+    } }, task);
+    // An unchanged revision retains the rejected gate; replanning cannot accept it.
+    expect(state.status, state.failureReason).toBe(selection === 'replan' ? 'incomplete' : 'complete');
+    expect(calls).toEqual(['plan', 'implement', 'review', 'repair', selection === 'replan' ? 'plan' : 'review']);
+    expect(state.planControl!.stages.find(stage => stage.id === 'repair')!.decision).toEqual({
+      successors: ['review', 'replan'], default: 'review', kind: 'successor',
+    });
+    expect(state.decisionGraph!.records.find(record => record.stageId === 'repair')).toMatchObject({
+      successor: selection === 'default' ? 'review' : 'replan', outcome: selection === 'default' ? 'defaulted' : 'chosen',
+    });
+    expect(state.queryState!.planRevision!.revision).toBe(selection === 'replan' ? 1 : 0);
+    expect(state.stages.review.attempts).toHaveLength(selection === 'replan' ? 1 : 2);
+    expect(state.decisionGraph!.records.some(record => record.gateAccepted)).toBe(selection === 'default');
+  });
+
   it.each([false, true])('validates only authors and repairs across decisions and a replan, and binds gates to their final trees (declared ignored output=%s)', async ignored => {
     if (ignored) writeFileSync(join(project, '.gitignore'), 'docs/\n');
     writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'decision-ledger-fixture', version: '1.0.0', scripts: { build: 'node check.cjs', test: 'node check.cjs', lint: 'node check.cjs' } }));
@@ -233,7 +271,7 @@ describe('in-iteration replanning through the revision authority', () => {
         writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: candidate }));
       }
       if (opts.stageId === 'work') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); output = choice('replan'); }
-      if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = delivered; }
+      if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = choice('review'); }
       if (opts.stageId === 'review') {
         const reference = JSON.parse(readFileSync(runRecordPath(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
         gateReceipts.push({ gate: opts.stageId, sequence: reference.ledgerSequence, treeHash: reference.treeHash });

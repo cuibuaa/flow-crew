@@ -58,13 +58,11 @@ it.each([1, 2])('admits a planner graph with %s author duties through dispatch a
       : { status: 'delivered', summary: 'Greeting delivered.', caveats: [], remaining_work: [], blocks: null }), exitCode: 0, duration_ms: 0 };
   } }, new Map(), undefined, roles, undefined, brief, true);
   expect(final.status, final.failureReason).toBe('complete');
-  expect(calls[0]).toBe('plan');
-  expect(calls.filter(id => id.startsWith('author_'))).toEqual(authors.map(stage => stage.id));
-  expect(calls.some(id => ['gate', 'gate_full'].includes(id))).toBe(true);
   expect(final.decisionGraph?.records.some(record => record.gateAccepted === true)).toBe(true);
   const admission = JSON.parse(readFileSync(runRecordPath(join(fcGlobalDir(), 'runs', final.runId), 'dispatch_admission.json'), 'utf8'));
   expect(admission.pass).toBe(true);
-  expect(admission.criterionGateRefs).toMatchObject({ gate: ['result'] });
+  expect(admission.criterionGateRefs).toEqual({ gate: ['result'] });
+  expect(calls).toEqual(['plan', ...authors.map(stage => stage.id), 'gate']);
 });
 
 it.each([1, 2])('refuses an ungated planner graph with %s author duties before execution', async count => {
@@ -173,7 +171,7 @@ it.each(['workflow', 'planControl'])('reads legacy review_assess through status,
   expect(bytes(runDirPath)).toEqual(before);
 });
 
-it('shipped workflows contain no pre-review routing decision', () => {
+it('shipped workflows contain no pre-review routing decision', async () => {
   for (const file of readdirSync(workflows).filter(file => file.endsWith('.yaml'))) {
     const { config } = loadWorkflow(join(workflows, file));
     const stages = [...config.stages, ...(config.dispatch ?? []).map(stage => StageConfigSchema.parse(stage))];
@@ -183,4 +181,17 @@ it('shipped workflows contain no pre-review routing decision', () => {
   expect(() => StageConfigSchema.parse({ id: 'route', role: 'qa', decision: {
     kind: 'review', successors: ['gate', 'full'], default: 'full',
   } })).toThrow();
+  // Entry's topology is emitted by the planner and normalized in code.
+  const { config, raw } = loadWorkflow(join(workflows, 'entry.yaml'));
+  const calls: string[] = [];
+  const final = await runWorkflow(config, raw, project, { async run(_user, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'plan') return plannerReply(opts);
+    return { output: JSON.stringify(opts.outputSchema?.anyOf
+      ? { pass: true, reason: 'Independent greeting check.', criteria: { result: { status: 'pass', evidence: 'Independent check.' } }, audit_findings: { version: 1, findings: [] } }
+      : { status: 'delivered', summary: 'Greeting delivered.', caveats: [], remaining_work: [], blocks: null }), exitCode: 0, duration_ms: 0 };
+  } }, new Map(), undefined, roles, undefined, brief, true);
+  expect(final.status, final.failureReason).toBe('complete');
+  expect(calls).toEqual(['plan', 'implement', 'review']);
+  expect(final.planControl!.stages.filter(stage => stage.is_gate).map(stage => stage.id)).toEqual(['review']);
 });
