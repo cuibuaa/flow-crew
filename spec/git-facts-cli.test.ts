@@ -167,8 +167,8 @@ async function quick(target: string, extra: string[] = []) {
     const scheduler = await import('../src/scheduler.js');
     vi.spyOn(scheduler, 'runWorkflow').mockImplementation(async (...args) => {
       const { assertMeasuredSetupLaunch } = await import('../src/ship-setup-record.js');
-      assertMeasuredSetupLaunch(args[2], args[8]!, args[12]);
-      fixture.launches.push(args[12]!);
+      assertMeasuredSetupLaunch(args[2], args[8]!, args[11]);
+      fixture.launches.push(args[11]!);
       await args[3].run('Controlled work', {} as never, {} as never);
       return { runId: 'controlled', status: 'complete', stages: {} } as Awaited<ReturnType<typeof scheduler.runWorkflow>>;
     });

@@ -1315,7 +1315,7 @@ async function cmdQuick(preview = false) {
   let factUnanswered = false;
   try {
     if (push) await refreshPush();
-    finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, resolvedCampaign,);
+    finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, resolvedCampaign, briefAdmission);
   } catch (error) {
     factUnanswered = error instanceof GitNotAnswered;
     throw error;

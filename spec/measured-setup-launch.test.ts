@@ -108,7 +108,7 @@ describe('measured setup launch rule', () => {
     const agents = join(project, 'agents'); mkdirSync(agents);
     writeFileSync(join(agents, 'worker.yaml'), stringify({ name: 'worker', description: 'fixture', model: 'mock', reasoning_effort: 'low', tools: [], prompt: 'work' }));
     await runWorkflow(w, stringify(w), project, { run }, new Map(), undefined, agents, undefined, brief,
-      undefined, undefined, false, scenario === 'acknowledged red' ? acknowledge(item.baseline) : undefined, stationaryStageClock);
+      undefined, undefined, scenario === 'acknowledged red' ? acknowledge(item.baseline) : undefined, stationaryStageClock);
     expect(run).toHaveBeenCalled();
   });
 
@@ -142,7 +142,7 @@ describe('measured setup launch rule', () => {
     const run = vi.fn(async (_prompt, _agent, opts) => fixtureResult({
       output: opts.stageId === 'qa' ? JSON.stringify({ pass: true, reason: 'controlled pass', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'done', exitCode: 0, duration_ms: 0 }, opts));
     const state = await runWorkflow(w, stringify(w), project, { run }, new Map(), undefined, agents, undefined, brief,
-      undefined, undefined, false, acknowledge(item.baseline), stationaryStageClock);
+      undefined, undefined, acknowledge(item.baseline), stationaryStageClock);
     expect(run, JSON.stringify(state)).toHaveBeenCalled(); expect(state.status === 'complete', state.failureReason).toBe(finalExit === 0);
     const validations = readEvidence(runDir(project, state.runId)).filter(entry => entry.kind === 'validation');
     expect(validations.flatMap(entry => entry.kind === 'validation' ? entry.executions.flatMap(execution => execution.commands) : []))
