@@ -20,8 +20,7 @@ function fixture(): { root: string; home: string; fcHome: string; temp: string }
   fixtures.push(root);
   const home = join(root, 'home');
   const fcHome = join(root, 'state');
-  // The invocation owns this private worktree scratch; avoid nesting Unix socket aliases.
-  const temp = tmpdir();
+  const temp = join(root, 'tmp');
   for (const path of [home, fcHome, temp]) mkdirSync(path, { recursive: true });
   return { root, home, fcHome, temp };
 }
