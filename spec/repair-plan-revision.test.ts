@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
+import { inspectDispatchAdmission, StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
-async function scenario(options: { denied?: boolean; failed?: boolean; rejectAgain?: boolean; repeat?: boolean; shared?: boolean } = {}) {
+async function scenario(options: { denied?: boolean; failed?: boolean; rejectAgain?: boolean; repeat?: boolean; indirect?: boolean; stranded?: boolean; shared?: boolean } = {}) {
   if (options.repeat) setEngineDefaults({ gate_retry_loops: 2 });
   const stage = (id: string, extra: Record<string, unknown> = {}) => StageConfigSchema.parse({
     id, role: 'coder', scope: ['report.txt'], depends_on: [], criterion_refs: [],
@@ -59,7 +59,7 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
       const attempt = readStageStatus(project, state.runId, 'repair').attempts!.at(-1)!;
       const shared = options.shared ? ['report.txt'] : [];
       const measure = stage('measure', { scope: [options.denied ? 'outside.txt' : 'sample.txt', ...shared], depends_on: ['review', 'repair'], retry_to: ['review'] });
-      const publish = stage('publish', { scope: ['final.txt', ...shared], depends_on: ['review', 'measure'], retry_to: ['review'] });
+      const publish = stage('publish', { scope: ['final.txt', ...shared], depends_on: options.indirect ? ['measure'] : ['review', 'measure'], ...(options.stranded || options.indirect ? {} : { retry_to: ['review'] }) });
       if (round === 1) writeFileSync(stageWorkPath(opts.runDir!, 'stages/repair/plan_revision_request.json'), JSON.stringify({
         version: 1, requestId: 'measurement_continuation', runId: state.runId, stageId: 'repair',
         attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
@@ -147,4 +147,23 @@ it.each([false, true])('reruns dependent repair work with current inputs and fre
     expect(audit).not.toHaveProperty('liveIncidents');
     expect(audit.rolledBackWrites).toEqual([]);
   }
+});
+
+// K1: a revision can retain a rejected gate and strand a newly admitted dependent.
+it('refuses a new node blocked by a previously rejected gate with a typed admission reason', async () => {
+  const result = await scenario({ stranded: true });
+  expect(result.decision.accepted).toBe(false);
+  expect(result.decision.errors.join('\n')).toContain('stage_dependency_rejected');
+  expect(result.calls).not.toContain('publish');
+  const typed = inspectDispatchAdmission({ dispatched: [StageConfigSchema.parse({ id: 'blocked', role: 'coder', scope: [], depends_on: ['review'], artifact_contract: { version: 1, produces: [], reads: [] } })],
+    baseStages: result.state.planControl!.stages, state: result.state, projectDir: project, runDir: result.directory, dispatchStageId: 'repair' });
+  expect(typed.errors).toContainEqual(expect.objectContaining({ code: 'stage_dependency_rejected', stageId: 'blocked', field: 'depends_on.review' }));
+});
+
+it('admits new work downstream of an explicit repair without an acceptance edge to the rejected gate', async () => {
+  const result = await scenario({ indirect: true });
+  expect(result.decision.accepted).toBe(true);
+  expect(result.calls).toContain('publish');
+  expect(result.state.stages.publish.status).toBe('complete');
+  expect(result.state.stages.review.gate?.pass).toBe(false);
 });

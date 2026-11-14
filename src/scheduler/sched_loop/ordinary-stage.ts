@@ -65,9 +65,9 @@ export async function executeOrdinaryStage(
       resolvedPrompt ||= '';
 
       if (stage.dynamic_dispatch && state.decisionGraph?.replan) {
-        resolvedPrompt += `\n\n# Replan within this iteration\n${JSON.stringify({ current_revision: state.queryState?.planRevision, admitted_stages: state.planControl?.stages,
-          progress: Object.fromEntries(Object.entries(state.stages).map(([id, status]) => [id, { status: status.status, attempts: status.attempts?.map(attempt => ({ index: attempt.index, startedAt: attempt.startedAt, completedAt: attempt.completedAt, status: attempt.status, tokenUsage: attempt.tokenUsage })) }])),
-          decisions: state.decisionGraph.records, budgets: { iteration: state.currentIteration, maximum_iterations: state.maxIterations, started_at: state.startedAt }, reason: state.decisionGraph.replan.reason })}\nReturn the complete non-bootstrap plan in dispatch.yaml. Retain every executed stage exactly as admitted and preserve all result duties. This is a new revision, not a new iteration; all spent work and clocks carry over.`;
+        resolvedPrompt += `\n\n# Replan facts\n${JSON.stringify({ current_revision: state.queryState?.planRevision, admitted_stages: state.planControl?.stages,
+          progress: Object.fromEntries(Object.entries(state.stages).map(([id, status]) => [id, { status: status.status, attempts: status.attempts?.map(attempt => ({ index: attempt.index, startedAt: attempt.startedAt, completedAt: attempt.completedAt, status: attempt.status, exitCode: attempt.exitCode, tokenUsage: attempt.tokenUsage })) }])),
+          decisions: state.decisionGraph.records, budgets: { dispatchAdmission: state.dispatchAdmission, iteration: state.currentIteration, maximum_iterations: state.maxIterations, started_at: state.startedAt }, reason: state.decisionGraph.replan.reason })}`;
       }
       if (!stage.is_gate && stage.retry_to?.length && state.gateRetryRound?.iteration === (state.currentIteration ?? 1)) {
         resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, stage.retry_to, gateArchiveCoordinate(state.currentIteration ?? 1, state.gateRetryRound.round))}\n\n${resolvedPrompt}`;

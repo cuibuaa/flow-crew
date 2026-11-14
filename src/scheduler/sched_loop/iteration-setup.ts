@@ -51,7 +51,7 @@ export async function prepareWorkflowIteration(
 
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
     // written by a PRIOR iteration (or present at start). Takes precedence
-    // Floor-unmet writes a hint and falls through.
+    // Floor-unmet retains its evaluation reasons and falls through.
     const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, stages: baseStages });
     if (terminalTop.decision === 'matched') return { kind: 'settled', state: terminalTop.state };
 
@@ -90,7 +90,7 @@ export async function prepareWorkflowIteration(
     const sorted: StageConfig[] = normalizeStageContracts((isResumedIteration || continuingBudget ? retainedPlan : baseStages).map(s => ({ ...s })));
     const injectedDispatchStages = new Set<string>();
     if ((isResumedIteration || continuingBudget) && state.planControl) for (const stage of sorted) if (stage.dynamic_dispatch && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) injectedDispatchStages.add(stage.id);
-    // Planner retry counters are bounded within this iteration.
+    // Admission refusal accounting remains run-wide across iterations.
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = runRecordPath(runDirPath, 'dispatch.yaml');

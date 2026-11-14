@@ -32,13 +32,13 @@ function readShipSkill(): string {
 }
 
 describe('planner dispatch contract', () => {
-  it('names the invalid dispatch field and a repair action', () => {
+  it('names the invalid dispatch field as a recorded fact without repair advice', () => {
     const parsed = StageConfigSchema.safeParse({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'work', role: 'coder', scope: 'src/**' });
     if (parsed.success) throw new Error('invalid dispatch fixture unexpectedly parsed');
 
     const message = formatDispatchStageSchemaFailure(parsed.error);
     expect(message).toContain('scope:');
-    expect(message).toMatch(/fix the named fields.*regenerate dispatch\.yaml/i);
+    expect(message).not.toMatch(/fix the named fields.*regenerate dispatch\.yaml/i);
     expect(readPlannerPrompt()).not.toMatch(/^\s+timeout_(?:total_)?ms:/m);
   });
 

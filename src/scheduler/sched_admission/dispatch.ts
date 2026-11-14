@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
 import { inspectStageGraph, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
+import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
 function finiteStatusConditionDomainError(
@@ -126,13 +127,13 @@ export function shadowStageWithoutInvalidFields(item: Record<string, unknown>, e
   }
 }
 
-/** Preserve all Zod paths and a repair action in planner-facing schema refusals. */
+/** Preserve all Zod paths in recorded schema refusals. */
 export function formatDispatchStageSchemaFailure(error: unknown): string {
   const issues = error instanceof z.ZodError
     ? error.issues.map((issue) =>
         `${issue.path.length > 0 ? issue.path.join('.') : '(stage root)'}: ${issue.message}`)
     : [error instanceof Error ? error.message : String(error)];
-  return `invalid schema at ${issues.join('; ')}; fix the named fields and regenerate dispatch.yaml`;
+  return `invalid schema at ${issues.join('; ')}`;
 }
 
 export interface DispatchAdmissionError {
@@ -208,6 +209,7 @@ export function createDispatchAdmission() {
     baseStages: StageConfig[];
     dispatchStageId: string;
     research?: ResearchConfig;
+    state?: StoreState;
     criteria?: BriefCriteriaArtifact;
     criterionDischarges?: CriterionDischargeRecord[];
     projectDir?: string;
@@ -219,6 +221,24 @@ export function createDispatchAdmission() {
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
     errors.push(...artifactDeclarationFindings({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
     errors.push(...inspectStageGraph(all).errors);
+    if (input.state?.planControl && input.projectDir) {
+      const prior = input.state.planControl.stages;
+      const previousIds = new Set(prior.map(stage => stage.id));
+      const rejected = collectGateRuntimeFacts(prior, input.state, input.projectDir, input.state.runId).rejectedGateIds;
+      for (const gateId of rejected) {
+        // A repair consumes rejection; its dependents need its completed result,
+        // while an acceptance edge to the old gate remains blocked.
+        const acceptanceEdges = new Map(all.map(stage => [stage.id, stage.retry_to?.includes(gateId)
+          ? { ...stage, depends_on: [] } : stage]));
+        for (const stage of input.dispatched.filter(stage => !previousIds.has(stage.id))) {
+          if (transitivelyDependsOn(stage.id, gateId, acceptanceEdges)) {
+            errors.push(admissionError('stage_dependency_rejected',
+              `stage_dependency_rejected: ${stage.id} depends on previously rejected gate ${gateId} without a repair return route`,
+              `depends_on.${gateId}`, stage.id));
+          }
+        }
+      }
+    }
     for (const stage of input.dispatched) {
       if (stage.decision) {
         for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor)) {
@@ -226,7 +246,7 @@ export function createDispatchAdmission() {
         }
       }
       if (stage.is_gate && !input.research && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
-        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}]. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
+        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route (no ordinary stage declares retry_to: [${stage.id}], depends_on: [${stage.id}]); repair rounds are bounded by gate_retry_loops.`, 'retry_to', stage.id));
       }
       if (stage.condition?.trim()) {
         try {

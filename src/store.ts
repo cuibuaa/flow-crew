@@ -406,6 +406,8 @@ export interface StoreState {
   /** Durable authority for reconciling a partially published interruption. */
   recoveryIntent?: import('./restart-recovery.js').RecoveryIntent;
   planControl?: import('./plan-revisions.js').PlanControl;
+  /** Run-wide admission refusals; neither plan identity nor iteration resets the first ceiling. */
+  dispatchAdmission?: { refusals: number; maxRefusals: number };
   /** Transaction-bound revision decisions; stage files are replayable projections. */
   planRevisionDecisions?: Record<string, import('./plan-revisions.js').PlanRevisionDecision>;
   /** Scheduler-admitted query facts. Legacy runs remain readable without them. */

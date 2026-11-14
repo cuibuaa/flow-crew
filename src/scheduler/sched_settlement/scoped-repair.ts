@@ -28,7 +28,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     let criteria: BriefCriteriaArtifact | undefined;
     try { criteria = readBriefCriteriaForAdmission(directory); }
     catch (error) { return { pass: false, errors: [`PLAN_REVISION_CRITERIA_UNREADABLE: ${String(error)}`] }; }
-    const report = inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: stages.find((stage) => stage.dynamic_dispatch)?.id ?? 'plan', research: state.research,
+    const report = inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: stages.find((stage) => stage.dynamic_dispatch)?.id ?? 'plan', research: state.research, state,
       criteria: criteria?.criteria.length === 0 && !state.briefAdmission ? undefined : criteria,
       criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest), projectDir, runDir: directory });
     for (const stage of stages) if (!roles.has(stage.role)) report.errors.push(admissionError('role_unknown', `PLAN_REVISION_ROLE_UNKNOWN: ${stage.id}.role ${stage.role} is not configured`, 'role', stage.id));

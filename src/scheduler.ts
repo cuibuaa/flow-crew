@@ -4,14 +4,13 @@ export { appendResearchPathContract } from './scheduler/sched_policy/prompt-cont
 export { findCampaignPhaseMetadata } from './scheduler/sched_policy/campaign.js';
 export { RUN_VALIDATION_BASELINE_FILE } from './scheduler/sched_policy/terminal.js';
 export { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
-export { buildRetryPreamble, decideEmptyDispatchAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
+export { buildRetryPreamble, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
 export { StageConfigSchema, WorkflowConfigSchema, normalizeStageContracts, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';
 export { findScopeConflict, selectRunnableBatch } from './scheduler/sched_admission/frontier.js';
 export { GATE_VERDICT_CORRECTION_VERSION, gateVerdictCorrectionPath } from './scheduler/sched_admission/sessions.js';
 export { applyBasePrompt, buildRoleRegistry, collectTransitiveDependents, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
 export { inspectRealityCheckReachability } from './scheduler/sched_admission/reality-reads.js';
 export type { ParsedBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
-export type { EmptyDispatchAction } from './scheduler/sched_admission/dispatch-retry.js';
 export type { StageConfig, WorkflowConfig } from './scheduler/sched_admission/configuration.js';
 export type { ScopeConflict } from './scheduler/sched_admission/frontier.js';
 export type { GateVerdictCorrection } from './scheduler/sched_admission/sessions.js';

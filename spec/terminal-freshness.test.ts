@@ -374,8 +374,7 @@ terminal_states:
     expect(state.status).toBe('shipped');
     expect(state.stages.implement?.status).toBe('complete');
     expect(adapter.calls.some((call) => call.stageId === 'implement')).toBe(true);
-    expect(guidance).toContain("docs/task_summary.md exists but its content is unchanged from this run's initial content");
-    expect(guidance).not.toContain('早于本次 run 启动');
+    expect(guidance).toBe('');
 
   }, 60_000);
 
@@ -439,8 +438,7 @@ ${stageGlobLine}    floor:
 
     expect(state.status).toBe('shipped');
     expect(state.stages.refresh_verdicts?.status).toBe('complete');
-    expect(guidance).toContain(`${label} stage_glob`);
-    expect(guidance).toContain('2 matching file(s) have unchanged launch content');
+    expect(guidance).toBe('');
   }, 60_000);
 
   it('keeps a legitimate fast terminal reachable when fresh stage evidence satisfies the floor', async () => {

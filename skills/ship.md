@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 58 -->
+<!-- flowcrew-skill-revision: 59 -->
 
 # Ship a conversation to FlowCrew
 
@@ -245,3 +245,6 @@ the body is model context only. Editing prose cannot add or remove engine obliga
 
 Engineering work receives one full independent read-only review after authoring. The reviewer
 chooses the experiments and exploration and owns the verdict; no preliminary decision routes review depth.
+
+Scheduler retry context contains recorded facts and admission reports. The run-wide admission
+refusal budget survives replanning and resume; operator guidance retains its addressed delivery.

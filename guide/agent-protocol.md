@@ -58,7 +58,13 @@ verdicts and engine conclusions remain structured records, including for old run
 whose rejection archives predate the ledger. Missing fields are omitted, never inferred
 or summarized. Author final records are visible only to the same stage’s continuation;
 other stages receive engine attempt facts and declared blocker status. Retry and replan
-preambles carry observed errors, budgets and admission requirements as JSON records;
+preambles carry recorded errors, exit codes, spent budgets and admission reports as JSON records.
+Scheduler terminal evaluations retain factual refusal reasons; they do not write advice into
+the operator guidance ledger. The run stores one admission refusal count and its first ceiling;
+replanning, iteration changes, planner identities and resume do not reset either. Historical
+retry-ledger runs remain readable; admission refuses their continuation with
+`legacy_retry_state_unsupported` because their old counters cannot prove a run-wide budget.
+New dependencies on rejected gates require an explicit repair return route;
 the result and dispatch schemas remain single-sourced in the stage contract.
 When the admitted brief exists, `{task_description}` names its readable path instead
 of printing a second copy; standalone callers without a brief retain inline text. The ledger on

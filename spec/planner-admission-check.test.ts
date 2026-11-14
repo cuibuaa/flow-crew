@@ -16,8 +16,6 @@ import * as configuration from '../src/scheduler/sched_admission/configuration.j
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { log } from '../src/scheduler/sched_admission/shared.js';
-import { preparePlanRetryCandidate, recordPlanRetryRefusal } from '../src/plan-retry-monotone.js';
-import { planRetryRequirementsFromAdmission } from '../src/scheduler/sched_admission/dispatch-retry.js';
 import { buildRetryPreamble } from '../src/scheduler/sched_admission/dispatch-retry.js';
 
 const root = resolve(import.meta.dirname, '..');
@@ -109,16 +107,15 @@ describe('optional planner proposal diagnostics', () => {
     expect(exitCode).toBe(1);
     expect(report.errors).toHaveLength(1);
     expect(report.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review', field: 'retry_to' }));
-    expect(report.errors.map(error => error.message)).toContain('review: missing repair route; declare an ordinary repair stage with retry_to: [review], depends_on: [review]. The engine bounds repair rounds by gate_retry_loops without re-planning.');
+    expect(report.errors.map(error => error.message)).toContain('review: missing repair route (no ordinary stage declares retry_to: [review], depends_on: [review]); repair rounds are bounded by gate_retry_loops.');
     expect(snapshot()).toEqual(before);
     expect(report.errors).toEqual(inject(ctx).errors);
     mkdirSync(runRecordPath(ctx.directory, 'stages/plan'), { recursive: true });
     writeFileSync(runRecordPath(ctx.directory, 'stages/plan/status.json'), JSON.stringify({ admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: `invalid dispatch.yaml: dispatch admission rejected the complete proposal before stage injection.\nExact admission errors:\n${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}` }));
-    recordPlanRetryRefusal({ runDirPath: ctx.directory, prepared: preparePlanRetryCandidate({ runDirPath: ctx.directory, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3, unsatisfied: planRetryRequirementsFromAdmission(report) });
     const retry = buildRetryPreamble(1, 1000, ctx.directory, 'plan');
     expect(retry).toContain('RE-PLAN');
-    const facts = JSON.parse(retry.split('# Plan retry facts\n')[1].split('\n')[0]);
-    for (const error of report.errors) expect(facts.unsatisfied).toEqual(expect.arrayContaining([expect.objectContaining({ detail: error.message })]));
+    const facts = JSON.parse(retry.split('# Dispatch admission facts\n')[1].split('\n')[0]);
+    for (const error of report.errors) expect(facts.errors).toEqual(expect.arrayContaining([expect.objectContaining({ message: error.message })]));
   });
 
   it('lets the planner correct a missing repair route within its own read-only plan-check', async () => {

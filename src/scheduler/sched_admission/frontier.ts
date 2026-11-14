@@ -182,7 +182,7 @@ export interface ScopeConflict {
 
 export function findScopeConflict(left: StageConfig, right: StageConfig): ScopeConflict | undefined {
   return { leftStageId: left.id, rightStageId: right.id,
-    reason: 'stages share one mutable project tree; wait for the active stage to settle' };
+    reason: 'stages share one mutable project tree; author executions are serialized' };
 }
 
 export function selectRunnableBatch(ready: StageConfig[]): {

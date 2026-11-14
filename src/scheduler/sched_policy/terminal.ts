@@ -6,14 +6,12 @@ import { type StoreState, isContinuingStage, RUN_STATUS, STAGE_STATUS, writeRunS
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { evaluateTerminalFloor } from '../sched_admission/brief-contract.js';
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
 import { log } from '../sched_admission/shared.js';
 
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { appendSchedulerGuidanceOnce } from './guidance.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { withAdmittedExecution } from '../../engine-integrity.js';
@@ -124,11 +122,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             );
           }
         }
-        appendSchedulerGuidanceOnce(
-          ctx.runDirPath, RUN_WIDE_GUIDANCE_TARGET,
-          '[ambiguous-terminal]',
-          `Terminal output rejected: ${detail}. Choose the single path matching the outcome that actually happened and write only that path.`,
-        );
+
         return { decision: 'deferred', reasons: [detail] };
       }
     }
@@ -143,14 +137,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         if (!freshCandidate(path)) {
-          const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:freshness]`;
+
           const reason = `${path} exists but its content is unchanged from this run's initial content`;
-          appendSchedulerGuidanceOnce(
-            ctx.runDirPath,
-            RUN_WIDE_GUIDANCE_TARGET,
-            hintMarker,
-            `Terminal artifact rejected: ${reason}. Continue planned work and produce a fresh terminal artifact after a non-plan stage completes.`,
-          );
+
           log.warn({ runId: ctx.runId, terminalStatus, path, reason }, 'Terminal-state file exists but is stale — NOT terminating');
           notMatchedReasons.push(`${terminalStatus}: ${reason}`);
           continue;
@@ -160,13 +149,6 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         if (!floorCheck.passed) {
           if (floorCheck.reasonCode) return { decision: 'deferred', reasonCode: floorCheck.reasonCode, reasons: [floorCheck.reason!] };
 
-          const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
-          appendSchedulerGuidanceOnce(
-            ctx.runDirPath,
-            RUN_WIDE_GUIDANCE_TARGET,
-            hintMarker,
-            `${path} exists but does not meet the floor for terminal status '${terminalStatus}': ${floorCheck.reason}. Continue planned work OR write escalation_note with a clear blocker plus 2-3 candidate options.`,
-          );
           log.warn(
             { runId: ctx.runId, terminalStatus, path, reason: floorCheck.reason, stageGlob: entry.stageGlob },
             'Terminal-state file exists but floor unmet — NOT terminating (check stage_glob / floor config)',
@@ -181,8 +163,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.FAILED)
         ))) {
           const reason = `${path} is fresh, but required work has not executed`;
-          appendSchedulerGuidanceOnce(ctx.runDirPath, RUN_WIDE_GUIDANCE_TARGET,
-            `[scheduler-hint:${terminalStatus}:${path}:execution]`, reason);
+
           deferredReasons.push(`${terminalStatus}: ${reason}`);
           continue;
         }
@@ -250,12 +231,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             archiveDeclaredOutputs(ctx.projectDir, ctx.runDirPath, state.declaredOutputs);
           } catch (error) {
             const reason = `declared output archival failed: ${error instanceof Error ? error.message : String(error)}`;
-            appendSchedulerGuidanceOnce(
-              ctx.runDirPath,
-              RUN_WIDE_GUIDANCE_TARGET,
-              `[scheduler-hint:${terminalStatus}:${path}:declared-outputs]`,
-              `${path} reached a terminal outcome, but ${reason}. Produce every declared output with its declared type before terminalization.`,
-            );
+
             deferredReasons.push(`${terminalStatus}: ${reason}`);
             continue;
           }

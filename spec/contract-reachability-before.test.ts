@@ -213,7 +213,7 @@ describe('research ingestion and planner refusal evidence', () => {
       true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    const retryState = readJson(runRecordPath(runDirectory, 'plan_retry_state.json'));
+    const refusals = [1, 2, 3].map(index => readJson(runRecordPath(runDirectory, `dispatch_rejections/attempt_${index}/dispatch_admission.json`)));
     const events = readFileSync(runRecordPath(runDirectory, 'events.jsonl'), 'utf8')
       .trim().split('\n').map((line) => JSON.parse(line) as Record<string, any>);
     const retryEvents = events.filter((event) => event.type === 'plan_dispatch_retry');
@@ -224,22 +224,12 @@ describe('research ingestion and planner refusal evidence', () => {
       expect.stringContaining('1/2'),
       expect.stringContaining('2/2'),
     ]);
-    expect(retryState.attempts[0].unsatisfied).toEqual([
-      expect.objectContaining({
-        id: 'reality_check_invalid:reality_checks', detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
-      }),
+    expect(final.dispatchAdmission).toEqual({ refusals: 3, maxRefusals: 3 });
+    for (const refusal of refusals) expect(refusal.errors).toEqual([
+      expect.objectContaining({ code: 'reality_check_invalid', field: 'reality_checks',
+        message: expect.stringContaining('.fc/runs/prior/evidence.json') }),
     ]);
-    expect(retryState.attempts[1].unsatisfied).toEqual([
-      expect.objectContaining({
-        id:'reality_check_invalid:reality_checks',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
-      }),
-    ]);
-    expect(retryState.attempts[2].unsatisfied).toEqual([
-      expect.objectContaining({
-        id:'reality_check_invalid:reality_checks',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
-      }),
-    ]);
-    expect(final.failureReason).toContain('reality_check_invalid:reality_checks');
+    expect(final.failureReason).toContain('.fc/runs/prior/evidence.json');
   }, 60_000);
 });
 

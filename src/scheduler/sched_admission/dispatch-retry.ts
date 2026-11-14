@@ -1,13 +1,10 @@
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
-import { concludeRun } from '../sched_policy/run-completion.js';
 /** Planner artifact retry decisions; run/campaign/guidance effects enter through typed callbacks. */
 import { type StageStatus, type StoreState, RUN_STATUS } from '../../store.js';
 import { join, posix } from 'node:path';
 import { writeFileSync, unlinkSync, mkdirSync, copyFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { buildMonotonePlanRetryContext, type PlanRetryRequirement, planRetryRequirement, readMonotonePlanRetryState } from '../../plan-retry-monotone.js';
-import { readDispatchDocument } from '../../dispatch-document.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type DispatchAdmissionReport } from './dispatch.js';
 
@@ -41,72 +38,30 @@ export function buildRetryPreamble(
   const partialPath = runRecordPath(runDirPath, 'evidence-ledger.jsonl');
   let prevError: string | undefined;
   let admissionFailed = false;
+  let previousExitCode: number | undefined;
   try {
     const statusRaw = readFileSync(runRecordPath(runDirPath, 'stages', stageId, 'status.json'), 'utf-8');
-    const status = JSON.parse(statusRaw) as Pick<StageStatus, 'error' | 'admissionFailure' | 'attempts'>;
+    const status = JSON.parse(statusRaw) as Pick<StageStatus, 'error' | 'exitCode' | 'admissionFailure' | 'attempts'>;
     admissionFailed = status.admissionFailure?.code === 'dispatch_refused'
       && status.admissionFailure.attemptIndex === (status.attempts?.at(-1)?.index ?? 0);
     // A nested adapter runs after the worker clears the live outcome. Its
     // settled ledger still explains the execution that is being retried.
-    prevError = status.error ?? status.attempts?.filter(attempt => attempt.status !== RUN_STATUS.RUNNING).at(-1)?.error;
+    const previous = status.attempts?.filter(attempt => attempt.status !== RUN_STATUS.RUNNING).at(-1);
+    prevError = status.error ?? previous?.error;
+    previousExitCode = status.exitCode ?? previous?.exitCode;
   } catch { /* status not readable; fall through to generic message */ }
-  const monotoneContext = buildMonotonePlanRetryContext(runDirPath, stageId);
-  const retryState = readMonotonePlanRetryState(runDirPath, stageId);
-  const replan = admissionFailed && retryState && !retryState.terminal;
+  let admissionBudget: StoreState['dispatchAdmission'];
+  try { admissionBudget = JSON.parse(readFileSync(runRecordPath(runDirPath, 'run.json'), 'utf8')).dispatchAdmission; } catch { /* standalone retry context has no run projection */ }
+  const replan = admissionFailed;
+  const admission = replan ? currentDispatchAdmissionReport(runDirPath) : undefined;
   return [
     `# ${replan ? 'RE-PLAN' : 'RETRY'} facts\n${JSON.stringify({ stageId, attemptIndex: retries + 1,
-      budgetMs: timeoutMs, previousError: prevError, ...timeoutContext,
+      budgetMs: timeoutMs, previousError: prevError, previousExitCode, admissionBudget, ...timeoutContext,
       ledgerPath: partialPath, statusPath: runRecordPath(runDirPath, 'stages', stageId, 'status.json'),
       ...(replan ? { dispatchPath: stageWorkPath(runDirPath, 'dispatch.yaml') } : {}),
     })}`,
-    monotoneContext,
-    'Preserve valid work and recorded evidence; complete the admitted duties within the current scope and immutable deadline. The system contract owns the result schema.',
+    admission ? `# Dispatch admission facts\n${JSON.stringify(admission)}` : undefined,
   ].filter(Boolean).join('\n\n');
-}
-
-export function diagnoseEmptyDispatch(
-  dispatchExists: boolean,
-  rawDispatchText: string | null,
-  knownRoles: string[],
-): { detail: string; unknownRoles: string[]; transient: boolean } {
-  if (!dispatchExists) {
-    return { detail: 'No dispatch.yaml was written (the plan stage produced no execution plan).', unknownRoles: [], transient: true };
-  }
-  let items: Record<string, unknown>[];
-  try {
-    items = readDispatchDocument(rawDispatchText ?? '').stages as Record<string, unknown>[];
-  } catch (e) {
-    return {
-      detail: `dispatch.yaml could not be parsed as YAML (${e instanceof Error ? e.message : String(e)}) — likely truncated, malformed or without a stage list.`,
-      unknownRoles: [], transient: true,
-    };
-  }
-  if (!Array.isArray(items) || items.length === 0) {
-    return { detail: 'dispatch.yaml parsed but contained no stages (expected a top-level list, or a {stages: [...]} object).', unknownRoles: [], transient: true };
-  }
-  const known = new Set(knownRoles);
-  const unknownRoles = items
-    .filter((i) => i?.role && !known.has(i.role as string))
-    .map((i) => `"${i.role}"`)
-    .filter((v, idx, arr) => arr.indexOf(v) === idx);
-  // GENUINE failure: every stage names a role the registry does not have. This
-  // is unsatisfiable as written — re-planning the same brief tends to repeat it.
-  if (unknownRoles.length > 0 && unknownRoles.length >= items.filter((i) => i?.role).length) {
-    return {
-      detail: `every stage referenced an unknown role: ${unknownRoles.join(', ')}. Available roles: ${knownRoles.join(', ')}.`,
-      unknownRoles,
-      transient: false,
-    };
-  }
-  // Some unknown roles but not all, or schema-invalid stages — treat as transient.
-  if (unknownRoles.length > 0) {
-    return {
-      detail: `some stages referenced unknown role(s): ${unknownRoles.join(', ')}. Available roles: ${knownRoles.join(', ')}.`,
-      unknownRoles,
-      transient: true,
-    };
-  }
-  return { detail: 'dispatch.yaml contained stages but none were schema-valid (check id/role/prompt_template fields).', unknownRoles: [], transient: true };
 }
 
 interface ArchivedDispatchRefusal {
@@ -121,24 +76,6 @@ export function currentDispatchAdmissionReport(runDirPath: string): DispatchAdmi
   } catch {
     return undefined;
   }
-}
-
-export function planRetryRequirementsFromAdmission(report: DispatchAdmissionReport | undefined): PlanRetryRequirement[] {
-  return (report?.errors ?? []).map((error) => planRetryRequirement(error, 'admission'));
-}
-
-export function concludePlanRetryFailure(input: {
-  state: StoreState;
-  projectDir: string;
-  runId: string;
-  stageId: string;
-  reason: string;
-}): StoreState {
-  return concludeRun(input.state, { status: RUN_STATUS.FAILED, reasonCode: 'dispatch_refused', detail: input.reason, eventFields: () => ({
-    iteration: input.state.currentIteration ?? 1,
-    stageId: input.stageId,
-    detail: `failed: ${input.reason}`,
-  }) });
 }
 
 export function archiveDispatchAdmissionRefusal(input: {
@@ -177,34 +114,4 @@ export function archiveDispatchAdmissionRefusal(input: {
     archivedAt: new Date().toISOString(),
   });
   return { report, proposalPath, admissionPath };
-}
-
-/** Action the engine takes when a plan stage emits zero valid injected stages and
- * there is no static follow-up. Pure + exported for unit testing. */
-export type EmptyDispatchAction =
-  | { action: 'retry'; detail: string }
-  | { action: 'escalate'; status: 'escalated' | 'failed'; reason: string; unknownRoles: string[] };
-
-export function decideEmptyDispatchAction(
-  diagnosis: { detail: string; unknownRoles: string[]; transient: boolean },
-): EmptyDispatchAction {
-  if (diagnosis.transient) {
-    return {
-      action: 'retry',
-      detail: diagnosis.detail,
-    };
-  }
-  // Escalate with specifics. A genuine unknown-role failure is unsatisfiable as
-  // written → prefer the structured 'escalated' terminal (it carries the named
-  // roles). A transient failure that merely exhausted its budget → 'failed' with
-  // the specific parse/dispatch detail (still specific, never the generic punt).
-  if (diagnosis.unknownRoles.length > 0) {
-    return {
-      action: 'escalate',
-      status: 'escalated',
-      reason: `Planner cannot satisfy this brief: ${diagnosis.detail} These roles do not exist in the registry — the brief asks for capabilities the engine has no agent for. Add the missing role(s) or rewrite the brief to use available roles.`,
-      unknownRoles: diagnosis.unknownRoles,
-    };
-  }
-  return { action: 'escalate', status: 'failed', reason: diagnosis.detail, unknownRoles: [] };
 }

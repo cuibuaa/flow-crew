@@ -285,9 +285,8 @@ describe('gate settlement and research evidence', () => {
     expect(result.decision).toBe('deferred');
     expect(state.stages.finish.status).toBe('complete');
     expect(state.stages.escalate.status).toBe('complete');
-    const guidance = readFileSync(runRecordPath(taskRunDir, 'supervisor_guidance.md'), 'utf-8');
-    expect(guidance).toContain('multiple fresh terminal outcomes exist');
-    expect(guidance).toContain('"target":"*"');
+    expect(result.reasons).toEqual(['multiple fresh terminal outcomes exist: complete=docs/final.md, escalated=docs/escalation.md']);
+    expect(existsSync(runRecordPath(taskRunDir, 'supervisor_guidance.md'))).toBe(false);
   });
 });
 

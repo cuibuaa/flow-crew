@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify, parse } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { planRetryRequirement } from '../src/plan-retry-monotone.js';
 import { StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
@@ -19,12 +18,7 @@ afterEach(()=>{setFcGlobalDir(previous);rmSync(root,{recursive:true,force:true})
 const contract={version:1,produces:[{id:'report',root:'project',path:'docs/final.md'}],reads:[] };
 const rawStage={id:'work',role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Write the declared report.'};
 describe('typed declarations are repaired by complete independently admitted replacements',()=>{
-  it('binds typed error identity independently of diagnostic text and keeps replacement fields explicit',()=>{
-    const error = { code: 'artifact_contract', stageId: 'work', field: 'artifact_contract', message: 'Declare the producer.' };
-    const requirement = planRetryRequirement(error);
-    expect(requirement).toMatchObject({ id: 'artifact_contract:work:artifact_contract', detail: error.message });
-    expect(planRetryRequirement({ ...error, message: 'Different localized diagnostic: 123' })).toMatchObject({ id: requirement.id, detail: 'Different localized diagnostic: 123' });
-    expect(planRetryRequirement({ ...error, stageId: 'peer' }).id).not.toBe(requirement.id);
+  it('keeps complete replacement fields explicit',()=>{
     // A complete replacement is validated as authored; no hidden merge changes
     // its role or scope. Unknown roles are refused by whole-plan admission.
     const replacement={...rawStage,artifact_contract:contract,role:'foreign',scope:['foreign/**']};

@@ -126,6 +126,6 @@ it('delivers the scheduler typed refusal to the next planner attempt without a s
   const { state, prompts } = await launch(false, 'retry');
   expect(state.status, state.failureReason).toBe('complete');
   expect(prompts).toHaveLength(2);
-  const facts = JSON.parse(prompts[1].split('# Plan retry facts\n')[1].split('\n')[0]);
-  expect(facts.unsatisfied).toContainEqual(expect.objectContaining({ id: 'stage_retry_to:review:retry_to', source: 'admission', detail: expect.stringContaining('missing repair route') }));
+  const facts = JSON.parse(prompts[1].split('# Dispatch admission facts\n')[1].split('\n')[0]);
+  expect(facts.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review', field: 'retry_to', message: expect.stringContaining('missing repair route') }));
 });

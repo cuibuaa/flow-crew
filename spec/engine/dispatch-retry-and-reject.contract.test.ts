@@ -1,7 +1,6 @@
 import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import '../test-support/policy-runtime.js';
 import { parse as parseYaml } from 'yaml';
-import { planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryRefusal } from '../../src/plan-retry-monotone.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
 /**
@@ -27,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { diagnoseEmptyDispatch, decideEmptyDispatchAction, buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
+import { buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from '../test-support/ready-setup.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
 import { createRun } from '../test-support/create-run.js';
@@ -135,79 +134,31 @@ const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1
 // =====================================================================================
 // FIX 1 — pure decision helpers
 // =====================================================================================
-describe('FIX 1 (pure) — diagnoseEmptyDispatch distinguishes transient flakes from genuine failures', () => {
-  it('no dispatch.yaml written → transient', () => {
-    const d = diagnoseEmptyDispatch(false, null, ['planner', 'qa']);
-    expect(d.transient).toBe(true);
-    expect(d.unknownRoles).toEqual([]);
-    expect(d.detail).toMatch(/No dispatch\.yaml/);
-  });
-  it('unparseable YAML → transient with parse detail', () => {
-    const d = diagnoseEmptyDispatch(true, 'stages:\n  - id: x\n  role: : : oops\n   bad indent', ['planner']);
-    expect(d.transient).toBe(true);
-    expect(d.detail).toMatch(/could not be parsed|no stages|schema-valid/);
-  });
-  it('parsed but empty list → transient', () => {
-    const d = diagnoseEmptyDispatch(true, 'stages: []', ['planner']);
-    expect(d.transient).toBe(true);
-    expect(d.detail).toMatch(/no stages/);
-  });
-  it('every stage names an unknown role → GENUINE (not transient), names the roles', () => {
-    const d = diagnoseEmptyDispatch(true, 'stages:\n  - id: a\n    role: wizard\n  - id: b\n    role: sorcerer', ['planner', 'qa']);
-    expect(d.transient).toBe(false);
-    expect(d.unknownRoles).toEqual(['"wizard"', '"sorcerer"']);
-    expect(d.detail).toContain('wizard');
-    expect(d.detail).toContain('Available roles: planner, qa');
-  });
-});
-
-describe('FIX 1 (pure) — decideEmptyDispatchAction retries under budget, escalates with specifics after', () => {
-  const transient = { detail: 'dispatch.yaml could not be parsed', unknownRoles: [], transient: true };
-  const genuine = { detail: 'every stage referenced an unknown role: "wizard"', unknownRoles: ['"wizard"'], transient: false };
-
-  it('transient flake under budget → RETRY (not fatal)', () => {
-    const a = decideEmptyDispatchAction(transient);
-    expect(a.action).toBe('retry');
-    if (a.action === 'retry') {
-      expect(a.detail).toContain('could not be parsed');
-    }
-  });
-  it('genuine unknown-role failure → ESCALATE IMMEDIATELY (fail faster), prefer escalated, name the roles', () => {
-    const a = decideEmptyDispatchAction(genuine); // budget remaining, but genuine → no retry
-    expect(a.action).toBe('escalate');
-    if (a.action === 'escalate') {
-      expect(a.status).toBe('escalated');
-      expect(a.unknownRoles).toEqual(['"wizard"']);
-      expect(a.reason).toContain('wizard');
-    }
-  });
-});
-
 describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-prompt', () => {
-  it('preserves valid work and evidence while permitting invalid partial work to be redone', () => {
+  it('renders recorded retry facts without scheduler advice', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(runRecordPath(rd, 'stages', 'work'), { recursive: true });
     writeFileSync(runRecordPath(rd, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'command failed' }));
     const prompt = buildRetryPreamble(1, 1000, rd, 'work');
-    expect(prompt).toContain('Preserve valid work and recorded evidence');
-    expect(prompt).toContain('complete the admitted duties within the current scope and immutable deadline');
+    expect(prompt.split('\n')).toHaveLength(2);
+    expect(prompt).not.toContain('Preserve valid work');
     expect(JSON.parse(prompt.split('\n')[1])).toMatchObject({ stageId: 'work', attemptIndex: 2, budgetMs: 1000, previousError: 'command failed', ledgerPath: runRecordPath(rd, 'evidence-ledger.jsonl') });
   });
 
-  it('emits structured dispatch refusal facts and the replacement duty without reprinting the schema', () => {
+  it('emits the recorded dispatch refusal without replacement advice or schema duplication', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(runRecordPath(rd, 'stages', 'plan'), { recursive: true });
     writeFileSync(runRecordPath(rd, 'stages', 'plan', 'status.json'),
       JSON.stringify({ status: 'pending', retries: 1, admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
     writeFileSync(runRecordPath(rd, 'dispatch.yaml'), 'stages: []');
-    recordPlanRetryRefusal({ runDirPath: rd, prepared: preparePlanRetryCandidate({ runDirPath: rd, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3,
-      unsatisfied: [planRetryRequirement({ code: 'role_unknown', field: 'role', stageId: 'cast', message: 'Unknown role wizard; available roles: planner.' })] });
+    writeFileSync(runRecordPath(rd, 'dispatch_admission.json'), JSON.stringify({ version: 1, pass: false,
+      errors: [{ code: 'role_unknown', field: 'role', stageId: 'cast', message: 'Unknown role wizard; available roles: planner.' }], warnings: [] }));
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
     expect(p).toContain('# RE-PLAN facts');
     expect(JSON.parse(p.split('\n')[1])).toMatchObject({ stageId: 'plan', attemptIndex: 2, budgetMs: 1000, dispatchPath: runRecordPath(rd, 'dispatch.yaml') });
     expect(p).toContain('wizard');
     expect(p).not.toMatch(/dispatch\.yaml interface/);
-    const admission = JSON.parse(p.split('# Plan retry facts\n')[1].split('\n')[0]);
-    expect(admission.unsatisfied).toContainEqual({ id: 'role_unknown:cast:role', detail: 'Unknown role wizard; available roles: planner.', source: 'admission' });
-    expect(p).toContain('complete replacement');
+    const admission = JSON.parse(p.split('# Dispatch admission facts\n')[1].split('\n')[0]);
+    expect(admission.errors).toContainEqual({ code: 'role_unknown', stageId: 'cast', field: 'role', message: 'Unknown role wizard; available roles: planner.' });
+    expect(p).not.toContain('complete replacement');
     expect(p).not.toMatch(/continue from where you left off/);
   });
 });

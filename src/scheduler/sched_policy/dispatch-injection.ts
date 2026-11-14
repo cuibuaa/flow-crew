@@ -74,11 +74,11 @@ export function inspectDispatchProposal(
       continue;
     }
     if (seenIds.has(item.id as string)) {
-      skippedReasons.push(admissionError('stage_id_duplicate', `${item.id}: duplicate stage ID; rename this stage to a unique ID and update its dependency references`, 'id', String(item.id)));
+      skippedReasons.push(admissionError('stage_id_duplicate', `${item.id}: duplicate stage ID`, 'id', String(item.id)));
       continue;
     }
     if (!roleRegistry.has(item.role as string)) {
-      skippedReasons.push(admissionError('stage_role_unknown', `${item.id}: unknown role "${item.role}"; replace it with one of the available configured roles`, 'role', String(item.id)));
+      skippedReasons.push(admissionError('stage_role_unknown', `${item.id}: unknown role "${item.role}"`, 'role', String(item.id)));
       continue;
     }
     // Map task: to prompt_template:
@@ -147,6 +147,7 @@ export function inspectDispatchProposal(
     baseStages: sorted,
     dispatchStageId,
     research: state.research,
+    state,
     criteria: effectiveCriteria,
     criterionDischarges: validatedCriterionDischarges(runDirPath, state, effectiveCriteria?.briefDigest),
     projectDir,
@@ -241,7 +242,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         reason: state.decisionGraph!.replan!.reason,
         stages: candidate.map(stage => prior.find(old => old.id === stage.id && JSON.stringify(old) === JSON.stringify(stage)) ?? stage),
       }, parseStage: parseDispatchedStageConfig, admit: (stages, latest) => {
-        const report = services.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId, research: latest.research, projectDir, runDir: runDirPath,
+        const report = services.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId, research: latest.research, state: latest, projectDir, runDir: runDirPath,
           criteria: readBriefCriteriaForAdmission(runDirPath),
         });
         return { pass: report.pass, errors: report.errors.map(error => error.message) };

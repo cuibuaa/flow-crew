@@ -32,7 +32,7 @@ Parser field names are listed exactly.
 | `max_iterations` | 5 | Workflow iteration limit; also bounds unfinished slices unless the brief declares `max_continuations` |
 | `gate_retry_loops` | 3 | Gate repair-loop bound |
 | `stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |
-| `plan_stage_retries` | 2 | Re-prompts for an empty or invalid injected plan |
+| `plan_stage_retries` | 2 | Run-wide admission refusal allowance: at most 1 + this value rejected proposals; the first ceiling persists across revisions and resume |
 | `scheduler_heartbeat_interval_ms` | 2000 | Scheduler progress publication cadence |
 | `scheduler_stall_threshold_ms` | 120000 | Nonadvancing scheduler warning threshold |
 | `scheduler_stall_observer_poll_ms` | 5000 | Independent observer polling cadence |
