@@ -71,7 +71,7 @@ async function run(
   const state = await runPreparedWorkflow(
     config, raw, projectDir, adapter, new Map(), undefined,
     join(PROJECT_ROOT, 'config', 'agents'), undefined, brief,
-    true, undefined, false,
+    true, undefined,
   );
   const runDir = join(fcHome, 'runs', state.runId!);
   let guidance = '';
@@ -185,7 +185,7 @@ terminal_states:
     paths: [docs/task_summary.md]
 ---
 # Resume the admitted old-engine run
-`, true, undefined, false,
+`, true, undefined,
     );
 
     const imports = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
@@ -302,7 +302,7 @@ ${mode === 'configured' ? '    stage_glob: docs/stage_*_verdict.md\n' : ''}    f
   });
 
   it('terminal evaluation refuses a missing baseline with a typed reason', async () => {
-    const evaluator = createTerminalEvaluator({ writeCampaignEntry: () => {}, concludeRepeatedBlockage: () => null });
+    const evaluator = createTerminalEvaluator({ writeCampaignEntry: () => {} });
     expect(await evaluator.tryTerminateOnTerminalState({ terminalStates: { shipped: { paths: ['result.md'] } }, stages: {} } as StoreState,
       { projectDir: project(), runDirPath: '/unused', runId: 'fixture', iteration: 1, stages: [] })).toMatchObject({ decision: 'deferred', reasonCode: 'artifact_ownership_unverified' });
   });
@@ -321,7 +321,7 @@ ${mode === 'configured' ? '    stage_glob: docs/stage_*_verdict.md\n' : ''}    f
     store.writeRunState(projectDir, created.runId, state);
     writeOld(join(projectDir, 'result.md'), 'terminal bytes');
     writeOld(join(projectDir, 'stage_1_verdict.md'), 'receipt bytes');
-    const evaluator = evaluatorFactory({ writeCampaignEntry: () => {}, concludeRepeatedBlockage: () => null });
+    const evaluator = evaluatorFactory({ writeCampaignEntry: () => {} });
     const ctx = { projectDir, runDirPath: created.runDirPath, runId: created.runId, iteration: 1, stages: [] };
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:00.000Z'));
     try {

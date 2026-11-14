@@ -318,7 +318,6 @@ describe('independent ledger convergence replay', () => {
     expect(obligations[0].observationId).toBe(transitions[0].observationId);
     expect(obligations[0].detail).toContain('terminal state is not acceptance');
     expect(readOperationalProjection(join(fixture.engineRoot, 'runs', fixture.runId), {
-      includeDrift: false,
     }).latestReason).toMatchObject({
       type: 'operator_wrap_up_required',
       historical: true,

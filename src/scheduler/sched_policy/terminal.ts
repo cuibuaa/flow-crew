@@ -1,10 +1,8 @@
 import { runRecordPath } from '../../run-layout.js';
 import { freshTerminalArtifact, ARTIFACT_OWNERSHIP_UNVERIFIED } from '../../terminal-artifact-status.js';
 import { concludeRun } from './run-completion.js';
-/** Terminal selection, floor/freshness/gate/reality enforcement and quiescent conclusion; receives campaign and escalation services. */
+/** Terminal selection, floor/freshness/gate/reality enforcement and quiescent conclusion; receives campaign publication. */
 import { type StoreState, isContinuingStage, RUN_STATUS, STAGE_STATUS, writeRunState, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
-import { createHash } from 'node:crypto';
-import { updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -15,7 +13,7 @@ import { log } from '../sched_admission/shared.js';
 
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
+import { appendSchedulerGuidanceOnce } from './guidance.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { withAdmittedExecution } from '../../engine-integrity.js';
@@ -27,7 +25,6 @@ import { parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/
 
 export interface TerminalEvaluationServices {
   writeCampaignEntry(projectDir: string, state: StoreState): void;
-  concludeRepeatedBlockage(state: StoreState, ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number }): StoreState | null;
 }
 
 export interface TerminalEvaluationContext {
@@ -86,7 +83,7 @@ function terminalDagHasNoRemainingTransition(
 export const RUN_VALIDATION_BASELINE_FILE = 'validation_baseline.json';
 
 export function createTerminalEvaluator(services: TerminalEvaluationServices) {
-  const { writeCampaignEntry, concludeRepeatedBlockage } = services;
+  const { writeCampaignEntry } = services;
 
   async function tryTerminateOnTerminalState(
     state: StoreState,
@@ -117,22 +114,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         })
       ));
       if (freshLogicalCandidates.length > 1) {
-        const evidence = createHash('sha256');
-        for (const candidate of freshLogicalCandidates.sort((left, right) => left.path.localeCompare(right.path))) {
-          evidence.update(`${candidate.terminalStatus}:${candidate.path}\n`, 'utf8');
-          try { updateFileHashSync(candidate.sources[0], evidence); } catch { evidence.update('<unreadable>', 'utf8'); }
-        }
         const detail = `multiple fresh terminal outcomes exist: ${freshLogicalCandidates.map((candidate) => `${candidate.terminalStatus}=${candidate.path}`).join(', ')}`;
-        const blockage = observeStableBlockage({
-          runDirPath: ctx.runDirPath,
-          kind: 'ambiguous_terminal_outcome',
-          detail,
-          evidenceDigest: evidence.digest('hex'),
-        });
-        if (blockage?.escalatedNow) {
-          const escalated = concludeRepeatedBlockage(state, ctx);
-          if (escalated) return { decision: 'matched', state: escalated, reasons: [] };
-        }
         for (const candidate of freshLogicalCandidates) {
           for (const source of candidate.sources) {
             quarantineTerminalCandidate(
@@ -144,7 +126,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         }
         appendSchedulerGuidanceOnce(
           ctx.runDirPath, RUN_WIDE_GUIDANCE_TARGET,
-          `[ambiguous-terminal:${blockage?.occurrence.fingerprint ?? 'unknown'}]`,
+          '[ambiguous-terminal]',
           `Terminal output rejected: ${detail}. Choose the single path matching the outcome that actually happened and write only that path.`,
         );
         return { decision: 'deferred', reasons: [detail] };

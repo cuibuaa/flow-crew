@@ -71,7 +71,7 @@ it('the same declaration with two bodies has identical admission, launch, valida
       return result;
     } };
     const state = await runWorkflow(workflow, '', project, adapter, new Map(), undefined,
-      join(import.meta.dirname, '../config/agents'), undefined, brief, true, undefined, true, admission);
+      join(import.meta.dirname, '../config/agents'), undefined, brief, true, undefined, admission);
     expect(state.status, state.failureReason).toBe('complete');
     expect(scripted.calls.map(call => call.stageId)).toEqual(['author', 'assess', 'review']);
     expect(state.decisionGraph?.records).toContainEqual(expect.objectContaining({ stageId: 'assess', successor: 'review', outcome: 'chosen' }));

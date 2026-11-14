@@ -417,7 +417,7 @@ it.each([false, true])('settles declared allowance handoffs without measuring un
     return { exitCode: 0, output: delivered, duration_ms: 1 };
   } };
   const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-  const result = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, undefined, text, true, undefined, true, undefined,
+  const result = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, undefined, text, true, undefined, undefined,
     () => { time = manualClock(); return time.clock; });
   const journal = researchInstrumentState(runDir(project, result.runId));
   expect(result.status).toBe(exhausted ? 'incomplete' : 'complete');

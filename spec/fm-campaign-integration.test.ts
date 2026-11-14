@@ -4,7 +4,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { findAllReady, parseDispatchedStageConfig, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
+import { findAllReady, parseDispatchedStageConfig, StageConfigSchema } from '../src/scheduler.js';
 import { createReadyFinder } from '../src/scheduler/sched_admission/frontier.js';
 import { summarizeCampaignPhaseProgress, readCampaignEntries } from '../src/campaigns.js';
 import type { StoreState, StageStatus } from '../src/store.js';
@@ -16,7 +16,7 @@ import type { StoreState, StageStatus } from '../src/store.js';
  *   Phase 1: Literature survey → find promising FM approaches
  *   Phase 2: Benchmark on ADBench → beat SOTA or fine-tune → pivot if stuck
  *
- * Tests the planner prompt assembly, campaign phase tracking, pivot injection,
+ * Tests the planner prompt assembly, campaign phase tracking, declared exploration,
  * and resume behavior. Agent execution is mocked — focus is on orchestration stability.
  */
 
@@ -93,8 +93,7 @@ describe('FM Anomaly Detection Campaign — Multi-Phase Orchestration', () => {
     it('planner prompt contains phase discipline instructions', () => {
       const plannerYaml = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
       expect(plannerYaml).toContain('Respect phase prerequisites');
-      expect(plannerYaml).toContain('Dispatch one phase when campaign history must record every phase');
-      expect(plannerYaml).toContain('otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff');
+      expect(plannerYaml).toContain('phase prerequisites declared in the brief and its inputs');
       expect(plannerYaml).toContain('Revisit mechanisms when the goal or evidence calls for replication or retuning');
     });
 
@@ -222,28 +221,6 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       expect(progress.currentPhase).toBe('phase_2');
     });
 
-    it('planner sees "Current recommended phase: phase_2" in campaign context', () => {
-      writeCampaignEntry({
-        runId: 'run-001', seq: 1, iteration: 1,
-        gate: 'phase1_gate', pass: true, score: 3, metric: 'approaches_found', threshold: 3,
-        phase: 'phase_1', phaseComplete: true, nextPhase: 'phase_2',
-      });
-
-      const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const progress = summarizeCampaignPhaseProgress(entries);
-
-      // This is what the scheduler injects into the planner prompt
-      let ctx = '';
-      if (progress.entries.length > 0) {
-        ctx += `Phase progress:\n`;
-        ctx += `- Completed phases: ${progress.completedPhases.join(', ')}\n`;
-        ctx += `- Current recommended phase: ${progress.currentPhase}\n`;
-      }
-
-      expect(ctx).toContain('Completed phases: phase_1');
-      expect(ctx).toContain('Current recommended phase: phase_2');
-    });
-
     it('Phase 2 dispatch includes benchmark stages, not research', () => {
       const plannerOutput = `# Technical Solution — Phase 2
 
@@ -308,22 +285,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       expect(progress.completedPhases).not.toContain('phase_2');
     });
 
-    it('repeated failures trigger campaign health alert', () => {
-      // Phase 1 complete
-      writeCampaignEntry({ runId: 'run-001', seq: 1, gate: 'phase1_gate', pass: true, phase: 'phase_1', phaseComplete: true, nextPhase: 'phase_2' });
-      // 3 consecutive Phase 2 failures
-      writeCampaignEntry({ runId: 'run-002', seq: 2, gate: 'phase2_gate', pass: false, score: 1, metric: 'categories_beaten', threshold: 3 });
-      writeCampaignEntry({ runId: 'run-003', seq: 3, gate: 'phase2_gate', pass: false, score: 1, metric: 'categories_beaten', threshold: 3 });
-      writeCampaignEntry({ runId: 'run-004', seq: 4, gate: 'phase2_gate', pass: false, score: 2, metric: 'categories_beaten', threshold: 3 });
-
-      const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const alert = checkCampaignHealth(entries as any);
-
-      expect(alert).not.toBeNull();
-      expect(alert!.type).toBe('repeated_failure');
-    });
-
-    it('pivot injects researcher role for alternative exploration', () => {
+    it('admits a declared researcher role for alternative exploration', () => {
       // After pivot trigger, planner should dispatch a researcher stage
       const plannerOutputAfterPivot = `# Technical Solution — Pivot
 
@@ -425,7 +387,7 @@ Injecting research to explore alternative approaches.
       if (existsSync(f)) rmSync(f);
     });
 
-    it('full lifecycle: Phase 1 → Phase 2 (fail) → fine-tune → pivot → success', () => {
+    it('stores a multi-phase lifecycle with failed reviews and later success', () => {
       // Iteration 1: Phase 1 passes
       writeCampaignEntry({
         runId: 'run-001', seq: 1, iteration: 1,
@@ -455,10 +417,7 @@ Injecting research to explore alternative approaches.
         phase: 'phase_2', phaseComplete: false,
       });
 
-      // At this point, campaign health should trigger pivot
       let entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      let alert = checkCampaignHealth(entries as any);
-      expect(alert).not.toBeNull();
 
       // Iteration 5: After pivot — researcher finds alternative, new approach succeeds
       writeCampaignEntry({

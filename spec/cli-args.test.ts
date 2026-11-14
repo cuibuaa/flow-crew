@@ -90,7 +90,7 @@ describe('declarative command grammar', () => {
       } else {
         const value = key === 'poll' ? '1' : sampleValue(option);
         expect(parseCommandArgs(name, [...rest, `${flag}=${value}`]).values.get(flag)).toBe(value);
-        if (!option.equalsOnly && !option.optional) {
+        if (!option.optional) {
           expect(parseCommandArgs(name, [...rest, flag, value]).values.get(flag)).toBe(value);
         }
         if (option.optional) expect(parseCommandArgs(name, [...rest, flag]).flags.has(flag)).toBe(true);
@@ -125,8 +125,9 @@ describe('declarative command grammar', () => {
     }
     expect(parseCommandArgs('clean', ['--keep=0']).values.get('--keep')).toBe('0');
     expect(() => parseCommandArgs('quick', ['--timeout=100'])).toThrow(/removed.*stage_duration_ms/);
-    expect(() => parseCommandArgs('quick', ['--campaign-context', 'skip'])).toThrow(/syntax/);
-    expect(parseCommandArgs('quick', ['--campaign-context=skip']).values.get('--campaign-context')).toBe('skip');
+    expect(() => parseCommandArgs('quick', ['--campaign-context', 'skip'])).toThrow(/unknown quick option/);
+    expect(() => parseCommandArgs('quick', ['--campaign-context=skip'])).toThrow(/unknown quick option/);
+    expect(() => parseCommandArgs('quick', ['--no-inherit-campaign'])).toThrow(/unknown quick option/);
   });
 
   it('preserves option values beginning with hyphens, including YAML briefs', () => {

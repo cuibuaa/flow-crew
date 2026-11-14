@@ -6,9 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import {
-  checkCampaignHealth,
   recoverTerminalStudyCompletion,
-  type CampaignEntry,
 } from '../src/scheduler.js';
 import { runDir, readRunState, writeRunState, type StoreState } from '../src/store.js';
 
@@ -23,20 +21,6 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(projectDir, { recursive: true, force: true });
-});
-
-describe('campaign health after a pivot', () => {
-  it('recovery — after successful pivot, campaign health resets', () => {
-    const entries: CampaignEntry[] = [
-      { seq: 1, runId: 'r1', score: 80, metric: 'acc', gate: 'eval', pass: false, timestamp: '2024-01-01T00:00:00Z' },
-      { seq: 2, runId: 'r2', score: 75, metric: 'acc', gate: 'eval', pass: false, timestamp: '2024-01-02T00:00:00Z' },
-      { seq: 3, runId: 'r3', score: 70, metric: 'acc', gate: 'eval', pass: false, timestamp: '2024-01-03T00:00:00Z' },
-      { seq: 4, runId: 'r4', score: 90, metric: 'acc', gate: 'eval', pass: true, timestamp: '2024-01-04T00:00:00Z' },
-      { seq: 5, runId: 'r5', score: 92, metric: 'acc', gate: 'eval', pass: true, timestamp: '2024-01-05T00:00:00Z' },
-    ];
-    const alert = checkCampaignHealth(entries);
-    expect(alert).toBeNull();
-  });
 });
 
 describe('terminal study completion contract', () => {
@@ -74,13 +58,6 @@ describe('terminal study completion contract', () => {
         triggeredAt: '2026-05-04T00:00:00.000Z',
         iteration: 11,
       },
-      researchInjection: {
-        source: 'campaign_health',
-        triggeredAt: '2026-05-04T00:00:00.000Z',
-        iteration: 11,
-        alertType: 'regression',
-        message: '2 consecutive score declines',
-      },
     };
     // Recovery concludes an existing run under its state lock, as in the engine.
     writeRunState(projectDir, runId, state);
@@ -88,8 +65,7 @@ describe('terminal study completion contract', () => {
 
     expect(recovered?.status).toBe('complete');
     expect(recovered?.stages[gateId].status).toBe('complete');
-    expect(recovered?.campaignAlert).toBeUndefined();
-    expect(recovered?.researchInjection).toBeUndefined();
+    expect(recovered?.campaignAlert).toEqual(state.campaignAlert);
     expect(readRunState(projectDir, runId).status).toBe('complete');
   });
 

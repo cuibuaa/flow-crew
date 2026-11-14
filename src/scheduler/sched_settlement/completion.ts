@@ -106,8 +106,6 @@ export async function recoverTerminalStudyCompletion(
     writeTerminalStudyCompletionArtifacts(projectDir, runId, gateId, evidence);
     const next: StoreState = {
       ...state,
-      campaignAlert: undefined,
-      researchInjection: undefined,
       stages: { ...state.stages },
     };
     next.stages[gateId] = { ...(next.stages[gateId] ?? { retries: 0 }), status: STAGE_STATUS.COMPLETE, retries: next.stages[gateId]?.retries ?? 0 };

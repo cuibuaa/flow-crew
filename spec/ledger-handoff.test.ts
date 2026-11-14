@@ -133,8 +133,8 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     const repair = StageConfigSchema.parse({ id: 'repair', role: 'coder', scope: [], retry_to: ['gate'],
       artifact_contract: fixtureArtifactContract('repair') });
     const state = readRunState(project, created.runId);
-    state.researchInjection = { source: 'campaign_health', triggeredAt: new Date().toISOString(),
-      iteration: 1, alertType: 'plateau', message: 'EARLIER_APPROACH_NARRATIVE_SENTINEL' };
+    Object.assign(state, { researchInjection: { source: 'campaign_health', triggeredAt: new Date().toISOString(),
+      iteration: 1, alertType: 'plateau', message: 'EARLIER_APPROACH_NARRATIVE_SENTINEL' } });
     const inputs: string[] = [];
     const adapter: Adapter = { async run(user) {
       inputs.push(user);

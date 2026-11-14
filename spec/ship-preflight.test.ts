@@ -277,8 +277,8 @@ describe('ship-preflight previous-run fact', () => {
   });
 });
 
-describe('ship-preflight campaign hygiene fact', () => {
-  it('honours explicit precedence and suggests a context reset after three adverse recent endings', async () => {
+describe('ship-preflight campaign history fact', () => {
+  it('honours explicit campaign precedence and reports history totals', async () => {
     const reader = vi.fn(() => [
       { seq: 1, runId: 'one', kind: 'task_started', pass: false, timestamp: 'a' },
       { seq: 2, runId: 'one', kind: 'task_ended', status: 'failed', pass: false, timestamp: 'b' },
@@ -299,13 +299,12 @@ describe('ship-preflight campaign hygiene fact', () => {
       storageKey: 'chosen-line',
       totalEntries: 5,
       totalEnded: 4,
-      recentEnded: 4,
-      recentAdverse: 3,
-      suggestContextSkip: true,
     });
+    expect(result.report.campaign).not.toHaveProperty('suggestContextSkip');
+    expect(result.report.campaign).not.toHaveProperty('recentAdverse');
   });
 
-  it('does not suggest a reset for clean repository history', async () => {
+  it('reports repository campaign history without a context recommendation', async () => {
     const clean = await collectShipPreflight(['ship-preflight'], commonDeps({
       readCampaignEntries: () => [
         { seq: 1, runId: 'one', kind: 'task_ended', status: 'complete', pass: true, timestamp: 'a' },
@@ -313,7 +312,7 @@ describe('ship-preflight campaign hygiene fact', () => {
       ],
     }));
     expect(clean.report.campaign).toMatchObject({
-      state: 'resolved', source: 'repository', storageKey: 'project', recentAdverse: 0, suggestContextSkip: false,
+      state: 'resolved', source: 'repository', storageKey: 'project', totalEntries: 2, totalEnded: 2,
     });
   });
 

@@ -83,7 +83,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
     return fixtureResult({ output: `${opts.stageId} settled`, exitCode: 0, duration_ms: 1 }, opts);
   } };
   const state = await runWorkflow(workflow, stringify(workflow), projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir,
-    undefined, '---\ninputs: [{path: input.txt, frozen: true}]\n---\n# Clean up the report\nKeep `input.txt` frozen.\n', true, undefined, false);
+    undefined, '---\ninputs: [{path: input.txt, frozen: true}]\n---\n# Clean up the report\nKeep `input.txt` frozen.\n', true, undefined);
   const directory = runDir(projectDir, state.runId);
   return { state, plans, repairs, reviews, pendingDigest, firstAuthorAudit, directory,
     events: readRunEvents(projectDir, state.runId), log: existsSync(runRecordPath(directory, 'iteration_log.md')) ? readFileSync(runRecordPath(directory, 'iteration_log.md'), 'utf8') : '' };

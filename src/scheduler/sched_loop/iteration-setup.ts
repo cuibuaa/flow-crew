@@ -1,16 +1,14 @@
 import { runRecordPath } from '../../run-layout.js';
-// Boundary: Consume settled terminal signals and reset the iteration DAG with immutable obligation/evidence retirement and campaign health projections.
+// Boundary: Consume settled terminal signals and reset the iteration DAG with immutable obligation/evidence retirement and campaign identity.
 import { Adapter } from '../../adapters/base.js';
-import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
-import { recordRunEvent } from '../../run-events.js';
+import { resolveCampaignStorageKey } from '../../campaigns.js';
 import { type StageConfig, normalizeStageContracts } from '../sched_admission/configuration.js';
 import { restoreAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
 import { log } from '../sched_admission/shared.js';
-import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { deriveCriterionDischarges } from '../sched_settlement/gate-verdict.js';
 import { STAGE_STATUS, StoreState, isContinuingStage, captureStageEvidence, isTerminalRunStatus, readRunState, rependStageStatus, requireKnownRunStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
-import { concludeRepeatedBlockage, tryTerminateOnTerminalState } from './services.js';
+import { tryTerminateOnTerminalState } from './services.js';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,14 +47,6 @@ export async function prepareWorkflowIteration(
     // Exit if run was cancelled externally or already terminated
     if (isTerminalRunStatus(state.status)) {
       return { kind: 'settled', state };
-    }
-
-    const repeatedBlockage = concludeRepeatedBlockage(
-      state,
-      { projectDir, runId, runDirPath, iteration },
-    );
-    if (repeatedBlockage) {
-      return { kind: 'settled', state: repeatedBlockage };
     }
 
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
@@ -192,46 +182,6 @@ export async function prepareWorkflowIteration(
 
       // Re-write workflow.yaml to base stages only
       writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
-    }
-    // Campaign health check: inject researcher if regression/plateau detected
-    if (campaignStorageKey && iteration > 1) {
-      const entries = readCampaignEntries(projectDir, campaignStorageKey);
-      const alert = checkCampaignHealth(entries);
-      if (alert) {
-        const triggeredAt = new Date().toISOString();
-        state.campaignAlert = {
-          ...alert,
-          source: 'campaign_health',
-          triggeredAt,
-          iteration,
-        };
-        state.researchInjection = {
-          source: 'campaign_health',
-          triggeredAt,
-          iteration,
-          alertType: alert.type,
-          message: alert.message,
-        };
-        writeRunState(projectDir, runId, state);
-        recordRunEvent(projectDir, runId, {
-          type: 'campaign_alert',
-          runId,
-          timestamp: triggeredAt,
-          iteration,
-          detail: `${alert.type}: ${alert.message}`,
-        });
-        recordRunEvent(projectDir, runId, {
-          type: 'research_injected',
-          runId,
-          timestamp: triggeredAt,
-          iteration,
-          detail: `${alert.type}: ${alert.message}`,
-        });
-        log.info({ runId, alert: alert.type }, 'Campaign health alert — researcher will be injected via planner context');
-      } else if (state.campaignAlert) {
-        state.campaignAlert = undefined;
-        writeRunState(projectDir, runId, state);
-      }
     }
   return {kind: 'ready', state, sorted, injectedDispatchStages};
 }

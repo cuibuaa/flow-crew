@@ -4,20 +4,17 @@ import { Adapter } from '../../adapters/base.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
-import { observeStableBlockage } from '../sched_policy/guidance.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { allDone, anyFailed } from '../sched_scope/stage-group.js';
 import { guardPlainCompletionWithStageObligations, reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
-import { archiveRejectedGateRuntimeFacts, canonicalGateRoundArtifactDir, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
+import { archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { loadGateContract } from '../sched_settlement/gate-contract.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
-import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
+import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 export type IterationDisposition = {kind: 'settled' | 'next-iteration' | 'continue'; state: StoreState};
 export async function concludeWorkflowIteration(
@@ -147,42 +144,6 @@ export async function concludeWorkflowIteration(
         gateArchiveCoordinate(iteration, innerRetriesUsed + 1),
         stableGateFacts,
       );
-      for (const evaluation of stableGateFacts.evaluations) {
-        if (evaluation.effectiveVerdict?.pass !== false) continue;
-        observeStableBlockage({
-          runDirPath,
-          kind: 'gate_rejection',
-          stageId: evaluation.id,
-          detail: evaluation.effectiveVerdict.reason ?? 'gate rejected without a reason',
-          evidenceDigest: createHash('sha256')
-            .update(JSON.stringify(evaluation.effectiveVerdict), 'utf8')
-            .digest('hex'),
-          repairDigest: (() => {
-            if (innerRetriesUsed < 1) return undefined;
-            const path = join(
-              canonicalGateRoundArtifactDir(
-                runDirPath,
-                gateArchiveCoordinate(iteration, innerRetriesUsed),
-              ),
-              'repair_diff.json',
-            );
-            try {
-              const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-              if (!Array.isArray(parsed.files)) return undefined;
-              return createHash('sha256')
-                .update(JSON.stringify(parsed.files), 'utf8')
-                .digest('hex');
-            } catch { return undefined; }
-          })(),
-        });
-      }
-      const repeatedGate = concludeRepeatedBlockage(
-        state,
-        { projectDir, runId, runDirPath, iteration },
-      );
-      if (repeatedGate) {
-        return { kind: 'settled', state: repeatedGate };
-      }
     }
 
     // Exhausted admitted work stops; only successful work advances above.

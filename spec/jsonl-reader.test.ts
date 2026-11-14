@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readCampaignEntries } from '../src/campaigns.js';
 import { readOperatorEvents, readOperationalProjection } from '../src/cli-events.js';
-import { readRunDriftProjection } from '../src/run-drift.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { SessionPush } from '../src/session-push.js';
 import { createRun } from './test-support/create-run.js';
@@ -137,7 +136,7 @@ describe('tolerant shared JSONL reader', () => {
     expect(registry.get(second.id)?.name).toBe('second');
   });
 
-  it('keeps the same event history through operator, drift, fenced state and session readers with a torn tail', () => {
+  it('keeps the same event history through operator, fenced state and session readers with a torn tail', () => {
     const projectDir = join(tempDir, 'project');
     mkdirSync(projectDir);
     const { runId, runDirPath } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
@@ -147,13 +146,9 @@ describe('tolerant shared JSONL reader', () => {
     const admission = readOperatorEvents(runDirPath);
     expect(admission).toEqual([expect.objectContaining({ lifecycleVersion: 1, runStatus: 'running' })]);
     appendFileSync(path, `${JSON.stringify(event)}\n`);
-    const drift = () => readRunDriftProjection(runDirPath).rows.find(row => row.id === 'first_plan_admission');
-    expect(drift()?.value).toBe('rejected');
-    const before = drift();
     appendFileSync(path, '{"type":');
     expect(readOperatorEvents(runDirPath)).toEqual([...admission, event]);
-    expect(readOperationalProjection(runDirPath, { includeDrift: false }).sourceCoverage.events).toBe('read');
-    expect(drift()).toEqual(before);
+    expect(readOperationalProjection(runDirPath, {}).sourceCoverage.events).toBe('read');
     const view = readRunStateView(projectDir, runId);
     expect(view.run.status).toBe(admission[0].runStatus);
     expect(view.events).toEqual({ rows: [...admission, event], malformedRecords: 1 });

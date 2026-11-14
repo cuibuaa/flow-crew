@@ -36,7 +36,6 @@ export interface TaskLaunchOptions {
   maxIterations?: number;
   campaign?: string;
   noCampaign?: boolean;
-  campaignContext?: 'inherit' | 'skip';
 }
 
 export const DEFAULT_MAX_ATTEMPTS = 2;
@@ -50,8 +49,6 @@ export function normalizeLaunchOptions(args: string[]): TaskLaunchOptions {
     else if (flag === '--max-iterations') launch.maxIterations = Number(value());
     else if (flag === '--campaign') launch.campaign = value();
     else if (flag === '--no-campaign') launch.noCampaign = true;
-    else if (flag === '--campaign-context') launch.campaignContext = value() as 'inherit' | 'skip';
-    else if (flag === '--no-inherit-campaign') launch.campaignContext = 'skip';
     else if (['--timeout', '--existing-run-id', '--task', '--brief-input-base64', '--project', '--brief-admission-record'].includes(flag)) value();
   }
   return launch;

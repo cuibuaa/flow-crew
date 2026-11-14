@@ -169,7 +169,7 @@ async function finishWorkflowBeforeExpiry(stageId: 'work' | 'review', maxIterati
     return withRemaining(completed(opts, 'Both units and all assigned checks are complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
-    undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
   return { result, calls };
 }
 describe('authored completion at the budget boundary', () => {
@@ -301,7 +301,7 @@ describe('cause-owned budget handoff', () => {
     const { roles, workflow } = workflowFixture(3);
     const run = vi.fn();
     await expect(runWorkflow(workflow, stringify(workflow), project, { run }, new Map(), undefined, roles,
-      undefined, '---\nmax_continuations: -1\n---\n# Task', false, undefined, false)).rejects.toThrow('max_continuations');
+      undefined, '---\nmax_continuations: -1\n---\n# Task', false, undefined)).rejects.toThrow('max_continuations');
     expect(run).not.toHaveBeenCalled();
   });
 });
@@ -323,7 +323,7 @@ it('SI typed provider quota parks without retries and resumes the same stage aft
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const run = (existing?: string) => runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-    existing, undefined, false, undefined, false);
+    existing, undefined, false, undefined);
   const parked = await run();
   expect(parked.status, parked.failureReason).toBe('parked');
   expect(calls).toEqual(['done', 'work']);
@@ -354,7 +354,7 @@ it.each([true, false])('SI process deaths are bounded separately from repeated w
       : withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-    undefined, undefined, false, undefined, false);
+    undefined, undefined, false, undefined);
   expect(calls.filter(id => id === 'work')).toHaveLength(2);
   expect(result.stages.work.attempts).toHaveLength(2);
   expect(result.stages.work.attempts!.every(attempt => attempt.endingCause === (crash ? 'process_death' : 'work_failed'))).toBe(true);
@@ -372,7 +372,7 @@ it('SI verified success after provider cleanup is complete and never starts a cr
       ...(opts.stageId === 'work' ? { processSignal: 'SIGKILL' as const, processExitCode: null } : {}) };
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-    undefined, undefined, false, undefined, false);
+    undefined, undefined, false, undefined);
   expect(result.status, result.failureReason).toBe('complete');
   expect(calls).toEqual(['done', 'work', 'review']);
   expect(result.stages.work.attempts).toHaveLength(1);
@@ -397,7 +397,7 @@ it.each([false, true])('SI a gate rejection cannot spend another attempt on a de
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter, 20_000), new Map(), undefined, roles,
-    undefined, undefined, false, undefined, false, undefined, () => manualClock().clock);
+    undefined, undefined, false, undefined, undefined, () => manualClock().clock);
   expect(calls).toEqual(repairDiscovers ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review']);
   expect(result.status, result.failureReason).toBe('incomplete');
   expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed).toHaveLength(1);
@@ -477,7 +477,7 @@ it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
     if(opts.stageId==='review' && !calls.includes('repair')) return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'Renderer gap accepted under criteria; independently reproduced text typo must be fixed.',criteria:{[refs[0]]:{status:'pass',evidence:'The stated optional renderer gap is accepted using delivered textual evidence.'},[refs[1]]:{status:'fail',evidence:'work.txt contains wrong text.'}},audit_findings:{version:1,findings:[{id:'text_typo',paths:['work.txt'],reason:'Text is wrong; renderer is unrelated.',criterion_ids:[refs[1]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'Repair work.txt only; no renderer invocation or gap reopening.'}})};
     return withRemaining(completed(opts,'Complete.'),[]);
   }};
-  const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
+  const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,undefined,()=>manualClock().clock);
   expect(calls).toEqual(['done','work','text','review','repair','review']);
   expect(result.status).toBe('complete');
   expect(readFileSync(join(project,'work.txt'),'utf8')).toBe('correct text');
@@ -530,7 +530,7 @@ it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMappin
   if(opts.stageId==='review')return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'The renderer is absent; text is correct.',criteria:{[refs[0]]:{status:'fail',evidence:'Renderer unavailable.'},[refs[1]]:{status:'pass',evidence:'Correct text exists.'}},audit_findings:{version:1,findings:[{id:'missing_renderer',paths:['renderer'],reason:'Same renderer capability missing.',criterion_ids:[refs[0]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'The renderer is absent.'}})};
   return withRemaining(completed(opts,'Complete.'),[]);
  }};
- const result=await runWorkflow(workflow,stringify(workflow),project,withRendererReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
+ const result=await runWorkflow(workflow,stringify(workflow),project,withRendererReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,undefined,()=>manualClock().clock);
  expect(rendererProbes).toEqual(['work']);
  expect(calls).toEqual(['done','work','text','review']);
  expect(result.status).toBe('incomplete');
@@ -568,7 +568,7 @@ it.each([
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
-    undefined, undefined, false, undefined, false, undefined, () => manualClock().clock);
+    undefined, undefined, false, undefined, undefined, () => manualClock().clock);
   expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed ?? []).toHaveLength(sameGap ? 1 : 0);
   expect(calls).toEqual(sameGap ? ['done', 'work', 'review'] : ['done', 'work', 'review', 'repair', 'review']);
   expect(result.status, result.failureReason).toBe('incomplete');
@@ -612,7 +612,7 @@ it('SI gap path scope reports unknown blocked criterion ids to the gate', async 
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
-    undefined, brief, false, undefined, false, undefined, () => manualClock().clock);
+    undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(gateSawFact).toBe(true);
   expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
   expect(result.stages.repair.attempts ?? []).toHaveLength(1);
@@ -697,7 +697,7 @@ describe('retained contracts under declared allowances', () => {
         }
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
    expect(calls).toEqual(['done:1', 'work:1', 'work:2', 'review:1']);
@@ -716,7 +716,7 @@ describe('retained contracts under declared allowances', () => {
         expect(opts.timeout_ms).toBeUndefined();
         return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(budget); });
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status).toBe('incomplete');
     expect(result.failureReason).toContain('iteration budget');
     expect(result.currentIteration).toBe(2);
@@ -787,7 +787,7 @@ describe('retained contracts under declared allowances', () => {
           expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('retained dynamic work');
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
    expect(calls).toEqual(['work:1', 'work:2', 'review:1']);
@@ -820,7 +820,7 @@ describe('retained contracts under declared allowances', () => {
         }
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
     expect(reviews).toBe(2);
@@ -893,7 +893,7 @@ describe('retained contracts under declared allowances', () => {
       return withRemaining(completed(opts, 'Complete.'), []);
     } };
     const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-      undefined, allowanceBrief(), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+      undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
    expect(calls).toEqual(['done', 'work', 'review']);
     expect(result.status, result.failureReason).toBe(accept ? 'complete' : 'escalated');
     expect(result.stages.work.attempts).toHaveLength(1);
@@ -915,7 +915,7 @@ describe('retained contracts under declared allowances', () => {
       return withRemaining(completed(opts, 'Complete.'), []);
     } };
     const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-      undefined, allowanceBrief(brief), false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+      undefined, allowanceBrief(brief), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     const attempts = declared === undefined ? 3 : declared + 1;
     expect(result.status).toBe('incomplete');
     expect(result.currentIteration).toBe(declared === undefined ? attempts : 1);
@@ -942,7 +942,7 @@ describe('retained contracts under declared allowances', () => {
       return { exitCode: 1, duration_ms: 1, output: 'Controlled work failure.' };
     } };
     const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-      undefined, allowanceBrief('---\nmax_continuations: 1\n---\n# Finish retained work.'), false, undefined, false, undefined,
+      undefined, allowanceBrief('---\nmax_continuations: 1\n---\n# Finish retained work.'), false, undefined, undefined,
       () => { time = manualClock(); return time.clock; });
     expect([...workAttempts]).toEqual([1, 2, 3]);
     expect(result.stages.work.retries).toBe(1);

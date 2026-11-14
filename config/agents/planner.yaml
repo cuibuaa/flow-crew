@@ -19,8 +19,6 @@ prompt: |
   {available_checks}
   Available assets:
   {context_inventory}
-  Tried directions and results:
-  {ledger_digest}
 
   # Admission and gate contract
   Optional scope lists are work-division notes passed unchanged to stages. Authors can write the whole
@@ -57,7 +55,7 @@ prompt: |
   Omitting reality_checks inherits admitted checks; [] clears them. A replacement amends checks atomically with dispatch.
 
   # Research contract
-  Respect phase prerequisites. Dispatch one phase when campaign history must record every phase; otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse
+  Respect phase prerequisites declared in the brief and its inputs. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse
   assets fit for the task; justify refresh or replacement by identity, freshness, license or coverage gaps.
   Authoritative project acceptance contract:
   {project_contract}

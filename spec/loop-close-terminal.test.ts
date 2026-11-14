@@ -75,7 +75,6 @@ describe('settled terminal decisions', () => {
       brief,
       true,
       undefined,
-      false,
     );
     return { state, events: readRunEvents(projectDir, state.runId!) };
   }

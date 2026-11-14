@@ -233,21 +233,6 @@ describe('Orchestrator', () => {
         launchArgs: ['--no-campaign'],
         expectedToken: "'--no-campaign'",
       },
-      {
-        name: '--campaign-context=skip',
-        launchArgs: ['--campaign-context=skip'],
-        expectedToken: "'--campaign-context=skip'",
-      },
-      {
-        name: '--campaign-context=inherit',
-        launchArgs: ['--campaign-context=inherit'],
-        expectedToken: "'--campaign-context=inherit'",
-      },
-      {
-        name: 'legacy --no-inherit-campaign alias',
-        launchArgs: ['--no-inherit-campaign'],
-        expectedToken: "'--campaign-context=skip'",
-      },
     ])('passes through $name exactly once', ({ launchArgs, expectedToken }) => {
       const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir, launch_args: launchArgs });
       const command = buildCommand(task, '/tmp/flowcrew-cli.js');
@@ -678,7 +663,8 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(1);
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
     expect(systemd.runs[0].command).not.toContain('--workflow');
-    expect(systemd.runs[0].command).toContain("'--campaign-context=skip'");
+    expect(systemd.runs[0].command).not.toContain('campaign-context');
+    expect(systemd.runs[0].command).not.toContain('no-inherit-campaign');
     expect(systemd.runs[0].command).not.toMatch(/--supervise|--timeout/);
     expect(registry.get(task.id)).toMatchObject({ launch: 4, max_attempts: 3 });
     expect(JSON.parse(readFileSync(runJson, 'utf8'))).toMatchObject(JSON.parse(before));

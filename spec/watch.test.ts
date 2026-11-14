@@ -920,7 +920,7 @@ describe('watch gate convergence judgements', () => {
       }),
     ]);
     const lines = formatWatchPoll(result);
-    const alertLines = lines.filter((line) => !line.startsWith('[DRIFT] '));
+    const alertLines = lines;
     expect(alertLines).toHaveLength(2);
     expect(alertLines[0]).toContain('2 invalid verdicts');
     expect(alertLines[1]).toContain('[EVIDENCE GAP]');

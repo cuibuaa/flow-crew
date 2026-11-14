@@ -31,7 +31,6 @@ import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import { runsRoot } from './store.js';
 import { findExecutableOnPath } from './adapters/availability.js';
 import { formatHumanDuration, formatOperationalReason } from './cli-events.js';
-import { formatRunDriftProjection } from './run-drift.js';
 import { isTerminalRunStatus, taskDisplayStatus as projectTaskDisplayStatus } from './lifecycle-status.js';
 
 export interface TaskFollowControls {
@@ -244,7 +243,6 @@ function printTask(
       stdout.write(`Pending scope request: ${pending.requestId}${pending.stageId ? ` · ${pending.stageId}` : ''}${pending.detail ? ` · ${pending.detail}` : ''}\n`);
     }
     if (operational.pendingApproval) stdout.write(`Pending approval: ${operational.pendingApproval.detail}\n`);
-    for (const line of formatRunDriftProjection(operational.drift)) stdout.write(`${line}\n`);
     stdout.write(`Evidence: state ${operational.sourceCoverage.runState}; events ${operational.sourceCoverage.events}; ${operational.sourceCoverage.stageCount} stages\n`);
   }
   stdout.write(`Unit: ${task.systemd_unit}\n`);

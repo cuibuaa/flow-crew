@@ -62,7 +62,6 @@ import {
 import { assertDistFresh, BuildInspectionError } from './build-manifest.js';
 import { briefDeclarationFailures, type BriefPreflightFinding } from './brief-preflight.js';
 import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
-import { assessCampaignHygiene } from './campaign-hygiene.js';
 import { entryWorkflow, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 
 
@@ -152,7 +151,7 @@ export interface PreviousRunReport {
   };
 }
 
-export interface CampaignHygieneReport {
+export interface CampaignHistoryReport {
   state: 'resolved' | 'unknown';
   name?: string;
   storageKey?: string;
@@ -160,9 +159,6 @@ export interface CampaignHygieneReport {
   reason?: string;
   totalEntries?: number;
   totalEnded?: number;
-  recentEnded?: number;
-  recentAdverse?: number;
-  suggestContextSkip?: boolean;
 }
 
 export interface SourceDistFreshnessReport {
@@ -184,7 +180,7 @@ export interface ShipPreflightReport {
     usedCanonicalFallback: boolean;
   };
   previousRun: PreviousRunReport;
-  campaign: CampaignHygieneReport;
+  campaign: CampaignHistoryReport;
   daemonFreshness: {
     daemonToDist: DaemonLoadedBuildProbe;
     sourceToDist: SourceDistFreshnessReport;
@@ -464,7 +460,7 @@ function resolveCampaign(
   project: string,
   explicit: string | undefined,
   deps: ResolvedDependencies,
-): Omit<CampaignHygieneReport, 'totalEntries' | 'totalEnded' | 'recentEnded' | 'recentAdverse' | 'suggestContextSkip'> {
+): Omit<CampaignHistoryReport, 'totalEntries' | 'totalEnded'> {
   let name: string;
   let source: 'explicit' | 'repository';
 
@@ -482,24 +478,25 @@ function resolveCampaign(
   return { state: 'resolved', name, storageKey, source };
 }
 
-function campaignHygiene(
+function campaignHistory(
   project: string,
   explicit: string | undefined,
   deps: ResolvedDependencies,
-): CampaignHygieneReport {
+): CampaignHistoryReport {
   const resolution = resolveCampaign(project, explicit, deps);
   if (resolution.state === 'unknown' || !resolution.storageKey) return resolution;
   try {
     const entries = deps.readCampaignEntries(project, resolution.storageKey);
     return {
       ...resolution,
-      ...assessCampaignHygiene(entries),
+      totalEntries: entries.length,
+      totalEnded: entries.filter(entry => entry.kind === 'task_ended').length,
     };
   } catch (error) {
     return {
       ...resolution,
       state: 'unknown',
-      reason: `Campaign ${resolution.storageKey} resolved, but its hygiene could not be read: ${errorMessage(error)}`,
+      reason: `Campaign ${resolution.storageKey} resolved, but its history could not be read: ${errorMessage(error)}`,
     };
   }
 }
@@ -696,7 +693,7 @@ export async function collectShipPreflight(
   validateProject(requestedProject, deps);
   const canonicalProject = canonicalize(requestedProject, deps);
   const previousRun = scanPreviousRun(canonicalProject.path, deps);
-  const campaign = campaignHygiene(canonicalProject.path, parsed.campaign, deps);
+  const campaign = campaignHistory(canonicalProject.path, parsed.campaign, deps);
   const distDir = join(deps.packageRoot, 'dist');
   const [daemonToDist] = await Promise.all([deps.probeDaemon(distDir)]);
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
@@ -781,12 +778,11 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   }
 
   const campaign = report.campaign;
-  if (campaign.state === 'unknown') writer.write(`Campaign hygiene: UNKNOWN — ${campaign.reason}\n`);
+  if (campaign.state === 'unknown') writer.write(`Campaign history: UNKNOWN — ${campaign.reason}\n`);
   else {
     writer.write(
       `Campaign: ${campaign.storageKey} (${campaign.source}) — ${campaign.totalEntries} entries, `
-      + `${campaign.totalEnded} ended; recent adverse ${campaign.recentAdverse}/${campaign.recentEnded}; `
-      + `context skip ${campaign.suggestContextSkip ? 'SUGGESTED' : 'not suggested'}\n`,
+      + `${campaign.totalEnded} ended\n`,
     );
   }
 
@@ -841,7 +837,7 @@ export function shipPreflightUsage(): string {
   return [
     commandUsage('ship-preflight'),
     '--target checks external outputs against the launch project; --project alone checks an in-place launch. Without either, source checkout overlap is reported pending setup.',
-    'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and validation command declarations.',
+    'Gathers prior-run evidence, campaign history, freshness, declared inputs/outputs, and validation command declarations.',
     'Runs no project build/test/lint commands. ship-setup measures the prepared target.',
   ].join('\n');
 }

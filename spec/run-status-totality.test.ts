@@ -154,7 +154,6 @@ describe('unknown archived run status boundary', () => {
       'synthetic future-status resume',
       true,
       undefined,
-      false,
     )).rejects.toThrow(
       /Refusing to resume run synthetic-future-status.*Unrecognized archived run status "future_archived_state"/,
     );

@@ -491,7 +491,7 @@ describe('durable wrap-up obligation', () => {
       .filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(1);
     expect(readRunEvents(root, basename(negativeRunDirectory))
       .filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(0);
-    const projection = readOperationalProjection(positiveRunDirectory, { includeDrift: false });
+    const projection = readOperationalProjection(positiveRunDirectory, {});
     expect(projection.latestReason).toMatchObject({
       type: 'operator_wrap_up_required',
       detail: expect.stringContaining('terminal state is not acceptance'),

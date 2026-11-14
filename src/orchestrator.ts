@@ -1701,7 +1701,6 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
     ...(launch.maxIterations !== undefined ? ['--max-iterations', String(launch.maxIterations)] : []),
     ...(launch.campaign ? ['--campaign', launch.campaign] : []),
     ...(launch.noCampaign ? ['--no-campaign'] : []),
-    ...(launch.campaignContext ? [`--campaign-context=${launch.campaignContext}`] : []),
   ];
   const admitted = assertTaskBriefAdmission(task);
   const args = ['quick',

@@ -346,7 +346,6 @@ describe('parked resume durability', () => {
     parkedState.maxIterations = 41;
     parkedState.timeoutMs = 98_765;
     parkedState.autoApprove = false;
-    parkedState.inheritCampaignContext = true;
     parkedState.taskDescription = '# Original parked brief';
     parkedState.parked = {
       requestId: 'e13b-byte-invariance',
@@ -387,7 +386,6 @@ describe('parked resume durability', () => {
       '# Replacement brief that must not be persisted',
       true,
       undefined,
-      false,
     );
 
     expect(result.status).toBe(RUN_STATUS.PARKED);

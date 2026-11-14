@@ -12,9 +12,9 @@ import { prepareFixtureRun } from './run-fixture.js';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-describe('native planner pivot injection', () => {
+describe('historical planner alert compatibility', () => {
   it.each(['plateau', 'regression', 'repeated_failure', undefined] as const)
-  ('delivers scheduler-owned %s context to the actual adapter prompt', async (alertType) => {
+  ('ignores historical %s pivot metadata in the actual adapter prompt', async (alertType) => {
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-pivot-prompt-'));
     roots.push(projectDir);
     const agentsDir = join(projectDir, 'config', 'agents');
@@ -30,10 +30,10 @@ describe('native planner pivot injection', () => {
     });
     const created = prepareFixtureRun(projectDir, config, 'synthetic pivot control');
     const state = readRunState(projectDir, created.runId);
-    if (alertType) state.researchInjection = {
+    if (alertType) Object.assign(state, { researchInjection: {
       source: 'campaign_health', triggeredAt: new Date().toISOString(), iteration: 1,
       alertType, message: 'measured synthetic campaign alert',
-    };
+    } });
     writeRunState(projectDir, created.runId, state);
     let observed = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -44,11 +44,7 @@ describe('native planner pivot injection', () => {
       new Map(), undefined, agentsDir, created.runId, undefined, true);
     expect(final.status).toBe('complete');
     expect(observed).toContain('Base plan');
-    if (alertType) {
-      expect(observed).toContain('PIVOT REQUIRED');
-      expect(observed).toContain(alertType);
-      expect(observed).toContain('measured synthetic campaign alert');
-      expect(observed).toContain('research stage');
-    } else expect(observed).not.toContain('PIVOT REQUIRED');
+    expect(observed).not.toContain('PIVOT REQUIRED');
+    expect(observed).not.toContain('measured synthetic campaign alert');
   });
 });

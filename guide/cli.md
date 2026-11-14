@@ -140,8 +140,6 @@ in the selected project and warns before replacing different content.
 | `--adapter <name>` | Override backend; registered auto/codex/claude/mock routing |
 | `--max-iterations <n>` | Run iteration override |
 | `--campaign <name>`, `--no-campaign` | Campaign selection/opt-out |
-| `--campaign-context=inherit\|skip` | Context policy; equals form required |
-| `--no-inherit-campaign` | Compatibility alias for skip |
 | `--background` | Register with daemon; daemon must be available |
 | `--session <id>` | Session ledger for registration; overrides `CLAUDE_CODE_SESSION_ID`, then `CODEX_THREAD_ID` (also accepts equals syntax) |
 | `--acknowledge-brief-warnings[=<digest>]` | Confirm changed-run continuation; an optional exact digest checks input identity |
@@ -246,7 +244,7 @@ install frontend configuration or implicitly close human wrap-up because a run e
 ## Complete option grammar
 
 The following generated inventory is checked against the parser. All value options accept
-`--name=value` as well as separate values, except the documented equals-only campaign context.
+`--name=value` as well as separate values, with the same parsing rules.
 Optional values (archive and warning digest) use `=`. Unknown options and malformed counts exit 1.
 Every route accepts `--help` and `-h` without contacting services or creating storage.
 
@@ -261,7 +259,7 @@ Every route accepts `--help` and `-h` without contacting services or creating st
 | `plan-check` | `--brief`, `--run`, `--project` |
 | `ship-setup` | `--json`, `--project`, `--brief`, `--target`, `--base`, `--branch` |
 | `brief` | `--project`, `--adapter`, `--task` |
-| `quick` | `--project`, `--adapter`, `--campaign`, `--task`, `--existing-run-id`, `--session`, `--brief-input-base64`, `--brief-admission-record`, `--no-campaign`, `--no-inherit-campaign`, `--background`, `--max-iterations`, `--campaign-context`, `--acknowledge-brief-warnings` |
+| `quick` | `--project`, `--adapter`, `--campaign`, `--task`, `--existing-run-id`, `--session`, `--brief-input-base64`, `--brief-admission-record`, `--no-campaign`, `--background`, `--max-iterations`, `--acknowledge-brief-warnings` |
 | `status` | `--all`, `--details`, `--project` |
 | `list` | `--limit` |
 | `state` | `--project`, `--run`, `--summary`, `--prompts` |

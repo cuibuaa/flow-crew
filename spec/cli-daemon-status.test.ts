@@ -262,13 +262,6 @@ describe('daemon status local diagnosis', () => {
     ]);
     expect(merged.completed_at).toBeUndefined();
     expect(merged).not.toHaveProperty('failure_reason');
-    expect(merged.operational?.drift?.rows).toHaveLength(4);
-    expect(merged.operational?.drift?.rows.map((row) => row.id)).toEqual([
-      'first_plan_admission',
-      'engine_overhead',
-      'registry_growth',
-      'log_growth',
-    ]);
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
     expect(registry.get(task.id)?.completed_at).toBeUndefined();
   });

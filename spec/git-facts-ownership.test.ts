@@ -242,7 +242,7 @@ it.each([
       if (consumer === 'hook') await runPostTerminateHook(hook, {
         projectDir: project, runDir: runDirPath, runId, terminalStatus: 'complete', verdictPath: join(project, 'done.md'),
       });
-      else await createTerminalEvaluator({ writeCampaignEntry() {}, concludeRepeatedBlockage: () => null })
+      else await createTerminalEvaluator({ writeCampaignEntry() {} })
         .tryTerminateOnTerminalState(readRunState(project, runId), {
           projectDir: project, runDirPath, runId, iteration: 1, stages: [{ id: 'work', role: 'coder', depends_on: [] }],
         });

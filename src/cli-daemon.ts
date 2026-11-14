@@ -206,7 +206,6 @@ export async function handleDaemonCancellationRequest(
 export function mergeTaskWithRunState(
   task: TaskEntry,
   runRoot = runsRoot(),
-  options: { includeDrift?: boolean } = {},
 ): TaskShowEntry {
   if (!task.run_id) return { ...task };
   const runPath = isAbsolute(task.run_id) ? task.run_id : join(runRoot, task.run_id);
@@ -236,7 +235,7 @@ export function mergeTaskWithRunState(
       engine_history: state.engineHistory,
       continuation_failure: state.continuationFailure,
       ...(scheduler.kind === 'live' ? { scheduler_live: { pid: scheduler.pid } } : {}),
-      operational: readOperationalProjection(runPath, { state, includeDrift: options.includeDrift }),
+      operational: readOperationalProjection(runPath, { state }),
       ...(verdict ? { run_verdict: verdict } : {}),
       ...(mismatch ? {
         terminal_status_mismatch: {

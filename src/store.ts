@@ -338,10 +338,6 @@ export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
 /** Active declarations are versioned; historical records use the explicit read model. */
 export type ResearchConfig = import('./research-instrument.js').ResearchConfig;
 
-/** Regression/plateau labels survive only in historical stored alerts. Current
- * campaign policy produces repeated_failure; research policy owns comparisons. */
-export type CampaignTriggerType = 'repeated_failure' | 'regression' | 'plateau';
-
 export interface RealityGateOutputTail {
   tail: string;
   /** Raw characters available in the durable check report. */
@@ -504,25 +500,14 @@ export interface StoreState {
   campaignName?: string;
   campaignSeq?: number;
   campaignIteration?: number;
-  // When false, the run stays attached to its campaign for downstream telemetry,
-  // but the scheduler skips injecting prior-phase context into stage prompts.
-  // Used to escape inherited "fail-closed / phase-N continue" mindsets when the
-  // current task has fundamentally pivoted from the campaign's recent history.
-  inheritCampaignContext?: boolean;
+  /** Historical display metadata; never used to select work. */
   campaignAlert?: {
-    type: CampaignTriggerType;
+    type: 'repeated_failure' | 'regression' | 'plateau';
     action: 'inject_researcher';
     message: string;
     source: 'campaign_health';
     triggeredAt: string;
     iteration: number;
-  };
-  researchInjection?: {
-    source: 'campaign_health';
-    triggeredAt: string;
-    iteration: number;
-    alertType: CampaignTriggerType;
-    message: string;
   };
   parentTaskId?: string;
   budget?: {

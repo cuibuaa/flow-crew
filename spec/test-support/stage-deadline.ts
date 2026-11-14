@@ -16,6 +16,6 @@ export function runStage(...[adapter, opts]: Parameters<typeof executeStage>) {
 }
 
 export async function runWorkflow(...args: Parameters<typeof executeWorkflow>) {
-  args[13] ??= stationaryStageClock;
+  args[12] ??= stationaryStageClock;
   return executeWorkflow(...args);
 }

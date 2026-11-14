@@ -78,7 +78,7 @@ function workflow() {
 
 function execute(config: ReturnType<typeof workflow>, adapter: Adapter, existingRunId?: string) {
   return runWorkflow(config, stringify(config), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
-    existingRunId, brief, true, undefined, true, admitted().brief_admission);
+    existingRunId, brief, true, undefined, admitted().brief_admission);
 }
 
 it.each([false, true])('holds at the current shared-tree owner, preserves completed attempts and budgets, then continues (gate=%s)', async gate => {

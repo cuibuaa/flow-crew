@@ -279,7 +279,6 @@ describe('Dashboard admission handshake', () => {
       brief,
       true,
       undefined,
-      true,
       admission,
     );
 
@@ -522,7 +521,7 @@ describe('quick and operator entry behavior', () => {
     }
   });
 
-  it('consumes adverse campaign hygiene as a no-flag skip default while explicit inherit wins', async () => {
+  it('keeps campaign identity without a history-driven launch option', async () => {
     const isolated = cliFixture();
     const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Preserve an explicit context override.\"}]\n---\n# Goal\nKeep campaign context bounded.\n\n## What the report must show\n1. Preserve an explicit context override.\n";
     writeReadySetupRecord(isolated.project, brief, isolated.fcHome);
@@ -551,18 +550,19 @@ describe('quick and operator entry behavior', () => {
         '--campaign', 'hygiene', '-',
       ], brief, socketPath);
       expect(automatic.code).toBe(0);
-      expect(automatic.stderr).toContain('defaulted planner context to skip');
+      expect(automatic.stderr).not.toContain('defaulted planner context');
       expect((requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options)
-        .toMatchObject({ campaignContext: 'skip' });
+        .not.toHaveProperty('campaignContext');
 
       const explicit = await runQuick(isolated, [
         'quick', '--background', '--acknowledge-brief-warnings', '--project', isolated.project,
         '--campaign', 'hygiene', '--campaign-context=inherit', '-',
       ], brief, socketPath);
-      expect(explicit.code).toBe(0);
+      expect(explicit.code).toBe(1);
       expect(explicit.stderr).not.toContain('defaulted planner context to skip');
-      const explicitLaunch = (requests[1] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options;
-      expect(explicitLaunch).toMatchObject({ campaignContext: 'inherit' });
+      expect(requests).toHaveLength(1);
+      const explicitLaunch = undefined;
+      expect(explicitLaunch).toBeUndefined();
       console.info(`[ENGINE_INSTRUMENT_ITEM3] ${JSON.stringify({
         automatic: { stderr: automatic.stderr, launchOptions: (requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options },
         explicit: { stderr: explicit.stderr, launchOptions: explicitLaunch },

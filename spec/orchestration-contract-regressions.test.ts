@@ -15,7 +15,6 @@ import {
 } from '../src/guidance.js';
 import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, readGateEvaluation, resolveDispatchDependencies, tryTerminateOnTerminalState } from '../src/scheduler.js';
 import { inspectBriefOutputs } from '../src/ship-inputs.js';
-import { recordBlockageOccurrence } from '../src/blockage-ledger.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
 import { buildStagePrompt } from '../src/handoff.js';
@@ -293,22 +292,6 @@ describe('gate settlement and research evidence', () => {
 });
 
 describe('persistent blockers and quiet active commands', () => {
-  it('marks the third identical blockage as a one-time escalation', () => {
-    const runDir = temporaryRoot();
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', now: '2026-01-01T00:00:00Z' }).escalatedNow).toBe(false);
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: ' same   cause ', now: '2026-01-01T00:00:01Z' }).escalatedNow).toBe(false);
-    const third = recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'SAME CAUSE', now: '2026-01-01T00:00:02Z' });
-    expect(third).toMatchObject({ escalatedNow: true, occurrence: { consecutive: 3 } });
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', now: '2026-01-01T00:00:03Z' }).escalatedNow).toBe(false);
-  });
-
-  it('resets the blockage streak when rejected evidence or repair evidence changes', () => {
-    const runDir = temporaryRoot();
-    recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'a', repairDigest: 'repair-a' });
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'a', repairDigest: 'repair-a' }).occurrence.consecutive).toBe(2);
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'b', repairDigest: 'repair-a' }).occurrence.consecutive).toBe(1);
-    expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'b', repairDigest: 'repair-b' }).occurrence.consecutive).toBe(1);
-  });
 
   it('counts a current-attempt command without treating its existence as ongoing work', () => {
     const runDir = temporaryRoot();

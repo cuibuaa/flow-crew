@@ -60,7 +60,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
     return fixtureResult({ output, exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } };
   const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
-  const run = (id?: string) => runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, id, brief, false, undefined, true, admission);
+  const run = (id?: string) => runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, id, brief, false, undefined, admission);
   const seedPrematureIncomplete = async () => {
     // Build settled execution evidence with one iteration, then explicitly
     // seed the premature incomplete projection produced by older schedulers.

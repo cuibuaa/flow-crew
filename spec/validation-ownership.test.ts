@@ -314,7 +314,7 @@ describe('scheduler owns validation after author settlement', () => {
       return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }),
         exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
     } }, new Map(), undefined, resolve('config/agents'), undefined,
-      '---\ncriteria: [{id: value, text: Deliver a reviewed value}]\noutputs: [value.txt]\n---\nDeliver the value.', true, undefined, true, undefined, () => clock);
+      '---\ncriteria: [{id: value, text: Deliver a reviewed value}]\noutputs: [value.txt]\n---\nDeliver the value.', true, undefined, undefined, () => clock);
     expect(final.status).toBe('complete');
     const record = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'validation') as ValidationFact;
     expect(record.executions[0].commands.map(command => command.exitCode)).toEqual([0, 0, 0]);

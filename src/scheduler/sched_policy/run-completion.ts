@@ -11,7 +11,7 @@ export type RunConclusionReason =
   | 'workflow_complete' | 'stage_failed' | 'bounded_attempts' | 'validation_unresolved' | 'provider_refusal'
   | 'cancelled' | 'reality_gate_failed' | 'recovery_blocked' | 'scheduler_failed' | 'launch_conflict'
   | 'dispatch_refused' | 'workflow_refused' | 'admission_refused' | 'adapter_failure' | 'input_too_large'
-  | 'irreparable_gate_rejection' | 'gate_contract_refusal' | 'repeated_blockage' | 'terminal_artifact'
+  | 'irreparable_gate_rejection' | 'gate_contract_refusal' | 'terminal_artifact'
   | 'artifact_ownership_unverified' | 'terminal_unmatched' | 'terminal_finalizer_unresolved'
   | 'research_integrity_ceiling' | 'research_shipped' | 'research_ceiling' | 'research_budget_exhausted'
   | 'research_gate_exhausted' | 'study_complete' | 'declared_output_archival_refused';

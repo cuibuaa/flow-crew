@@ -1,9 +1,8 @@
 // Public scheduler API; responsibility owners contain the implementation.
 export { isTerminalStatus } from './scheduler/sched_policy/identity.js';
 export { appendResearchPathContract } from './scheduler/sched_policy/prompt-contracts.js';
-export { checkCampaignHealth, findCampaignPhaseMetadata } from './scheduler/sched_policy/campaign.js';
+export { findCampaignPhaseMetadata } from './scheduler/sched_policy/campaign.js';
 export { RUN_VALIDATION_BASELINE_FILE } from './scheduler/sched_policy/terminal.js';
-export type { CampaignAlert, CampaignEntry } from './scheduler/sched_policy/campaign.js';
 export { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 export { buildRetryPreamble, decideEmptyDispatchAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
 export { StageConfigSchema, WorkflowConfigSchema, normalizeStageContracts, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';

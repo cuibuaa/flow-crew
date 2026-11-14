@@ -7,7 +7,6 @@ interface Option {
   max?: number;
   default?: string;
   required?: boolean;
-  equalsOnly?: boolean;
   choices?: string[];
   refusal?: string;
   validate?: (value: string) => boolean;
@@ -37,9 +36,8 @@ export const CLI_COMMANDS: Record<string, Command> = {
   brief: command(values('project adapter task'), '<task-text|->'),
   quick: command({
     ...values('project adapter campaign task existing-run-id session brief-input-base64 brief-admission-record'),
-    ...flags('no-campaign no-inherit-campaign background'),
+    ...flags('no-campaign background'),
     'max-iterations': { integer: 1 },
-    'campaign-context': { equalsOnly: true, choices: ['inherit', 'skip'] },
     'acknowledge-brief-warnings': { optional: true },
     timeout: { refusal: 'The --timeout run override was removed; declare stage_duration_ms in the work brief instead.' },
   }, '<task-text|->'),
@@ -100,7 +98,7 @@ export function commandUsage(name = ''): string {
   const entries = Object.entries(CLI_COMMANDS).filter(([key]) => !name || key === name || key.startsWith(`${name} `));
   if (!entries.length && name.includes(' ')) return commandUsage(name.split(' ').slice(0, -1).join(' '));
   return entries.map(([key, spec]) => `Usage: flowcrew ${key}${spec.positional ? ` ${spec.positional}` : ''}${Object.entries(spec.options).filter(([, option]) => !option.refusal).map(([flag, option]) => {
-    const value = option.flag ? '' : option.optional ? '[=<value>]' : option.equalsOnly ? '=<value>' : ' <value>';
+    const value = option.flag ? '' : option.optional ? '[=<value>]' : ' <value>';
     return option.required ? ` --${flag}${value}` : ` [--${flag}${value}]`;
   }).join('')} [--help|-h]`).join('\n');
 }
@@ -151,7 +149,6 @@ export function parseCommandArgs(name: string, args: string[]): ParsedCliArgumen
       continue;
     }
     if (parsed.values.has(flag) || parsed.flags.has(flag)) throw new CliUsageError(name, `${flag} may be specified only once`);
-    if (option.equalsOnly && equals < 0) throw new CliUsageError(name, `Invalid ${flag} syntax; use ${flag}=${option.choices?.join(` or ${flag}=`) ?? '<value>'}.`);
     if (option.optional && equals < 0) { parsed.flags.add(flag); continue; }
     const value = equals < 0 ? tokens[++index] : token.slice(equals + 1);
     if (!value || (equals < 0 && Object.entries(spec.options).some(([key, option]) => value === `--${key}` || value === option.alias))) throw new CliUsageError(name, `${flag} requires a value`);

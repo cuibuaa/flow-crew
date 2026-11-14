@@ -8,8 +8,12 @@ import { join } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { readRunEvents } from '../src/run-events.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
+import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
+import { readOperationalProjection } from '../src/cli-events.js';
+import { mergeTaskWithRunState } from '../src/cli-daemon.js';
+import { listRunIdsFromIndex } from '../src/run-index.js';
+import { TaskRegistry } from '../src/task-registry.js';
 import { completePlainWorkflow, concludeWorkflowIteration } from '../src/scheduler/sched_loop/iteration-outcome.js';
-import { createBlockageConcluder } from '../src/scheduler/sched_policy/guidance.js';
 import { concludeRun, cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
 import { recoverTerminalStudyCompletion } from '../src/scheduler/sched_settlement/completion.js';
 import { writeCampaignEntry } from '../src/scheduler/sched_loop/services.js';
@@ -90,6 +94,45 @@ describe('terminal conclusions from settled evidence', () => {
     expectOwnerConclusion('incomplete');
   });
 
+  it('ends repeated identical refusals at the existing iteration limit despite a legacy escalation signal', async () => {
+    const refusal = { kind: 'refusal' as const, provider: 'codex' as const,
+      source: 'native_stdout' as const, eventType: 'turn.failed', reason: 'Provider declined this request' };
+    const state = readRunState(project, runId);
+    state.currentIteration = state.maxIterations = 5;
+    writeRunState(project, runId, state);
+    const attempts = Array.from({ length: 5 }, (_, index) => ({ index: index + 1,
+      status: 'failed' as const, startedAt, completedAt, exitCode: 1, providerFailure: refusal }));
+    writeStageStatus(project, runId, 'review', { status: 'failed', retries: 4, attempts, providerFailure: refusal });
+    const ledger = JSON.stringify({ occurrences: { legacy: { consecutive: 5, detail: refusal.reason } } });
+    writeFileSync(runRecordPath(directory, 'blockage_ledger.json'), ledger);
+    mkdirSync(runRecordPath(directory, 'signals'), { recursive: true });
+    writeFileSync(runRecordPath(directory, 'signals', 'repeated_blockage.json'), JSON.stringify({ action: 'escalate', detail: refusal.reason }));
+    const prepared = await prepareWorkflowIteration(5, 5, true, project, runId, directory,
+      adapter, [review], 'name: conclusion\nstages: []\n');
+    expect(prepared.kind).toBe('ready');
+    const result = await concludeWorkflowIteration(prepared.state, [review], 5, ['review'], 3, 3, 5,
+      project, runId, directory, adapter, new Set());
+    expect(result.kind).toBe('settled');
+    expect(result.state).toMatchObject({ status: 'incomplete', reasonCode: 'provider_refusal', currentIteration: 5, maxIterations: 5 });
+    expect(result.state.failureReason).toContain('iteration 5/5');
+    expect(result.state.stages.review.attempts).toEqual(attempts);
+    expect(readFileSync(runRecordPath(directory, 'blockage_ledger.json'), 'utf8')).toBe(ledger);
+    expectOwnerConclusion('incomplete');
+  });
+
+  it('reads old escalated runs with blockage files through status, listing and task projections', () => {
+    const state = readRunState(project, runId);
+    writeRunState(project, runId, { ...state, status: 'escalated', failureReason: 'Historical repeated blockage' });
+    const ledger = '{"legacy":{"consecutive":3}}';
+    writeFileSync(runRecordPath(directory, 'blockage_ledger.json'), ledger);
+    const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
+    const task = registry.create({ projectDir: project, run_id: runId });
+    expect(readOperationalProjection(directory)).toMatchObject({ runStatus: 'escalated' });
+    expect(listRunIdsFromIndex(project)).toContain(runId);
+    expect(mergeTaskWithRunState(task, join(fcGlobalDir(), 'runs')).run?.status).toBe('escalated');
+    expect(readFileSync(runRecordPath(directory, 'blockage_ledger.json'), 'utf8')).toBe(ledger);
+  });
+
   it('keeps the b7295c rejected gate incomplete after bounded repair attempts', async () => {
     settledReview('complete');
     writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'New pytest failure remains' }));
@@ -105,22 +148,6 @@ describe('terminal conclusions from settled evidence', () => {
     expect(readRunEvents(project, runId).filter(event => event.type === 'run_completed')).toHaveLength(1);
     expect(readRunState(project, runId).stages.optional.status).toBe('pending');
     expect(existsSync(runRecordPath(directory, 'stages', 'optional', 'status.json'))).toBe(false);
-  });
-
-  it('settles superseded work through the blockage owner without rewriting its stage ledger', () => {
-    const pending = { status: 'pending' as const, retries: 1, attempts: [
-      { index: 1, status: 'failed' as const, startedAt, completedAt, exitCode: 1, error: 'prior failure' },
-    ] };
-    writeStageStatus(project, runId, 'optional', pending);
-    const statusPath = runRecordPath(directory, 'stages', 'optional', 'status.json');
-    const before = readFileSync(statusPath, 'utf8');
-    mkdirSync(runRecordPath(directory, 'signals'), { recursive: true });
-    writeFileSync(runRecordPath(directory, 'signals', 'repeated_blockage.json'), JSON.stringify({ action: 'escalate', detail: 'unchanged evidence' }));
-    const { concludeRepeatedBlockage } = createBlockageConcluder(() => {});
-    const result = concludeRepeatedBlockage(readRunState(project, runId), { projectDir: project, runId, runDirPath: directory, iteration: 1 });
-    expect(result?.stages.optional).toMatchObject({ status: 'skipped', attempts: pending.attempts });
-    expect(readFileSync(statusPath, 'utf8')).toBe(before);
-    expectOwnerConclusion('escalated');
   });
 
   it.each([

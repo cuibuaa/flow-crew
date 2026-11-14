@@ -13,14 +13,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import {
-  formatCampaignContextBlock,
-  selectRelevantCampaignContext,
-} from '../src/campaign-context.js';
-import { summarizeLedger } from '../src/campaign-ledger.js';
-import { assessCampaignHygiene } from '../src/campaign-hygiene.js';
 import type { CampaignHistoryEntry } from '../src/campaigns.js';
-import { checkCampaignHealth, loadWorkflow, } from '../src/scheduler.js';
+import { loadWorkflow } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
 
@@ -77,166 +71,8 @@ function writeCampaignEntries(entries: CampaignHistoryEntry[]): void {
   );
 }
 
-describe('campaign context relevance selector', () => {
-  it('retains old nonterminal history while rejecting malformed timestamps', () => {
-    const atBoundary = new Date(NOW - (30 * 24 * 60 * 60 * 1000)).toISOString();
-    const selection = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, runId: 'boundary', timestamp: atBoundary }),
-      historyEntry({ seq: 2, runId: 'too-old', timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 1).toISOString() }),
-      historyEntry({ seq: 3, runId: 'invalid-time', timestamp: 'not-a-timestamp' }),
-    ]);
-
-    expect(selection.entries.map((entry) => entry.runId)).toEqual(['boundary', 'too-old']);
-  });
-
-  it('drops every narrative row for terminal runs but keeps a fresh parked run', () => {
-    const selection = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, runId: 'terminal-run', score: 9 }),
-      historyEntry({ seq: 2, runId: 'terminal-run', kind: 'task_ended', score: undefined, metric: undefined, status: RUN_STATUS.COMPLETE }),
-      historyEntry({ seq: 3, runId: 'parked-run', score: 4, status: RUN_STATUS.PARKED }),
-    ]);
-
-    expect(selection.entries.map((entry) => entry.runId)).toEqual(['parked-run']);
-  });
-
-  it('closes completed phase detail and carries only a fresh next-phase handoff', () => {
-    const selection = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, phase: 'phase-one', reason: 'obsolete reason', artifactSummary: 'obsolete artifact' }),
-      historyEntry({
-        seq: 2,
-        phase: 'phase-one',
-        phaseComplete: true,
-        nextPhase: 'phase-two',
-        reason: 'completion reason must not leak',
-        artifactSummary: 'completion artifact must not leak',
-      }),
-    ]);
-    const context = formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection });
-
-    expect(selection.entries).toEqual([]);
-    expect(context).toContain('Current recommended phase: phase-two');
-    expect(context).not.toContain('obsolete reason');
-    expect(context).not.toContain('obsolete artifact');
-    expect(context).not.toContain('completion reason must not leak');
-    expect(context).not.toContain('completion artifact must not leak');
-
-    const closedWithoutHandoff = selectRelevantCampaignContext([
-      historyEntry({ phase: 'phase-one', phaseComplete: true, nextPhase: undefined }),
-    ]);
-    expect(formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection: closedWithoutHandoff })).toBe('');
-  });
-
-  it('does not revive an earlier handoff after the latest completed phase closes the chain', () => {
-    const selection = selectRelevantCampaignContext([
-      historyEntry({
-        seq: 1,
-        runId: 'phase-chain-run',
-        phase: 'phase-one',
-        phaseComplete: true,
-        nextPhase: 'phase-two',
-      }),
-      historyEntry({
-        seq: 2,
-        runId: 'phase-chain-run',
-        phase: 'phase-two',
-        phaseComplete: false,
-      }),
-      historyEntry({
-        seq: 3,
-        runId: 'phase-chain-run',
-        phase: 'phase-two',
-        phaseComplete: true,
-        nextPhase: undefined,
-      }),
-    ]);
-
-    expect(selection.recommendedPhase).toBeUndefined();
-    expect(selection.phaseEntries).toEqual([]);
-    expect(formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection })).toBe('');
-  });
-
-  it('builds a block only from active progress and does not emit stale alert shells', () => {
-    const active = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, runId: 'r1', score: 5, phase: 'active-phase', phaseComplete: false }),
-      historyEntry({ seq: 2, runId: 'r2', score: 5 }),
-      historyEntry({ seq: 3, runId: 'r3', score: 5 }),
-    ]);
-    const alert = checkCampaignHealth(active.entries);
-    const context = formatCampaignContextBlock({
-      campaignLabel: CAMPAIGN_ID,
-      selection: active,
-      summaryPaths: ['/tmp/relevant-iteration-log.md'],
-      alert,
-    });
-
-    expect(alert).toBeNull();
-    expect(context).toContain('=== CAMPAIGN: context-filter-campaign ===');
-    expect(context).not.toContain('Best ever:');
-    expect(context).toContain('/tmp/relevant-iteration-log.md');
-    expect(context).not.toContain('CAMPAIGN ALERT: plateau');
-
-    const stale = selectRelevantCampaignContext([
-      historyEntry({ seq: 1, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 1).toISOString() }),
-      historyEntry({ seq: 2, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 2).toISOString() }),
-      historyEntry({ seq: 3, timestamp: new Date(NOW - (30 * 24 * 60 * 60 * 1000) - 3).toISOString() }),
-    ]);
-    expect(stale.entries).toHaveLength(3);
-    expect(checkCampaignHealth(stale.entries)).toBeNull();
-    expect(formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection: stale })).toBe('');
-  });
-});
-
 describe('campaign context production path', () => {
-  it('includes protocol verdicts and opaque payloads in the existing tried-direction digest without numeric reconstruction', () => {
-    const runId = 'protocol-ledger-run'; writeCampaignEntries([historyEntry({ runId, score: -999999 })]);
-    const directory = join(fcHome, 'runs', runId); mkdirSync(directory, { recursive: true });
-    const candidate = { path: '/fixture/candidate', sha256: 'a'.repeat(64), label: 'incumbent' };
-    const response = { observations: { extra: ['unprojected', { signed: -3 }] }, diagnostics: { nested: ['retained diagnostic'] }, next_state: { opaque: true } };
-    const manifest = { protocol: 'research-instrument/v1', run_id: runId, engine_stop_reason: 'instrument_stop',
-      initial: candidate, incumbent: candidate, instrument_sha256: 'b'.repeat(64), history: [{ phase: 'evaluate', round: 1,
-        candidate, outcome: 'reject', reason: 'Project tradeoff', result: { path: '/fixture/result', sha256: 'c'.repeat(64) }, response }] };
-    const path = runRecordPath(directory, 'research_manifest.json'); writeFileSync(path, JSON.stringify(manifest));
-    const before = readFileSync(path);
-    const digest = summarizeLedger(projectDir, CAMPAIGN_ID);
-    expect(digest).toContain('"outcome":"reject"'); expect(digest).toContain(JSON.stringify(response));
-    expect(digest).not.toContain('-999999'); expect(readFileSync(path)).toEqual(before);
-  });
-  it('keeps distinct trial rounds when engine display labels repeat across runs', () => {
-    writeCampaignEntries([historyEntry({ runId: 'first-run' }), historyEntry({ runId: 'second-run' }), historyEntry({ runId: 'first-run' })]);
-    for (const [runId, result] of [['first-run', 90], ['second-run', 80]] as const) {
-      const directory = join(fcHome, 'runs', runId); mkdirSync(directory, { recursive: true });
-      writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'round-1', result }] }));
-    }
-    const digest = summarizeLedger(projectDir, CAMPAIGN_ID);
-    expect(digest).toContain('Tried directions (2)');
-    expect(digest).toContain('first-run/round-1 → 90'); expect(digest).toContain('second-run/round-1 → 80');
-  });
-
-  it('caps the tried-direction display and leaves a run knowledge_graph.json unread', () => {
-    const runId = 'ledger-run';
-    writeCampaignEntries([
-      historyEntry({ runId, status: RUN_STATUS.COMPLETE }),
-    ]);
-    const runPath = join(fcHome, 'runs', runId);
-    mkdirSync(runPath, { recursive: true });
-    writeFileSync(runRecordPath(runPath, 'research_journal.json'), JSON.stringify({
-      rounds: [
-        { label: 'first direction', result: 1 },
-        { label: 'second direction', result: 2 },
-      ],
-    }), 'utf-8');
-    writeFileSync(runRecordPath(runPath, 'knowledge_graph.json'), JSON.stringify({
-      nodes: [{ type: 'dead_end', text: 'dead end alpha' }],
-    }), 'utf-8');
-
-    const digest = summarizeLedger(projectDir, CAMPAIGN_ID, { cap: 1 });
-
-    expect(digest).toContain('first direction');
-    expect(digest).not.toContain('second direction');
-    expect(digest).not.toContain('dead end alpha');
-  });
-
-  it('does not mislead a new task with a terminal phase, while preserving its tried directions', async () => {
+  it('keeps campaign history and stray knowledge graphs out of planner input', async () => {
     const oldRunId = 'old-terminal-run';
     const oldRunPath = join(fcHome, 'runs', oldRunId);
     mkdirSync(oldRunPath, { recursive: true });
@@ -258,6 +94,7 @@ describe('campaign context production path', () => {
         { label: 'preserve this second direction too', result: 2 },
       ],
     }), 'utf-8');
+    writeFileSync(runRecordPath(oldRunPath, 'knowledge_graph.json'), JSON.stringify({ nodes: [{text: 'dead end alpha'}] }));
     writeCampaignEntries([
       historyEntry({
         seq: 1,
@@ -281,8 +118,7 @@ describe('campaign context production path', () => {
       'reasoning_effort: default',
       'tools: []',
       'prompt: |',
-      '  Durable ledger:',
-      '  {ledger_digest}',
+      '  Plan from the admitted task and inputs.',
     ].join('\n') + '\n', 'utf-8');
     writeFileSync(join(projectDir, 'config', 'agents', 'coder.yaml'), [
       'name: coder',
@@ -319,7 +155,6 @@ describe('campaign context production path', () => {
       'Plan a genuinely new task.',
       true,
       CAMPAIGN_ID,
-      true,
     );
 
     expect(finalState.status).toBe(RUN_STATUS.COMPLETE);
@@ -333,8 +168,9 @@ describe('campaign context production path', () => {
     expect(fullPrompt).not.toContain('OLD ARTIFACT MUST DISAPPEAR');
     expect(fullPrompt).not.toContain(runRecordPath(oldRunPath, 'iteration_log.md'));
     expect(fullPrompt).not.toContain('old-misleading-next-phase');
-    expect(planCall!.systemPrompt).toContain('never retry the terminal mechanism');
-    expect(planCall!.systemPrompt).toContain('preserve this second direction too');
+    expect(fullPrompt).not.toContain('never retry the terminal mechanism');
+    expect(fullPrompt).not.toContain('preserve this second direction too');
+    expect(fullPrompt).not.toContain('dead end alpha');
   });
 });
 
@@ -356,57 +192,3 @@ class PromptCaptureAdapter implements Adapter {
     return fixtureResult({ output: 'ok', exitCode: 0, duration_ms: 1 }, opts);
   }
 }
-
-
-describe('campaign review health without principal scores', () => {
-  it('derives the campaign default boundary from the full recent window', () => {
-    const entry = (seq: number, status: string) => ({
-      seq,
-      runId: `run-${seq}`,
-      kind: 'task_ended' as const,
-      pass: status === 'complete',
-      status,
-      timestamp: `2026-08-01T00:${String(seq).padStart(2, '0')}:00.000Z`,
-    });
-    const history = [
-      entry(1, 'failed'),
-      ...Array.from({ length: 8 }, (_, index) => entry(index + 2, 'complete')),
-      entry(10, 'failed'),
-      entry(11, 'unknown-future-status'),
-    ];
-    expect(assessCampaignHygiene(history)).toMatchObject({
-      totalEnded: 11,
-      recentEnded: 10,
-      recentAdverse: 2,
-      suggestContextSkip: false,
-    });
-    expect(assessCampaignHygiene([...history, entry(12, 'failed')])).toMatchObject({
-      recentEnded: 10,
-      recentAdverse: 3,
-      suggestContextSkip: true,
-    });
-  });
-
-  it('uses measured failure evidence while allowing technical recovery and justified reproduction', () => {
-    const selection = selectRelevantCampaignContext([historyEntry()]);
-    const context = formatCampaignContextBlock({ campaignLabel: CAMPAIGN_ID, selection,
-      alert: { type: 'repeated_failure', message: 'Repeated reviews failed.' } });
-    expect(context).toContain('Avoid repeating mechanisms disproven by measurements without new evidence');
-    expect(context).toContain('Technical recovery and justified reproduction remain valid');
-    expect(context).toContain('Repeated reviews failed.');
-  });
-
-  it('keeps task lifecycle bookkeeping from claiming that three reviews failed', () => {
-    const entries = [1, 2, 3].map(seq => historyEntry({ seq, runId: `pending-${seq}`,
-      kind: 'task_started', status: RUN_STATUS.RUNNING, pass: false, gate: undefined, score: undefined, metric: undefined }));
-    expect(checkCampaignHealth(entries)).toBeNull();
-  });
-
-  it('retains repeated failed reviews without requiring a numeric campaign producer', () => {
-    const entries = [1, 2, 3].map(seq => historyEntry({ seq, runId: `rejected-${seq}`,
-      gate: 'review', pass: false, score: undefined, metric: undefined }));
-    expect(checkCampaignHealth(entries)).toMatchObject({ type: 'repeated_failure' });
-    expect(checkCampaignHealth([...entries, historyEntry({ seq: 4, gate: 'review', pass: true,
-      score: undefined, metric: undefined })])).toBeNull();
-  });
-});

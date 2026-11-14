@@ -17,7 +17,7 @@ export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
   maxIterations: number, admission: { resumingExistingRun: boolean; briefWasAdmitted: boolean }, taskDescription?: string,
   campaignId?: string,
-  inheritCampaignContext = true, briefAdmission?: BriefAdmissionRecord,
+  briefAdmission?: BriefAdmissionRecord,
 ): {kind: 'settled'; state: StoreState} | {kind: 'configured'; taskDescription?: string; researchState?: StoreState} {
   const { resumingExistingRun, briefWasAdmitted: admittedBrief } = admission;
   let researchState: StoreState | undefined;
@@ -39,7 +39,6 @@ export function configureWorkflowBrief(
       initState.campaignName = campaignId;
       initState.campaignStorageKey = resolveCampaignStorageKey({ campaignId, projectDir });
     }
-    if (inheritCampaignContext === false) initState.inheritCampaignContext = false;
     writeRunState(projectDir, runId, initState);
   }
 

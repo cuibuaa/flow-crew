@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 53 -->
+<!-- flowcrew-skill-revision: 54 -->
 
 # Ship a conversation to FlowCrew
 
@@ -117,7 +117,7 @@ research quality. Nonzero means correct the brief/environment. It calls no model
 If bytes change, repeat preflight and rehearsal.
 
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
-target, base, new branch, research declarations, adapter, foreground/background, campaign/context,
+target, base, new branch, research declarations, adapter, foreground/background, campaign,
 iteration bound read from engine configuration (`max_iterations`) and the brief's
 author-declared `stage_duration_ms`, or its absence. The engine supplies no duration
 default or earlier wrap-up cut. Do not hardcode defaults.

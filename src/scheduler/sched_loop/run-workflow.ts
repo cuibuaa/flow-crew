@@ -41,7 +41,6 @@ export async function runWorkflow(
   taskDescription?: string,
   _legacyAutoApprove?: boolean,
   campaignId?: string,
-  inheritCampaignContext: boolean = true,
   briefAdmission?: BriefAdmissionRecord,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
@@ -95,7 +94,7 @@ export async function runWorkflow(
   log.info({ runId, workflow: workflow.name }, 'Run started');
   log.info({ runId }, SINGLE_AUTHOR_NOTICE);
   recordRunEvent(projectDir, runId, { type: 'execution_notice', runId, timestamp: new Date().toISOString(), detail: SINGLE_AUTHOR_NOTICE, source: 'scheduler' });
-  const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, { resumingExistingRun, briefWasAdmitted: launch.briefWasAdmitted }, taskDescription, campaignId, inheritCampaignContext, briefAdmission);
+  const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, { resumingExistingRun, briefWasAdmitted: launch.briefWasAdmitted }, taskDescription, campaignId, briefAdmission);
   if (configured.kind === 'settled') return settled = configured.state;
   bindFrozenInputs(projectDir, runDirPath);
   taskDescription = configured.taskDescription;

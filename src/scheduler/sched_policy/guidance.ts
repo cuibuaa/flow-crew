@@ -1,12 +1,7 @@
 import { runRecordPath } from '../../run-layout.js';
-import { concludeRun } from './run-completion.js';
-/** Deduplicated scheduler guidance and stable blockage escalation; campaign persistence is supplied. */
-import { appendGuidanceEnvelope, RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
-import { mkdirSync, writeFileSync } from '../../engine-fs.js';
+/** Deduplicated scheduler guidance. */
+import { appendGuidanceEnvelope } from '../../guidance.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { recordBlockageOccurrence } from '../../blockage-ledger.js';
-import { RUN_STATUS, type StoreState } from '../../store.js';
 
 export function appendSchedulerGuidanceOnce(
   runDirPath: string,
@@ -27,80 +22,4 @@ export function appendSchedulerGuidanceOnce(
       knownStageIds,
     });
   } catch { /* non-critical */ }
-}
-
-export function observeStableBlockage(input: {
-  runDirPath: string;
-  kind: string;
-  detail: string;
-  stageId?: string;
-  evidenceDigest?: string;
-  repairDigest?: string;
-  threshold?: number;
-}): ReturnType<typeof recordBlockageOccurrence> | undefined {
-  try {
-    const observed = recordBlockageOccurrence({
-      runDir: input.runDirPath,
-      kind: input.kind,
-      detail: input.detail,
-      stageId: input.stageId,
-      evidenceDigest: input.evidenceDigest,
-      repairDigest: input.repairDigest,
-      threshold: input.threshold,
-    });
-    if (!observed.escalatedNow) return observed;
-    const signalsDir = runRecordPath(input.runDirPath, 'signals');
-    mkdirSync(signalsDir, { recursive: true });
-    writeFileSync(join(signalsDir, 'repeated_blockage.json'), `${JSON.stringify({
-      version: 1,
-      ...observed.occurrence,
-      action: 'escalate',
-    }, null, 2)}\n`, 'utf-8');
-    appendSchedulerGuidanceOnce(
-      input.runDirPath,
-      RUN_WIDE_GUIDANCE_TARGET,
-      `[repeated-blockage:${observed.occurrence.fingerprint}]`,
-      `The same blockage has recurred ${observed.occurrence.consecutive} consecutive times without a state change: ${input.detail}. Stop repeating the same repair. Route the run through its declared escalation/finalizer outcome and name the external change needed.`,
-    );
-    return observed;
-  } catch { /* non-critical */ }
-  return undefined;
-}
-
-export function createBlockageConcluder(writeCampaignEntry: (projectDir: string, state: StoreState) => void) {
-  function concludeRepeatedBlockage(
-    state: StoreState,
-    ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
-  ): StoreState | null {
-    const signalPath = runRecordPath(ctx.runDirPath, 'signals', 'repeated_blockage.json');
-    if (!existsSync(signalPath)) return null;
-    let signal: Record<string, unknown>;
-    try {
-      signal = JSON.parse(readFileSync(signalPath, 'utf-8')) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-    if (signal.action !== 'escalate') return null;
-    const detail = typeof signal.detail === 'string' ? signal.detail : 'unchanged structured blockage';
-    const consecutive = typeof signal.consecutive === 'number' ? signal.consecutive : 3;
-    const stageId = typeof signal.stageId === 'string' ? signal.stageId : undefined;
-    const reason = `Escalated after ${consecutive} consecutive observations of the same blockage${stageId ? ` at ${stageId}` : ''}: ${detail}. A different repair/evidence state or external intervention is required.`;
-    const escalationPath = state.terminalStates?.[RUN_STATUS.ESCALATED]?.paths?.[0];
-    if (escalationPath) {
-      appendSchedulerGuidanceOnce(
-        ctx.runDirPath,
-        RUN_WIDE_GUIDANCE_TARGET,
-        `[repeated-blockage-final:${String(signal.fingerprint ?? 'unknown')}]`,
-        `${reason} The run has stopped; any resumption must write only the declared escalation evidence at ${escalationPath}.`,
-        Object.keys(state.stages),
-      );
-    }
-    return concludeRun(state, { status: RUN_STATUS.ESCALATED, reasonCode: 'repeated_blockage', detail: reason, pendingStageNote: reason, eventFields: () => ({
-      iteration: ctx.iteration,
-      ...(stageId ? { stageId } : {}),
-      detail: reason,
-    }), writeCampaignEntry });
-  }
-
-  return { concludeRepeatedBlockage };
 }

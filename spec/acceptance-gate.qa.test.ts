@@ -11,11 +11,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  formatCampaignContextBlock,
-  selectRelevantCampaignContext,
-} from '../src/campaign-context.js';
-import type { CampaignHistoryEntry } from '../src/campaigns.js';
 import { startDashboard } from '../src/dashboard.js';
 import {
   fcGlobalDir,
@@ -26,41 +21,6 @@ import {
 } from '../src/store.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..');
-const FIXED_NOW = Date.parse('2026-07-31T12:00:00.000Z');
-
-function campaignEntry(overrides: Partial<CampaignHistoryEntry>): CampaignHistoryEntry {
-  return {
-    seq: 1,
-    runId: 'campaign-run',
-    pass: true,
-    status: RUN_STATUS.RUNNING,
-    timestamp: new Date(FIXED_NOW).toISOString(),
-    ...overrides,
-  };
-}
-
-describe('acceptance gate: campaign relevance boundaries', () => {
-  it('does not resurrect an earlier handoff after the latest phase completes without a next phase', () => {
-    const selection = selectRelevantCampaignContext([
-      campaignEntry({
-        seq: 1,
-        phase: 'phase-one',
-        phaseComplete: true,
-        nextPhase: 'phase-two',
-      }),
-      campaignEntry({
-        seq: 2,
-        phase: 'phase-two',
-        phaseComplete: true,
-        nextPhase: undefined,
-      }),
-    ]);
-
-    expect(selection.recommendedPhase).toBeUndefined();
-    expect(formatCampaignContextBlock({ campaignLabel: 'finished-chain', selection })).toBe('');
-  });
-});
-
 describe('acceptance gate: dashboard mutation peers', () => {
   let app: FastifyInstance | undefined;
   let sandbox: string;
@@ -131,9 +91,9 @@ describe('acceptance gate: dashboard mutation peers', () => {
     }
   });
 
-  it('preserves a non-complete/non-failed terminal result when cancel is retried', async () => {
-    const runId = 'cancel-ceiling-hit';
-    const runJson = writeBlockedRun(runId, RUN_STATUS.CEILING_HIT);
+  it.each([RUN_STATUS.CEILING_HIT, RUN_STATUS.ESCALATED])('preserves a non-complete/non-failed terminal result when cancel is retried (%s)', async status => {
+    const runId = `cancel-${status}`;
+    const runJson = writeBlockedRun(runId, status);
     const before = readFileSync(runJson, 'utf-8');
 
     const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/cancel` });
@@ -154,7 +114,7 @@ describe('acceptance gate: campaign context CLI validation', () => {
     rmSync(sandbox, { recursive: true, force: true });
   });
 
-  it('rejects the space-separated campaign-context spelling before creating a run', () => {
+  it('rejects removed campaign-context options before creating a run', () => {
     const homeDir = join(sandbox, 'home');
     const fcHome = join(sandbox, 'fc-home');
     mkdirSync(homeDir, { recursive: true });
@@ -176,7 +136,7 @@ describe('acceptance gate: campaign context CLI validation', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      'Invalid --campaign-context syntax; use --campaign-context=inherit or --campaign-context=skip.',
+      'Unknown quick option: --campaign-context',
     );
     expect(existsSync(join(fcHome, 'runs'))).toBe(false);
   });

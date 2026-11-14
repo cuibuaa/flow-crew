@@ -1,11 +1,11 @@
 import { runRecordPath } from '../../run-layout.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
-/** Campaign phase readers, review health and iteration/campaign output; receives gate and scope-planning readers. */
-import { type CampaignTriggerType, type StoreState, isPausedRunStatus, requireRunArtifactDirectory, runDir, campaignsRoot as storeCampaignsRoot } from '../../store.js';
+/** Campaign phase readers and iteration/campaign output; receives gate and scope-planning readers. */
+import { type StoreState, isPausedRunStatus, requireRunArtifactDirectory, runDir, campaignsRoot as storeCampaignsRoot } from '../../store.js';
 import { writeFileSync, appendFileSync, mkdirSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { type CampaignHistoryEntry, canonicalCampaignId, resolveCampaignStorageKey } from '../../campaigns.js';
+import { canonicalCampaignId, resolveCampaignStorageKey } from '../../campaigns.js';
 import { projectPersistenceIdentity } from '../../project-identity.js';
 import { type CampaignPhaseMetadata, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
 
@@ -87,31 +87,6 @@ export function findCampaignPhaseMetadata(projectDir: string, state: StoreState)
     if (metadata) latest = metadata;
   }
   return latest;
-}
-
-export interface CampaignAlert {
-  type: CampaignTriggerType;
-  action: 'inject_researcher';
-  message: string;
-}
-
-/** Kept as the scheduler's public type alias for recorded campaign rows. */
-export type CampaignEntry = CampaignHistoryEntry;
-
-/** Campaign health observes failed reviews, never invents a principal metric. */
-export function checkCampaignHealth(entries: CampaignEntry[]): CampaignAlert | null {
-  if (entries.at(-1)?.terminalStudyComplete === true || entries.at(-1)?.workflowSatisfied === true) return null;
-  const bySeq = new Map<number, CampaignEntry>();
-  for (const entry of entries.filter(entry => entry.gate)) {
-    const prior = bySeq.get(entry.seq);
-    if (!prior || (entry.iteration ?? 0) > (prior.iteration ?? 0)
-        || (entry.iteration ?? 0) === (prior.iteration ?? 0) && entry.timestamp > prior.timestamp) bySeq.set(entry.seq, entry);
-  }
-  const threshold = 3;
-  const recent = [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-threshold);
-  return recent.length >= threshold && recent.every(e => !e.pass && e.gate === recent[0].gate)
-    ? { type: 'repeated_failure', action: 'inject_researcher', message: `${threshold} consecutive failures on gate ${recent[0].gate}` }
-    : null;
 }
 
 export function createCampaignWriters(services: CampaignWriterServices) {

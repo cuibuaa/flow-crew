@@ -25,7 +25,6 @@ import { fcGlobalDir, initializeReservedRun, readRunReservation, requireExisting
 import { runRecordPath } from '../src/run-layout.js';
 import { cmdPrune } from '../src/run-retention.js';
 import { startRpcServer } from '../src/orchestrator-rpc.js';
-import { selectRelevantCampaignContext } from '../src/campaign-context.js';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
 import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
 
@@ -270,14 +269,5 @@ describe('restart and campaign relevance', () => {
     expect(controls.killProcess).not.toHaveBeenCalled();
     expect(controls.spawnDaemon).toHaveBeenCalledTimes(replacement ? 0 : 1);
     if (replacement) expect(text).toContain('changed ownership');
-  });
-
-  it('H10 retains slow nonterminal campaign facts until an explicit terminal or phase completion event', async () => {
-    const entries = [{ seq: 1, runId: 'active', status: 'running', timestamp: new Date().toISOString(), phase: 'one', phaseComplete: false }];
-    const fast = selectRelevantCampaignContext(entries);
-    await vi.advanceTimersByTimeAsync(longWait);
-    expect(selectRelevantCampaignContext(entries)).toEqual(fast);
-    expect(selectRelevantCampaignContext([...entries, { ...entries[0], seq: 2, phaseComplete: true, nextPhase: 'two' }])).toMatchObject({ entries: [], recommendedPhase: 'two' });
-    expect(selectRelevantCampaignContext([...entries, { ...entries[0], seq: 3, status: 'complete' }]).entries).toEqual([]);
   });
 });

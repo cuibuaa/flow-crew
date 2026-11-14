@@ -136,7 +136,6 @@ export interface StageOpts {
   availableChecks?: string;
   availableSkills?: string;
   contextInventory?: string;
-  ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
   gateContext?: Pick<Parameters<typeof buildGateDispatchPreamble>[0], 'authorIds' | 'fixStageIds' | 'roundDiffPath'>;
@@ -439,7 +438,6 @@ export async function runStage(
     .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
     .replace(/\{context_inventory\}/g, opts.contextInventory ?? 'none')
-    .replace(/\{ledger_digest\}/g, opts.ledgerDigest ?? 'none')
     .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))
     .replace(/\{verdict_contract\}/g, VERDICT_CONTRACT_DOC)
     .replace(/\{artifact_contract_schema\}/g, () => ARTIFACT_CONTRACT_SCHEMA_DOC)

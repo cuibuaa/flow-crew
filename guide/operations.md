@@ -259,7 +259,7 @@ An observation grants neither permission nor a pass. Older `input.md` aliases ca
 every historical retry or hidden provider instruction.
 
 `events` reads the canonical feed; `watch` gives a first heartbeat and edge-triggered stalls,
-drift and evidence gaps. Watch reports terminal indecision after its quiet grace and rejected
+and evidence gaps. Watch reports terminal indecision after its quiet grace and rejected
 gate plateau/regression using bound numeric history. It is an operator observer, separate from
 the deterministic stage watchdog described in [architecture](architecture.md#deadlines-and-idle-progress).
 No watcher opinion establishes that a model result is correct.
@@ -491,20 +491,13 @@ basename slug; Git failure/non-repository selection falls back to the project di
 `--no-campaign` detaches. Explicit display name and canonical storage identity are distinct.
 Global campaign telemetry lives in flat `<key>.jsonl` ledgers under the state root's `campaigns`.
 
-`--campaign-context=inherit|skip` controls verbose planner history independently of grouping.
-Skip still permits the compact tried-direction ledger. The legacy `--no-inherit-campaign`
-alias selects skip. Without an explicit context flag, at least three adverse endings among
-the ten most recent completed tasks select skip; explicit choice wins and continuation
-retains its stored choice. A history instruction to avoid repeated directions does not
-mechanically guarantee model novelty.
+Campaign membership supplies identity and stored telemetry to operator views. Planners receive
+no automatic campaign history, tried-direction digest or pivot instruction. Declare any historical
+evidence needed for this task in the brief's existing `inputs` array. The admitted task and its
+inputs carry the planning constraints; project instruments retain their declared verdict and stop duties.
 
-Campaign health can request research/pivots;
-the frozen project instrument owns project verdicts and stop requests. Current telemetry does not create a
-principal metric merely because a gate passes.
-
-Sources: [selection](../src/config.ts), [launch context](../src/cli.ts),
-[hygiene](../src/campaign-hygiene.ts), [ledger](../src/campaign-ledger.ts),
-[campaign policy](../src/scheduler/sched_policy/campaign.ts).
+Sources: [selection](../src/config.ts), [launch](../src/cli.ts),
+[campaign storage](../src/campaigns.ts), [campaign publication](../src/scheduler/sched_policy/campaign.ts).
 
 ## Preserve and reclaim
 

@@ -163,7 +163,7 @@ describe('autonomous launch CLI integration', () => {
       '--branch', 'result',
     ])).toMatchObject({ base: 'release', branch: 'result', target: '../worktree' });
 
-    expect(watchUsage()).toContain('first-pass drift snapshot plus edge-triggered drift crossings');
+    expect(watchUsage()).toContain('edge-triggered stalls, evidence gaps, and status contradictions');
     expect(parseWatchArgs(['watch', '--once', '--poll', '5'])).toMatchObject({ once: true, pollMs: 5_000 });
     expect(() => parseWatchArgs(['watch', '--poll', '0'])).toThrow(/positive.*Node timer range/);
   });

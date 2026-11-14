@@ -128,7 +128,7 @@ describe('nothing waits for a person after launch', () => {
     const report = inspectBrief(text);
     expect(() => createBriefAdmission(report, { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() })).toThrow('research');
     const fixture = adapter();
-    await expect(runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined, true)).rejects.toThrow('research');
+    await expect(runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined)).rejects.toThrow('research');
     expect(fixture.calls).toEqual([]);
   });
 
