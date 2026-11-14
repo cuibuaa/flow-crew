@@ -117,7 +117,7 @@ export function inspectDispatchProposal(
   normalizeStageContracts(dispatched);
   // Model-emitted repairs retain their choice; fixed plans retain author results.
   for (const repair of dispatched) {
-    if (state.stages[dispatchStageId]?.attempts?.length && !repair.is_gate && repair.retry_to?.length) {
+    if (state.workflowName === 'entry' && state.stages[dispatchStageId]?.attempts?.length && !repair.is_gate && repair.retry_to?.length) {
       repair.decision ??= { kind: 'successor', successors: [...repair.retry_to, 'replan'], default: repair.retry_to[0] };
     }
   }
