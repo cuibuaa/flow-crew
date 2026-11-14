@@ -27,6 +27,7 @@ const workflows = join(import.meta.dirname, '../config/workflows');
 const roles = join(import.meta.dirname, '../config/agents');
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'planner-entry-')); project = join(root, 'project'); mkdirSync(project);
+  mkdirSync(join(root, 'home'));
   previous = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   setEngineDefaults({ max_iterations: 1, plan_stage_retries: 1, gate_retry_loops: 1 });
 });
@@ -114,7 +115,7 @@ it('reads legacy choose/shape through status, listing, summary and rendered UI; 
   expect(html).toContain('choose'); expect(html).toContain(runId);
   const status = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname,
     'status', '--project', project], { cwd: project, encoding: 'utf8', timeout: 60_000,
-    env: { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'private.sock'), TSX_DISABLE_CACHE: '1' } });
+    env: { ...process.env, HOME: join(root, 'home'), FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'private.sock'), TSX_DISABLE_CACHE: '1' } });
   expect(status.status, status.stderr).toBe(0); expect(status.stdout).toContain(runId); expect(status.stdout).toContain('choose');
   expect(() => assertContinuationCompatible(project, runId)).toThrow(ContinuationRefusal);
   try { assertContinuationCompatible(project, runId); } catch (error) { expect(error).toMatchObject({ code: 'retired_shape_decision' }); }
