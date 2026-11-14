@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execWithStdin } from '../src/adapters/base.js';
@@ -53,7 +53,21 @@ describe('shared native diagnosis and capability memory', () => {
     }
   });
 
+  it('reuses rejected effort after an executable timestamp change with identical bytes', () => {
+    const executable = join(root, 'bin', 'claude');
+    const bytes = readFileSync(executable);
+    const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', cwd: root });
+    rememberUnsupportedEffort(root, identity);
+    const timestamp = new Date('2020-01-01T00:00:00.000Z');
+    utimesSync(executable, timestamp, timestamp);
+    expect(readFileSync(executable)).toEqual(bytes);
+    const touched = resolveAdapterCapabilityIdentity(role, { executable: 'claude', cwd: root });
+    expect(readAdapterCapabilityMemory(root, touched)?.identity).toEqual(identity);
+  });
+
   it('retains rejected effort only for the same native executable, provider, model and effort', () => {
+    const timestamp = new Date('2020-01-01T00:00:00.000Z');
+    utimesSync(join(root, 'bin', 'claude'), timestamp, timestamp);
     const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', cwd: root });
     expect(identity.version).toMatch(/^fingerprint:/);
     expect(readAdapterCapabilityMemory(root, identity)).toBeUndefined();
@@ -62,7 +76,12 @@ describe('shared native diagnosis and capability memory', () => {
     for (const changed of [{ provider: 'another-provider' }, { model: 'another-model' }, { reasoningEffort: 'low' }]) {
       expect(readAdapterCapabilityMemory(root, { ...identity, ...changed })).toBeUndefined();
     }
-    writeFileSync(join(root, 'bin', 'claude'), `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+    const executable = join(root, 'bin', 'claude');
+    const before = statSync(executable);
+    writeFileSync(executable, readFileSync(executable, 'utf8').replace('fixture rejection', 'changed rejection'));
+    utimesSync(executable, before.atime, before.mtime);
+    expect(statSync(executable).size).toBe(before.size);
+    expect(statSync(executable).mtimeMs).toBe(before.mtimeMs);
     const changedCli = resolveAdapterCapabilityIdentity(role, { executable: 'claude', cwd: root });
     expect(changedCli.version).not.toBe(identity.version);
     expect(readAdapterCapabilityMemory(root, changedCli)).toBeUndefined();
@@ -79,6 +98,21 @@ describe('shared native diagnosis and capability memory', () => {
     const next = new AdapterParameterRepair(role, root, identity);
     expect(next.role.reasoning_effort).toBe(CLI_BUILTIN_DEFAULT);
     expect(next.apply(diagnoseAdapterFailure('', 1, { parameter: 'effort' }))).toBe(false);
+  });
+
+  it('keeps the repair allowance while selecting a different capability', () => {
+    const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', cwd: root });
+    const repair = new AdapterParameterRepair(role, root, identity);
+    const rejection = diagnoseAdapterFailure('', 1, { parameter: 'effort' });
+    expect(repair.apply(rejection)).toBe(true);
+    const second = { ...identity, model: 'another-model' };
+    repair.select({ ...role, model: second.model }, second);
+    expect(repair.role.reasoning_effort).toBe('high');
+    expect(repair.apply(rejection)).toBe(true);
+    expect(readAdapterCapabilityMemory(root, second)?.identity).toEqual(second);
+    repair.select({ ...role, model: 'third-model' }, { ...identity, model: 'third-model' });
+    expect(repair.apply(rejection)).toBe(false);
+    expect(readAdapterCapabilityMemory(root, { ...identity, model: 'third-model' })).toBeUndefined();
   });
 
   it('keeps explicit provider pins and leaves the ambient default unresolved', () => {

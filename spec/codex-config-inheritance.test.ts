@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { resolveCodexCapabilityIdentity, writeCodexConfig } from '../src/adapters/codex.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import type { AgentConfig } from '../src/adapters/base.js';
@@ -46,7 +46,7 @@ describe('codex capability executable selection', () => {
     writeFileSync(executable, 'private executable identity', { mode: 0o700 });
     const saved = process.env.PATH;
     process.env.PATH = member;
-    try { expect(await identity()).toContain(`fingerprint:${executable}:`); }
+    try { expect(await identity()).toBe(`fingerprint:${createHash('sha256').update(readFileSync(executable)).digest('hex')}`); }
     finally { if (saved === undefined) delete process.env.PATH; else process.env.PATH = saved; }
   });
 
@@ -57,7 +57,7 @@ describe('codex capability executable selection', () => {
     writeFileSync(executable, 'private executable identity', { mode: 0o700 });
     const saved = process.env.PATH;
     process.env.PATH = `${globalHome}:bin`;
-    try { expect(await identity()).toContain(`fingerprint:${executable}:`); }
+    try { expect(await identity()).toBe(`fingerprint:${createHash('sha256').update(readFileSync(executable)).digest('hex')}`); }
     finally { if (saved === undefined) delete process.env.PATH; else process.env.PATH = saved; }
   });
 
@@ -67,7 +67,7 @@ describe('codex capability executable selection', () => {
     const executable = join(globalHome, 'codex');
     writeFileSync(executable, 'selected by the next PATH entry', { mode: 0o700 });
     const saved = process.env.PATH; process.env.PATH = 'missing/../bin:.';
-    try { expect(await identity()).toContain(`fingerprint:${executable}:`); }
+    try { expect(await identity()).toBe(`fingerprint:${createHash('sha256').update(readFileSync(executable)).digest('hex')}`); }
     finally { if (saved === undefined) delete process.env.PATH; else process.env.PATH = saved; }
   });
 

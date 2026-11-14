@@ -125,7 +125,8 @@ export class ClaudeAdapter implements Adapter {
       if (!repair || key !== selectionKey) {
         const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', provider, cwd: opts.workDir,
           model: selection.model.value ?? 'cli_builtin_default', reasoningEffort: selection.effort.value ?? 'cli_builtin_default' });
-        repair = new AdapterParameterRepair(role, opts.runDir, identity);
+        if (repair) repair.select(role, identity);
+        else repair = new AdapterParameterRepair(role, opts.runDir, identity);
         selectionKey = key;
       }
       const effectiveRole = repair.role;

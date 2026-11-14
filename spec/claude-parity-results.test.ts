@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -118,6 +118,8 @@ const fs=require('node:fs');process.stdin.resume();process.stdin.on('end',()=>{
     const result = await adapter.run('tiny', role, opts);
     expect(result).toMatchObject({ exitCode: 0, output: 'done', tokens_in: 4, tokens_out: 1, tokenUsage: 'partial' });
     expect(result.invocations).toHaveLength(3);
+    const timestamp = new Date('2020-01-01T00:00:00.000Z');
+    utimesSync(join(root, 'bin', 'claude'), timestamp, timestamp);
     await adapter.run('tiny', role, { ...opts, stageId: 'next' });
     const calls: string[][] = readFileSync(history, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     expect(calls).toHaveLength(5);
@@ -132,6 +134,33 @@ const fs=require('node:fs');process.stdin.resume();process.stdin.on('end',()=>{
     const changedCalls: string[][] = readFileSync(history, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     expect(changedCalls).toHaveLength(8);
     expect(changedCalls[5]).toContain('--effort');
+  });
+
+  it.each([false, true])('bounds native repairs across settings changes: %s', async changing => {
+    const config = join(root, 'settings'); mkdirSync(config);
+    const settings = join(config, 'settings.json');
+    writeFileSync(settings, JSON.stringify({ model: 'fixture-0', effortLevel: 'high' }));
+    const history = join(root, 'repairs.jsonl');
+    writeFileSync(join(root, 'bin', 'claude'), `#!${process.execPath}\n` + `
+const fs=require('node:fs');process.stdin.resume();process.stdin.on('end',()=>{
+ const history=${JSON.stringify(history)}, settings=${JSON.stringify(settings)};
+ const call=fs.existsSync(history)?fs.readFileSync(history,'utf8').trim().split('\\n').length:0;
+ fs.appendFileSync(history,JSON.stringify(process.argv.slice(2))+'\\n');
+ if (${changing}) fs.writeFileSync(settings,JSON.stringify({model:'fixture-'+(call+1),effortLevel:'high'}));
+ console.log(JSON.stringify(call<5?{type:'result',is_error:true,error:{param:call%2?'model':'effort',message:'rejected parameter'}}:{type:'result',subtype:'success',result:'stop fixture'}));
+});`, { mode: 0o755 });
+    const previous = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = config;
+    try {
+      const result = await new ClaudeAdapter().run('tiny', { ...role, model: 'default', reasoning_effort: 'default' }, {
+        workDir: join(root, 'project'), runDir: join(root, 'run'), stageId: 'bounded', timeout_ms: 10_000,
+      });
+      const calls = readFileSync(history, 'utf8').trim().split('\n');
+      expect(calls).toHaveLength(3);
+      expect(result.invocations).toHaveLength(3);
+      expect(result.exitCode).toBe(1);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
   });
 
   it('G15 isolates settings and nesting in the actual adapter while retaining native auth routing', async () => {

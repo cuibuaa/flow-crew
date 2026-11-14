@@ -12,14 +12,15 @@ import { runRecordPath } from '../run-layout.js';
  * for the operator instead of a wall of transcript.
  *
  * Native error envelopes and CLI diagnostics share the same parameter fixes and
- * capability memory. Detect CLI changes from file identity, without launching it.
+ * capability memory. Detect CLI changes from content identity, without launching it.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { mkdirSync, writeFileSync } from '../engine-fs.js';
 import { findExecutableOnPath } from './availability.js';
+import { readContentIdentity } from '../content-identity.js';
 
 /** Drop a rejected pin without inheriting it again from global configuration. */
 export const CLI_BUILTIN_DEFAULT = '__cli_builtin_default__';
@@ -43,8 +44,8 @@ function detectedCliVersion(executable: string, cwd: string): string {
   const selected = findExecutableOnPath(executable, process.env.PATH, cwd);
   if (!selected) return 'unknown';
   try {
-    const info = statSync(selected, { bigint: true });
-    return `fingerprint:${realpathSync(selected)}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}`;
+    const content = readContentIdentity(realpathSync(selected));
+    return content.state === 'present' ? `fingerprint:${content.sha256}` : 'unknown';
   } catch { return 'unknown'; }
 }
 
@@ -240,20 +241,24 @@ export function applyFix<T extends { model?: string; reasoning_effort?: string }
 
 /** One bounded decision point for native parameter repairs across adapters. */
 export class AdapterParameterRepair<T extends { model?: string; reasoning_effort?: string }> {
-  role: T;
-  private readonly applied = new Set<AdapterFix>();
+  private fixes = 0;
 
-  constructor(role: T, private readonly runDir: string, private readonly identity: AdapterCapabilityIdentity,
+  constructor(public role: T, private readonly runDir: string, private identity: AdapterCapabilityIdentity,
     private readonly namespace = identity.executable) {
-    const remembered = readAdapterCapabilityMemory(runDir, identity, namespace) !== undefined;
-    this.role = remembered ? applyFix(role, 'drop_effort') : role;
-    if (remembered) this.applied.add('drop_effort');
+    this.select(role, identity);
+  }
+
+  /** Selection can change the capability tried, never this invocation's allowance. */
+  select(role: T, identity: AdapterCapabilityIdentity): void {
+    this.identity = identity;
+    this.role = readAdapterCapabilityMemory(this.runDir, identity, this.namespace) ? applyFix(role, 'drop_effort') : role;
   }
 
   apply(diagnosis: Diagnosis): boolean {
     const fix = diagnosis.fix;
-    if (fix === 'none' || this.applied.has(fix) || this.applied.size >= 2) return false;
-    this.applied.add(fix);
+    if (fix === 'none' || this.fixes >= 2
+      || this.role[fix === 'drop_model' ? 'model' : 'reasoning_effort'] === CLI_BUILTIN_DEFAULT) return false;
+    this.fixes++;
     if (fix === 'drop_effort') rememberUnsupportedEffort(this.runDir, this.identity, this.namespace);
     this.role = applyFix(this.role, fix);
     return true;
