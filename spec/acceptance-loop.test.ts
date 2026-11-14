@@ -23,6 +23,21 @@ import { gateVerdictCorrectionPath, GATE_VERDICT_CORRECTION_VERSION, type Workfl
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
+// This case asserts archive contents and scheduler history. Carrier tamper
+// detection has its own integration specs (engine-integrity*.test.ts); taking
+// rollback preimages around every scripted adapter is unrelated to that verdict.
+// Other cases in this file, and all shared-helper consumers, retain the guard.
+const archiveFixture = vi.hoisted(() => ({ active: false }));
+vi.mock('../src/engine-integrity.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/engine-integrity.js')>();
+  return { ...actual,
+    withAdmittedExecution: (...[input, action]: Parameters<typeof actual.withAdmittedExecution>) =>
+      archiveFixture.active ? action() : actual.withAdmittedExecution(input, action),
+    withEngineIntegrity: (...[input, action]: Parameters<typeof actual.withEngineIntegrity>) =>
+      archiveFixture.active ? action() : actual.withEngineIntegrity(input, action),
+  };
+});
+
 const GATE_ID = 'release_gate';
 const FIX_ID = 'fix_release';
 const GATE_UUID = '11111111-1111-4111-8111-111111111111';
@@ -304,7 +319,8 @@ describe('compressed acceptance loop', () => {
   });
 
   it('keeps round evidence distinct while carrying same-gate rejection history across outer iterations', { timeout: 20_000 }, async () => {
-    const result = await runScenario({ twoIterations: true });
+    archiveFixture.active = true;
+    const result = await runScenario({ twoIterations: true }).finally(() => { archiveFixture.active = false; });
     expect(result.finalStatus).toBe('complete');
     expect(result.finalIteration).toBe(2);
     expect(result.gatePrompts).toHaveLength(4);

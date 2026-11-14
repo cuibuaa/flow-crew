@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
@@ -21,6 +21,26 @@ vi.mock('node:fs', async importOriginal => {
   return { ...stageFileSystem(actual), readFileSync(...args: Parameters<typeof actual.readFileSync>) {
     if (commandReads.active && String(args[0]) === commandReads.runPath) commandReads.count++;
     return actual.readFileSync(...args);
+  } };
+});
+
+// This scenario asserts lifecycle routing and the closed tracker state. Keep
+// those real, without persisting superseded progress or the unused native
+// command ledger. atomic-publication.test.ts covers live progress publication;
+// evidence-ledger.test.ts covers native command facts. Delegate every other
+// path so an accidental events.jsonl/run.json publication still fails here.
+vi.mock('../src/engine-fs.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/engine-fs.js')>();
+  return { ...actual, atomicWrite: (...args: Parameters<typeof actual.atomicWrite>) => {
+    if (basename(args[0]) === 'command_activity.json' && !JSON.parse(String(args[1])).streamClosed) return true;
+    return actual.atomicWrite(...args);
+  } };
+});
+vi.mock('../src/evidence-ledger.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/evidence-ledger.js')>();
+  return { ...actual, appendEvidence: (...args: Parameters<typeof actual.appendEvidence>) => {
+    if (args[1].kind === 'command' && args[1].owner === 'adapter-event') return;
+    return actual.appendEvidence(...args);
   } };
 });
 
