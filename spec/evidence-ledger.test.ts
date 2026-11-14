@@ -125,7 +125,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       sessionId: '12345678-1234-4234-8234-123456789abc' };
   } };
   const { config, raw } = loadWorkflow(join(engine, 'config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true, undefined, true, receipt);
+  const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true, undefined, receipt);
   const rd = runDir(target, final.runId), ledger = readEvidence(rd);
   // Base evidence appends a supplement; expose the latest fact for each judged tree.
   const validations = [...new Map(ledger.filter((entry): entry is ValidationFact & typeof entry => entry.kind === 'validation').map(fact => [fact.treeHash, fact])).values()];
