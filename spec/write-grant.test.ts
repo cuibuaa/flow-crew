@@ -192,8 +192,6 @@ server.listen(sock, () => { const socket=net.connect(sock); let reply=''; socket
     expect(parsed(result.output)).toEqual({ pid: supervisedPid, pgid: supervisedPid, testExit: 0, socket: 'ok' });
   });
 
-
-
   it('commits on its own branch with narrow shared Git grants and refuses other branch, config and hook writes', async () => {
     if (!supported()) return;
     const { common, checkout } = await linkedWorktree();
@@ -759,7 +757,7 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
     expect(readRunState(project, runId).writeGrant).toEqual(contract);
   });
 
-  it.each(['author', 'successor-author', 'successor-repair', 'gate', 'isolated-decision'] as const)(
+  it.each(['author', 'successor-author', 'successor-repair', 'gate'] as const)(
     'preserves admitted external outputs and the shared boundary for a scheduler %s', async kind => {
       if (!supported()) return;
       const { writeBriefCriteriaArtifact } = await import('../src/brief-criteria.js');
@@ -777,15 +775,10 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
       ({ runId, runDirPath: directory } = createRun(project, 'grant-fixture', 'name: grant-fixture\nstages: []\n', ['left', 'right'], brief));
       contract = readRunState(project, runId).writeGrant!;
       writeBriefCriteriaArtifact(directory, brief);
-      const isolated = kind === 'isolated-decision', gate = kind === 'gate';
-      if (isolated) {
-        // Review isolation needs a readable diff so the real stub adapter executes.
-        git(project, ['init', '-q']);
-        git(project, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']);
-      }
-      const author = !isolated && !gate;
+      const gate = kind === 'gate';
+      const author = !gate;
       const stage = StageConfigSchema.parse({ id: 'left', role: 'local', scope: ['arbitrary project work note'], artifact_contract: gate ? { ...artifacts, produces: [{ id: 'project', root: 'project', path: 'left', kind: 'directory', nonempty: false }] } : artifacts,
-        ...(kind === 'author' || gate ? {} : { decision: { successors: ['right'], default: 'right', ...(isolated ? { kind: 'review' } : {}) } }),
+        ...(kind === 'author' || gate ? {} : { decision: { successors: ['right'], default: 'right' } }),
         ...(gate ? { is_gate: true } : {}),
         ...(kind === 'successor-repair' ? { retry_to: ['right'], depends_on: ['right'] } : {}),
       });
@@ -804,7 +797,7 @@ console.log(JSON.stringify({
  alias:attempt(()=>fs.linkSync(source,${JSON.stringify(join(output, 'alias'))}))
 }));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts, captureStreams: true });
         const record = gate ? { pass: true, reason: 'Read-only gate.', criteria: {}, audit_findings: { version: 1, findings: [] } }
-          : stage.decision ? { successor: 'right', reason: 'Declared output observed.', ...(isolated ? { risk_areas: [] } : {}) }
+          : stage.decision ? { successor: 'right', reason: 'Declared output observed.' }
           : { status: 'delivered', summary: 'Declared output observed.', caveats: [], remaining_work: [], blocks: null };
         return { ...child, output: JSON.stringify(record) };
       } };

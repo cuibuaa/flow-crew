@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 57 -->
+<!-- flowcrew-skill-revision: 58 -->
 
 # Ship a conversation to FlowCrew
 
@@ -128,7 +128,7 @@ default or earlier wrap-up cut. Do not hardcode defaults.
 Explain unattended shell authority: the admitted contract and stage kind grant writes, while planner scope lists are work-division notes. Read-only fallback detects project changes without restoring them; frozen restoration requires matching pinned-base Git content.
 On capable hosts, explain the [stage filesystem write grant](../guide/operations.md#stage-filesystem-write-grants):
 authors and repairs retain admitted output directories when returning a successor;
-isolated routing decisions and review gates receive no write grant for those directories.
+Review gates receive no write grant for those directories.
 
 Ask: “Start this exact brief digest `<digest>` with these settings?”
 Wait for a new explicit answer after the final bytes/settings were shown.
@@ -242,3 +242,6 @@ Engine decisions read only the admitted declaration. Put executable reality chec
 frontmatter `reality_checks`, terminal conditions in `terminal_states`, validation commands
 in `validation`, and criterion identities in `criteria`. A `## Reality checks` section in
 the body is model context only. Editing prose cannot add or remove engine obligations.
+
+Engineering work receives one full independent read-only review after authoring. The reviewer
+chooses the experiments and exploration and owns the verdict; no preliminary decision routes review depth.

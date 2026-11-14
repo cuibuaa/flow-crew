@@ -144,15 +144,19 @@ See [content settlement](../src/scheduler/sched_scope/reconciliation.ts).
 A brief declaring `research.protocol: research-instrument/v1` constructs its author and optional declared project reviewer directly. The frozen project instrument owns verdicts and final report content.
 Engineering briefs enter `entry.yaml` at the planner. Its admitted graph may contain one author
 and an independent gate or a decomposition; both use the same admission and required repair routes.
-The parsed declaration alone decides research versus engineering. Every planned author result routes
-through a read-only assessment to focused or full independent review. Full review remains available.
+The parsed declaration alone decides research versus engineering. Each planned author result receives
+one full independent read-only review. The reviewer chooses its exploration and owns the verdict.
+There is no preliminary review-routing decision. Historical review-routing runs remain readable;
+continuation refuses with `CONTINUATION_INCOMPATIBLE: retired_review_decision`. Start a new planner
+run with the historical evidence declared as inputs.
+
 Historical workflow files remain readable. `planner.yaml` remains the `plan-check --brief` carrier;
 `direct.yaml` remains a fixed-plan library workflow loaded through `loadWorkflow`/`runWorkflow`.
 Neither selects the shape of a new CLI engineering run.
 
 Any stage can declare `decision: {successors: [next_stage, replan], default: next_stage}`.
-A decision returns one JSON object with `successor` and `reason`; review decisions also return
-closed risk-area objects.
+A decision returns one JSON object with `successor` and `reason`.
+
 The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
 reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
 declared default and record why. Outside-set

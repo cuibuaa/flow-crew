@@ -65,7 +65,7 @@ export function classifyGateRecoveryFact(
 
 export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): GateRuntimeFacts {
   const stagesById = new Map(allStages.map(stage => [stage.id, stage]));
-  const gateStages = uniqueGateStages(allStages).filter(stage => !isStageInSkippedBranch(stage.id, stagesById, state, 'settlement'));
+  const gateStages = uniqueGateStages(allStages).filter(stage => !isStageInSkippedBranch(stage.id, stagesById, state));
   if (gateStages.length === 0) {
     return { allPass: true, failedGateIds: [], rejectedGateIds: [], contractRefusals: [], evaluations: [] };
   }

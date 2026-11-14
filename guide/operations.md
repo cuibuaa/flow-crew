@@ -129,7 +129,7 @@ author stages, including authors and repairs that return successor decisions.
 Returning a successor selects the next stage; it does not change the author's
 admitted output authority.
 These shared output trees receive the same no-REFER boundary as shared caches;
-read-only gates and isolated assessment decisions receive no write grant
+read-only gates receive no write grant
 for them. Their declarations do not grant parents or siblings.
 
 Each stage also receives its own agent home, invocation scratch and `/dev/null`.

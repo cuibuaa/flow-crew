@@ -26,7 +26,7 @@ interface FrozenInputs {
   parents: Record<string, string>;
 }
 export function isReadOnlyStage(stage: Pick<StageConfig, 'is_gate' | 'decision'>): boolean {
-  return stage.is_gate || stage.decision?.kind === 'review';
+  return stage.is_gate;
 }
 export function readContentMemberIdentity(path: string, projectDir?: string): ContentIdentity {
   if (projectDir && !artifactRootContains(realpathSync(projectDir), canonicalPotentialProjectPath(projectDir, dirname(relative(projectDir, path))))) {

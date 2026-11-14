@@ -8,7 +8,6 @@ import type { AuditFinding } from '../../scoped-audit-repair.js';
 import { existsSync } from 'node:fs';
 import { unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
-import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
 import { loadDefaults, type StageConfig } from '../sched_admission/configuration.js';
@@ -115,7 +114,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     } else if (source.retry_to?.length && !source.decision) {
       choice = validateDecision(stage, JSON.stringify({ successor: declaration.default, reason: 'Completed repair returns to its rejecting gate.' }));
     } else {
-      choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? changedPaths(project, state) : []);
+      choice = validateDecision(stage, readStageOutput(project, run, source.id));
     }
     const record: DecisionRecord = { ...choice, ...(gateAccepted === undefined ? {} : { gateAccepted }), planRevision: state.queryState?.planRevision?.revision, declaredSuccessors: declaration.successors, key, stageId: source.id, iteration };
     for (const [target, owner] of Object.entries(graph.enabled)) if (owner === source.id) delete graph.enabled[target];

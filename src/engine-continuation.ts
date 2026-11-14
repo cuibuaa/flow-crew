@@ -14,13 +14,17 @@ import { persistedPlanErrors, checkpointConsumers, engineGeneration } from './re
 import { readRunState, readStageStatus, requireKnownRunStatus, runDir, RUN_STATUS, STAGE_STATUS, updateOperationalRunStateAtPath, type StoreState } from './store.js';
 
 export class ContinuationRefusal extends Error {
-  readonly code = 'retired_shape_decision';
-  constructor() { super('CONTINUATION_INCOMPATIBLE: retired_shape_decision; start a new planner run with the historical evidence as inputs.'); this.name = 'ContinuationRefusal'; }
+  constructor(readonly code: 'retired_shape_decision' | 'retired_review_decision' = 'retired_shape_decision') {
+    super(`CONTINUATION_INCOMPATIBLE: ${code}; start a new planner run with the historical evidence as inputs.`);
+    this.name = 'ContinuationRefusal';
+  }
 }
 
 export function assertExecutableWorkflow(workflow: unknown): void {
   const stages = workflow && typeof workflow === 'object' && 'stages' in workflow ? workflow.stages : undefined;
-  if (Array.isArray(stages) && stages.some(stage => stage?.decision?.kind === 'shape')) throw new ContinuationRefusal();
+  if (!Array.isArray(stages)) return;
+  if (stages.some(stage => stage?.decision?.kind === 'shape')) throw new ContinuationRefusal('retired_shape_decision');
+  if (stages.some(stage => stage?.decision?.kind === 'review')) throw new ContinuationRefusal('retired_review_decision');
 }
 
 export function recordContinuationRefusal(projectDir: string, runId: string, reason: string): void {

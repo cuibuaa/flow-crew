@@ -55,7 +55,7 @@ const StageFields = z.object({
   /** Declared run-time edges. continue releases ordinary dependencies; replan retains this iteration. */
   decision: z.object({
     successors: z.array(z.string().min(1)).min(1), default: z.string().min(1),
-    kind: z.enum(['successor', 'review']).optional(),
+    kind: z.literal('successor').optional(),
   }).strict().refine(value => value.successors.includes(value.default), 'default must be a declared successor').optional(),
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
   criterion_refs: z.array(z.string()).optional().default([]),

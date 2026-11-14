@@ -41,7 +41,6 @@ function adapter() {
       // A stale adapter can still write its former transport slot. It has no execution meaning.
       writeFileSync(slot, JSON.stringify({ id: 'download', action: 'download', target: 'https://example.invalid/data', risk: 'external', category: 'downloads', host: 'example.invalid', title: gap }));
     }
-    if (opts.stageId === 'assess') output = { successor: 'review', reason: 'Bounded greeting risk.', risk_areas: [] };
     if (opts.stageId === 'review') return { output: verdict(opts), exitCode: 0, duration_ms: 1 };
     return { output: typeof output === 'string' ? output : JSON.stringify(output), exitCode: 0, duration_ms: 1 };
   } };
@@ -56,7 +55,7 @@ async function execute(implementation: Adapter, text = brief) {
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'no-approvals-')); project = join(root, 'project'); mkdirSync(project);
   previous = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
-  // Exercise model assessment with a readable diff; unavailable diffs route directly to full review.
+  // Exercise independent review with a readable diff.
   isolatedProjectCommand('git', ['init', '-q'], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
   setEngineDefaults({ gate_retry_loops: 1, plan_stage_retries: 1, max_iterations: 1 });
@@ -64,11 +63,11 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
 
 describe('nothing waits for a person after launch', () => {
-  it('ignores an outward-effect request slot, completes planning, assessment and gates, and reports the gap', async () => {
+  it('ignores an outward-effect request slot, completes planning and gates, and reports the gap', async () => {
     const fixture = adapter();
     const state = await execute(fixture.implementation);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(fixture.calls).toEqual(['plan', 'implement', 'assess', 'review']);
+    expect(fixture.calls).toEqual(['plan', 'implement', 'review']);
     const directory = runDir(project, state.runId);
     expect(readRunEvents(project, state.runId).some(event => ['approval_parked', 'approval_attempt_suspended', 'approval_resolved', 'decision_questions'].includes(event.type))).toBe(false);
     expect(state.parked).toBeUndefined();
@@ -104,7 +103,7 @@ describe('nothing waits for a person after launch', () => {
       "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce the greeting and report unavailable resources.\"}]\ninputs: []\noutputs: []\n---\n# Improve a measured metric\nSearch for lower output-token cost.\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n");
     expect(state.status, state.failureReason).toBe('complete');
     expect(state.research).toBeUndefined();
-    expect(fixture.calls).toEqual(['plan', 'implement', 'assess', 'review']);
+    expect(fixture.calls).toEqual(['plan', 'implement', 'review']);
     expect(fixture.prompts[0]).toContain('parsed declaration alone');
     expect(fixture.prompts[0]).not.toContain('missing_author_facts');
     expect(state.decisionGraph?.records[0].outcome).toBe('chosen');

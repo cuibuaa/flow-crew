@@ -137,7 +137,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '57', digest: '9f6ec2c951da' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '58', digest: 'bdd86d310e4c' });
   });
 
   it('documents declared command allowances and the unfinished handoff', () => {
@@ -163,7 +163,7 @@ describe('public autonomous launch documentation', () => {
     const grants = compact(section(operations, '## Stage filesystem write grants', '## Inspect, guide and stop'));
     expect(grants).toContain('authors and repairs that return successor decisions');
     expect(grants).toContain("it does not change the author's admitted output authority");
-    expect(grants).toContain('read-only gates and isolated assessment decisions receive no write grant');
+    expect(grants).toContain('read-only gates receive no write grant');
     expect(compact(ship)).toContain('authors and repairs retain admitted output directories when returning a successor');
   });
 

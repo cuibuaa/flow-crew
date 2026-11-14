@@ -64,7 +64,7 @@ it.each([1, 2])('admits a planner graph with %s author duties through dispatch a
   expect(final.decisionGraph?.records.some(record => record.gateAccepted === true)).toBe(true);
   const admission = JSON.parse(readFileSync(runRecordPath(join(fcGlobalDir(), 'runs', final.runId), 'dispatch_admission.json'), 'utf8'));
   expect(admission.pass).toBe(true);
-  expect(admission.criterionGateRefs).toMatchObject({ gate: ['result'], gate_full: ['result'] });
+  expect(admission.criterionGateRefs).toMatchObject({ gate: ['result'] });
 });
 
 it.each([1, 2])('refuses an ungated planner graph with %s author duties before execution', async count => {
@@ -124,4 +124,63 @@ it('reads legacy choose/shape through status, listing, summary and rendered UI; 
     .rejects.toMatchObject({ code: 'retired_shape_decision' });
   expect(calls).toBe(0);
   expect(bytes(runDirPath)).toEqual(before);
+});
+
+it.each(['workflow', 'planControl'])('reads legacy review_assess through status, listing, summary and rendered UI; refuses resume without mutation (%s)', async carrier => {
+  const legacy = { name: 'entry', stages: [
+    { id: 'review_assess', role: 'qa', decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } },
+    { id: 'review', role: 'qa', depends_on: ['review_assess'], is_gate: true },
+    { id: 'review_full', role: 'qa', depends_on: ['review_assess'], is_gate: true },
+  ] };
+  const raw = JSON.stringify(legacy);
+  const { runId, runDirPath } = createRun(project, 'entry', raw, ['review_assess', 'review', 'review_full'], brief);
+  updateRunState(project, runId, state => {
+    state.status = 'failed'; state.currentIteration = 1; state.maxIterations = 3;
+    state.stages.review_assess = { status: 'complete', retries: 0 };
+    state.decisionGraph = { records: [{ key: 'legacy', stageId: 'review_assess', iteration: 1, successor: 'review_full', outcome: 'chosen',
+      reason: 'Historical decomposition.', risk_areas: [{ file: 'docs/result.md', risk: 'Historical risk.', experiment: 'Read the result.' }] }], enabled: { review_full: 'review_assess' }, visits: {} };
+  });
+  const recorded = RecordedWorkflowConfigSchema.parse(legacy);
+  if (carrier === 'planControl') {
+    updateRunState(project, runId, state => { state.planControl = { stages: recorded.stages } as typeof state.planControl; });
+    writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), JSON.stringify({ name: 'entry', stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true }] }));
+  }
+  const before = bytes(runDirPath);
+  expect(recorded.stages[0].decision?.kind).toBe('review');
+  if (carrier === 'workflow') {
+    expect(() => loadWorkflow(runRecordPath(runDirPath, 'workflow.yaml'))).toThrow();
+    expect(loadWorkflow(runRecordPath(runDirPath, 'workflow.yaml'), true).config.stages[0].decision?.kind).toBe('review');
+  }
+  expect(readRunStateView(project, runId).stages.review_assess.status).toBe('complete');
+  expect(listRuns(project)).toContain(runId);
+  const state = readRunState(project, runId);
+  expect(renderRunSummary(project, runDirPath, state)).toContain('review_assess');
+  expect(state.decisionGraph!.records[0].risk_areas?.[0].risk).toBe('Historical risk.');
+  const ui = stateToRunDetail(state, project);
+  expect(ui.stages.some(stage => stage.id === 'review_assess')).toBe(true);
+  const html = renderToStaticMarkup(createElement(MemoryRouter, {}, createElement(RunDetail, { run: ui })));
+  expect(html).toContain('review_assess'); expect(html).toContain(runId);
+  const status = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname,
+    'status', '--project', project], { cwd: project, encoding: 'utf8', timeout: 60_000,
+    env: { ...process.env, HOME: join(root, 'home'), FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'private.sock'), TSX_DISABLE_CACHE: '1' } });
+  expect(status.status, status.stderr).toBe(0); expect(status.stdout).toContain(runId); expect(status.stdout).toContain('review_assess');
+  expect(() => assertContinuationCompatible(project, runId)).toThrow(ContinuationRefusal);
+  try { assertContinuationCompatible(project, runId); } catch (error) { expect(error).toMatchObject({ code: 'retired_review_decision' }); }
+  let calls = 0;
+  await expect(runWorkflow(recorded, raw, project, { async run() { calls++; throw new Error('retired stage executed'); } }, new Map(), undefined, roles, runId))
+    .rejects.toMatchObject({ code: 'retired_review_decision' });
+  expect(calls).toBe(0);
+  expect(bytes(runDirPath)).toEqual(before);
+});
+
+it('shipped workflows contain no pre-review routing decision', () => {
+  for (const file of readdirSync(workflows).filter(file => file.endsWith('.yaml'))) {
+    const { config } = loadWorkflow(join(workflows, file));
+    const stages = [...config.stages, ...(config.dispatch ?? []).map(stage => StageConfigSchema.parse(stage))];
+    // Shipped repair routing stays possible; no separate model selects review depth.
+    expect(stages.filter(stage => !stage.is_gate && !stage.retry_to?.length && stage.decision), file).toEqual([]);
+  }
+  expect(() => StageConfigSchema.parse({ id: 'route', role: 'qa', decision: {
+    kind: 'review', successors: ['gate', 'full'], default: 'full',
+  } })).toThrow();
 });

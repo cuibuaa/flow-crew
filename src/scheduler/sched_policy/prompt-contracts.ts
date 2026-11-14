@@ -19,7 +19,7 @@ Independent reviewers must not durably modify the reviewed target or authoritati
 
 ## Run-directory safety
 The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result. Stage outputs, evidence, probes and model homes belong under work/. Put run-rooted artifact declarations under work/; requests/ and control/ are engine API locations, not stage output locations.
-Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory. This prohibition is absolute; read authorization never grants mutation authority. Authors may write the project worktree, their own run/stage workspace and contract-declared outputs/caches. Gates and isolated decisions have no project write grant. These grants never authorize engine-record writes.
+Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory. This prohibition is absolute; read authorization never grants mutation authority. Authors may write the project worktree, their own run/stage workspace and contract-declared outputs/caches. Gates have no project write grant. These grants never authorize engine-record writes.
 By default, do not read, browse, or list other \`.fc/runs/\` directories. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
 
 /** Raw roles and base-loaded roles share the same policy, including when _base.md is absent. */
@@ -28,7 +28,7 @@ export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
 }
 
 export function appendProjectWriteContext(prompt: string, stage: StageConfig): string {
-  return `${prompt}\n\nWork-division note (scope): ${JSON.stringify(stage.scope)}. This note grants no authority. Authors may write the whole project worktree, their own stage workspace and contract-declared external outputs/caches; gates and isolated decisions have no project write grant. Admitted external shared caches remain available. `
+  return `${prompt}\n\nWork-division note (scope): ${JSON.stringify(stage.scope)}. This note grants no authority. Authors may write the whole project worktree, their own stage workspace and contract-declared external outputs/caches; gates have no project write grant. Admitted external shared caches remain available. `
     + 'Preserve evidence that the task explicitly declares frozen. Input locators alone do not freeze source trees. '
     + 'Each invocation has private scratch at $TMPDIR (also $TMP and $TEMP). Use mktemp -d "$TMPDIR/probe-XXXXXX" for disposable probes; check creation succeeded before copying.';
 }

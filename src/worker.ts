@@ -102,8 +102,7 @@ export interface StageOpts {
   scope?: readonly string[];
   /** Scheduled stages return JSON; standalone legacy workers remain readable. */
   outputSchema?: Schema;
-  /** Engine-built allowlist input; excludes handoffs, guidance and previous sessions. */
-  isolatedInput?: { system: string; user: string };
+  /** Successor results use the decision schema and scheduler-owned defaults. */
   decisionResult?: boolean;
   artifactContract?: ArtifactContract;
   planRevision?: { revision: number; digest: string };
@@ -271,7 +270,7 @@ export async function runStage(
   mkdirSync(stageWritePath(opts.runDir, 'stages', opts.stageId), { recursive: true });
   const direct = runState?.workflowName === 'direct';
   const skillNames = opts.stageSkills ?? [];
-  let prompt = opts.isolatedInput?.user ?? buildStagePrompt({
+  let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
     promptTemplate: opts.promptTemplate,
     projectDir: opts.projectDir,
@@ -289,10 +288,7 @@ export async function runStage(
     handoffVisibility: opts.role.handoff_visibility,
   }, '');
 
-  // Isolated decisions are read-only consumers. A repair can also return a
-  // decision, but keeps the ordinary author boundary and its one validation.
-  const isolatedDecision = Boolean(opts.decisionResult && opts.isolatedInput);
-  let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !isolatedDecision
+  let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
   // Runtime tree capture reads the admitted declaration, not prompt text.
   const evidenceBrief = ''; // Runtime tree capture consumes the admitted declaration.
@@ -336,11 +332,11 @@ export async function runStage(
     evaluationRound: runningStatus.attempts!.length, priorAttemptCount: runningStatus.attempts!.length - 1,
     ...opts.gateContext,
   })}\n\n${prompt}`;
-  const guidanceBeforePrompt = opts.isolatedInput ? [] : readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
+  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
   // Retain delivered, targeted notices across execution boundaries. Their
   // original attempt identity remains explicit; only re-admission grants execution.
   try {
-    const priorReceipt = opts.isolatedInput ? '' : readFileSync(runRecordPath(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
+    const priorReceipt = readFileSync(runRecordPath(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
     for (const attempt of runningStatus.attempts ?? []) {
       for (const entry of guidanceForStageFromText(priorReceipt, opts.stageId, attempt.index)) {
         if (!guidanceBeforePrompt.some((current) => current.id === entry.id)) guidanceBeforePrompt.push(entry);
@@ -385,7 +381,6 @@ export async function runStage(
     boundaryInvocationIndex?: number,
     commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
   ): void => {
-    if (opts.isolatedInput) return;
     let entries: ReturnType<typeof readGuidanceForStage> = [];
     let checkFailed = false;
     try {
@@ -478,10 +473,6 @@ export async function runStage(
 
   }
 
-  if (opts.isolatedInput) {
-    resolvedSystemPrompt = opts.isolatedInput.system;
-    prompt = opts.isolatedInput.user;
-  }
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
   // The engine owns these result-schema publication carriers.
   const publicationCarriers = (): string[] => {
@@ -757,12 +748,12 @@ export async function runStage(
     invocationIndex++;
     const invocationRole = selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
-    const additionalGuidance = (opts.isolatedInput ? [] : collectedGuidance).filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
-    const stateContext = opts.isolatedInput ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
+    const additionalGuidance = collectedGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
+    const stateContext = runStateContext(opts.projectDir, opts.runId, opts.planRevision);
     // Fresh children read current facts and bytes. The own-stage predecessor
     // stays bound to the attempt that preceded this execution, not its children.
     const rest = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${previousInvocation ? `# Previous invocation record\n${JSON.stringify(previousInvocation)}\n\n` : ''}${deadlineContext()}\n\n${stateContext}`;
-    const currentEvidence = opts.isolatedInput ? '' : evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null,
+    const currentEvidence = evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null,
       adapterInputLimit(selectedAdapter, runState?.inputLimitChars) - INPUT_RESERVE_CHARS - adapterInputLength(invocationRole.prompt, rest));
     const effectiveInvocationPrompt = `${currentEvidence ? `${currentEvidence}\n\n` : ''}${rest}`;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
@@ -869,13 +860,13 @@ export async function runStage(
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
         }
         // External directory outputs are already admitted typed capabilities.
-        // Gates and isolated decisions are read-only; authors share these trees,
+        // Gates are read-only; authors share these trees,
         // launch uses the same no-REFER boundary as other shared directories.
         const briefContract = readAdmittedBriefContract(opts.runDir, evidenceBrief);
-        const externalDirectories = opts.isGate || isolatedDecision ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
+        const externalDirectories = opts.isGate ? [] : briefContract.outputs.filter(output => isAbsolute(output.path))
           .map(output => output.path);
         const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
-          runDir: opts.runDir, stageId: opts.stageId, readOnly: opts.isGate || isolatedDecision, artifacts: writableArtifacts, externalDirectories,
+          runDir: opts.runDir, stageId: opts.stageId, readOnly: opts.isGate, artifacts: writableArtifacts, externalDirectories,
           home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };
         const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
           const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
@@ -976,7 +967,7 @@ export async function runStage(
   const stageRecord = (output: string): Record<string, unknown> => {
     // Older native/fixture answers remain readable; only the response schema
     // advertises new output. Admission still checks every executable field.
-    if (opts.decisionResult) return {}; // Review/successor defaults remain scheduler-owned.
+    if (opts.decisionResult) return {}; // Successor defaults remain scheduler-owned.
     const record = parseStageRecord(output, recordedOutputSchema ?? opts.outputSchema!);
     if (opts.isGate) {
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)

@@ -11,8 +11,7 @@ import { loadWorkflow, } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { appendEvidence, captureProjectTree, readEvidence, stagePredecessor } from '../src/evidence-ledger.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { decisionInput } from '../src/decision-context.js';
-import { decisionSchema } from '../src/decision-graph.js';
+
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
@@ -163,8 +162,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
       let output = delivered('AUTHOR_NARRATIVE_SENTINEL');
       if (opts.stageId === 'plan') return plannerReply(opts, entryPlan);
       if (opts.stageId === 'implement') writeFileSync(join(project, 'greeting.txt'), 'wrong\n');
-      if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Inspect the greeting.', risk_areas: [{ file: 'greeting.txt', risk: 'Greeting correctness.', experiment: 'Read the greeting independently.' }] });
-      if (opts.stageId === 'repair') { writeFileSync(join(project, 'greeting.txt'), 'required greeting\n'); output = JSON.stringify({ successor: 'assess', reason: 'REPAIR_NARRATIVE_SENTINEL' }); }
+      if (opts.stageId === 'repair') { writeFileSync(join(project, 'greeting.txt'), 'required greeting\n'); output = JSON.stringify({ successor: 'review', reason: 'REPAIR_NARRATIVE_SENTINEL' }); }
       if (opts.stageId === 'review') {
         const pass = ++reviews > 1;
         const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
@@ -178,7 +176,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     } };
     const final = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, task, true);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(calls.map(c => c.id)).toEqual(['plan', 'implement', 'assess', 'review', 'repair', 'assess', 'review']);
+    expect(calls.map(c => c.id)).toEqual(['plan', 'implement', 'review', 'repair', 'review']);
     const author = calls.find(c => c.id === 'implement')!.opts;
     const peerContext = evidenceContext(project, author.runDir);
     expect(peerContext).not.toContain('AUTHOR_NARRATIVE_SENTINEL');
@@ -204,30 +202,6 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     expect(last.user).toContain('Wrong greeting.');
     expect(last.user).toContain('required greeting');
     expect(captureProjectTree(project, task).hash).toBeTruthy();
-  });
-
-  it('keeps isolated decision retries cold while retaining their exact own final record', async () => {
-    const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
-    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
-    const stage = StageConfigSchema.parse({ id: 'assess', role: 'planner', scope: [],
-      decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } });
-    const answer = { successor: 'review', reason: 'Own previous choice.', risk_areas: [] };
-    const inputs: Array<{ user: string; opts: RunOpts }> = [];
-    const adapter: Adapter = { async run(user, _role, opts) {
-      inputs.push({ user, opts });
-      return { output: JSON.stringify(answer), exitCode: inputs.length === 1 ? 1 : 0, duration_ms: 1, sessionId: uuid };
-    } };
-    for (let retries = 0; retries < 2; retries++) {
-      await runStage(adapter, { stageId: 'assess', role: { name: 'planner', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: '' },
-        dependsOn: [], promptTemplate: '', timeout_ms: 60_000, projectDir: project, runId: created.runId, runDir: created.runDirPath, retries,
-        artifactContract: fixtureArtifactContract('assess'), outputSchema: decisionSchema(stage), decisionResult: true,
-        isolatedInput: decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId)) });
-    }
-    expect(inputs.map(input => input.opts.resumeSessionId)).toEqual([undefined, undefined]);
-    const supplied = JSON.parse(inputs[1].user.split('\n\n# Stage result')[0]);
-    expect(supplied.predecessor.attempt.finalRecord).toEqual(answer);
-    expect(supplied.predecessor.attempt.guidanceIds).toEqual([]);
-    expect(supplied.predecessor).not.toHaveProperty('validation');
   });
 
   it.each(['continuation', 'retry'] as const)('cold-starts a %s from its own final record, validation identity and delivered guidance ids', async kind => {

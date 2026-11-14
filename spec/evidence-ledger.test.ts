@@ -9,11 +9,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runShipSetup } from '../src/cli-ship-setup.js';
 import { loadWorkflow, } from '../src/scheduler.js';
-import { reviewFacts } from '../src/decision-context.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { fcGlobalDir, runDir } from '../src/store.js';
-import { captureProjectTree, readEvidence, VALIDATION_FACT_VERSION, type ValidationFact } from '../src/evidence-ledger.js';
+import { captureProjectTree, readEvidence, type ValidationFact } from '../src/evidence-ledger.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { currentValidationResults, recordAttemptValidation } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { stageFixtureCommand } from './test-support/stage-command.js';
@@ -28,7 +27,6 @@ afterEach(() => { for (const root of roots.splice(0)) {
   rmSync(root, { recursive: true, force: true });
 } });
 const engine = resolve(import.meta.dirname, '..');
-
 
 async function fixture(options: { noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
   rejectFirstReview?: boolean; returnToFirstTree?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
@@ -291,7 +289,6 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const facts = JSON.parse(input.split('Ledger facts:\n')[1].split('\nValidation command selection')[0]).facts;
     expect(facts.filter((fact: { kind: string }) => fact.kind === 'validation').map((fact: { sequence: number }) => fact.sequence)).toEqual([first.sequence]);
     expect(JSON.parse(readFileSync(runRecordPath(result.rd, 'validation_delta_review.json'), 'utf8')).ledgerSequence).toBe(first.sequence);
-    expect(reviewFacts(result.target, result.rd, result.final).validation).toMatchObject({ sequence: first.sequence, pass: true });
 
   });
 });

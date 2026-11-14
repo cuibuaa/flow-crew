@@ -254,7 +254,6 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
 function launchFixtures(root: string, brief: string): string {
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
   writeFileSync(join(fixtures, 'plan.json'), JSON.stringify(mockEntryPlan));
-  writeFileSync(join(fixtures, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(brief).criteria.map(c => c.id);
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'The greeting is available.' }));
   writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Verified.',
@@ -275,7 +274,6 @@ it('raw text reaches the single entry with evidence attached', async () => {
   const raw = 'write a greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([fields])));
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
-  writeFileSync(join(fixtures, 'review_assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(written.brief).criteria.map(c => c.id);
   const fixture = (id: string, output: unknown) => writeFileSync(join(fixtures, `${id}.json`),
     JSON.stringify({ output_text: typeof output === 'string' ? output : JSON.stringify(output) }));

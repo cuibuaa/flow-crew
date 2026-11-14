@@ -11,7 +11,7 @@ import { runStage, type StageOpts } from '../src/worker.js';
 import { stageRecordSchema } from '../src/handoff.js';
 import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
-import { fcGlobalDir, listRuns, readRunState, readStageOutput, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { fcGlobalDir, listRuns, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { latestInvocationInput } from '../src/run-state-view.js';
 import { createRun } from './test-support/create-run.js';
@@ -79,7 +79,7 @@ describe('the single adapter input owner', () => {
   });
 });
 
-const paths = ['ordinary', 'gate', 'planner', 'successor', 'isolated-shape', 'isolated-review', 'isolated-successor', 'correction', 'guidance'] as const;
+const paths = ['ordinary', 'gate', 'planner', 'successor', 'correction', 'guidance'] as const;
 type SendingPath = typeof paths[number];
 
 async function worker(path: SendingPath, limit = 500_000, capturesInvocationInput = false) {
@@ -101,8 +101,7 @@ async function worker(path: SendingPath, limit = 500_000, capturesInvocationInpu
     artifactContract: contract, technicalRetry: { delaysMs: [0, 0] },
     isGate: path === 'gate', dynamicDispatch: path === 'planner',
     outputSchema: path === 'correction' ? stageRecordSchema({}) : undefined,
-    decisionResult: path === 'successor' || path.startsWith('isolated-') };
-  if (path.startsWith('isolated-')) options.isolatedInput = { system: 'Isolated system.', user: 'I'.repeat(100_000) };
+    decisionResult: path === 'successor' };
   const result = await runStage(adapter, options);
   return { ...created, result, seen };
 }
@@ -121,7 +120,7 @@ describe('every worker sending path at the assembled boundary', () => {
         expect(observed.seen).toHaveLength(target + 1);
         expect(inputOwner.adapterInputLength(observed.seen[target].system, observed.seen[target].prompt)).toBe(measured);
         // The unmodified template survives all assembly and sending.
-        expect(observed.seen[target].prompt).toContain((path.startsWith('isolated-') ? 'I' : 'P').repeat(100_000));
+        expect(observed.seen[target].prompt).toContain('P'.repeat(100_000));
       } else {
         expect(observed.seen).toHaveLength(target);
         expect(observed.result.providerFailure).toMatchObject({ kind: 'input_too_large', provider: 'engine', measuredLength: measured, limit: measured - 1 });
@@ -276,21 +275,6 @@ describe('admitted numeric contract and resume', () => {
     expect(state.stages.work.attempts![0].providerFailure).toMatchObject({ source: 'input_limit', limit: 150_000 });
   });
 
-  it('routes an oversized review diff using the lower admitted ceiling before any model call', async () => {
-    gitProject(); writeFileSync(join(project, 'change.txt'), 'D'.repeat(50_000));
-    const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'assess', role: 'fixture', scope: [], artifact_contract: contract,
-      decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } }] });
-    const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], '---\ninput_limit_chars: 100000\n---\n');
-    const run = vi.fn<Adapter['run']>();
-    await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
-      { sessionKind: 'codex', run }, new Map([['fixture', role]]), project,
-      new Map([['fixture', { name: 'fixture', description: '' }]]), new Map());
-    expect(run.mock.calls.length).toBe(0);
-    expect(JSON.parse(readStageOutput(project, created.runId, 'assess'))).toMatchObject({ successor: 'review_full',
-      reason: expect.stringContaining('against adapter limit 100000') });
-    expect(latestInvocationInput(created.runDirPath, 'assess')).toBeUndefined();
-  });
-
   it('reads old records in CLI status, watch, listing and the UI API without adding a limit or re-admitting the brief', async () => {
     setFcGlobalDir(join(root, '.fc'));
     const runId = 'legacy-input-record', directory = join(fcGlobalDir(), 'runs', runId); mkdirSync(directory, { recursive: true });
@@ -310,42 +294,6 @@ describe('admitted numeric contract and resume', () => {
       expect(response.json()).not.toHaveProperty('inputLimitChars');
     } finally { await app.close(); }
     expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(bytes);
-  });
-
-  it.each([false, true])('preserves the selected adapter ceiling through deterministic review substitution (role override=%s)', async override => {
-    gitProject(); writeFileSync(join(project, 'patch.txt'), 'D'.repeat(400_000));
-    const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'assess', role: 'fixture', scope: [], artifact_contract: contract,
-      decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } }] });
-    const run = vi.fn<Adapter['run']>();
-    const selected: Adapter = { sessionKind: 'codex', run };
-    const load = vi.spyOn(adapterLoader, 'loadAdapterByName').mockResolvedValue(selected);
-    const send = vi.spyOn(inputOwner, 'runAdapter');
-    async function assess(limit: number) {
-      const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['assess'], `---\ninput_limit_chars: ${limit}\ncriteria: [{id: review, text: ${JSON.stringify('T'.repeat(700_000))}}]\n---\n`);
-      updateRunState(project, created.runId, state => { state.inputLimitChars = limit; state.taskDescription = 'Transport-only task.'; });
-      await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
-        override ? { sessionKind: 'claude', run } : selected, new Map([['fixture', override ? { ...role, adapter: 'codex' } : role]]), project,
-        new Map([['fixture', { name: 'fixture', description: '' }]]), new Map(), undefined, undefined, undefined, () => clock().value);
-      expect(run).not.toHaveBeenCalled();
-      expect(latestInvocationInput(created.runDirPath, 'assess')).toBeUndefined();
-      const args = send.mock.calls.at(-1)!;
-      expect(args[0].sessionKind).toBe('codex');
-      return { ...created, state: readRunState(project, created.runId), measured: inputOwner.adapterInputLength(args[2].prompt, args[1]) };
-    }
-    // Keep the same bounded diff facts while calibrating the final assembled input.
-    const calibration = await assess(750_000);
-    expect(calibration.state.stages.assess.status).toBe('complete');
-    expect(JSON.parse(readStageOutput(project, calibration.runId, 'assess')).successor).toBe('review_full');
-    const under = await assess(calibration.measured + 1);
-    expect(under.measured).toBe(calibration.measured);
-    expect(under.state.stages.assess.status).toBe('complete');
-    expect(JSON.parse(readStageOutput(project, under.runId, 'assess')).successor).toBe('review_full');
-    const over = await assess(calibration.measured - 1);
-    expect(over.measured).toBe(calibration.measured);
-    expect(over.state).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
-    expect(over.state.stages.assess.attempts).toHaveLength(1);
-    expect(over.state.stages.assess.attempts![0].providerFailure).toMatchObject({ measuredLength: over.measured, limit: over.measured - 1 });
-    if (override) expect(load).toHaveBeenCalledWith('codex');
   });
 
   it.each((['cancelled', 'parked'] as const).flatMap(status => [false, true].map(recorded => ({ status, recorded }))))(

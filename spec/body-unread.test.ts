@@ -8,11 +8,10 @@ import type { Adapter } from '../src/adapters/base.js';
 import { writeEngineFile } from '../src/engine-integrity.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { admittedContract, createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
-import { decisionInput } from '../src/decision-context.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { WorkflowConfigSchema, StageConfigSchema } from '../src/scheduler.js';
+import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
-import { fcGlobalDir, setFcGlobalDir, readRunState, evaluateRealityGate, updateRunState } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, evaluateRealityGate } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
 import { inspectRealityCheckReachability } from '../src/scheduler/sched_admission/reality-reads.js';
@@ -47,17 +46,12 @@ it('the same declaration with two bodies has identical admission, launch, valida
     digests.push(admission.digest);
     const workflow = WorkflowConfigSchema.parse({ name: 'body-test', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
       { id: 'author', role: 'coder', scope: ['docs/result.md'] },
-      { id: 'assess', role: 'qa', depends_on: ['author'], scope: [],
-        decision: { kind: 'review', successors: ['review', 'full'], default: 'full' } },
-      { id: 'review', role: 'qa', is_gate: true, depends_on: ['assess'], scope: [] },
-      { id: 'full', role: 'qa', is_gate: true, depends_on: ['assess'], scope: [] },
-      { id: 'repair', role: 'coder', depends_on: ['review', 'full'], retry_to: ['review', 'full'], scope: ['docs/result.md'] },
+      { id: 'review', role: 'qa', is_gate: true, depends_on: ['author'], scope: [] },
+      { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['docs/result.md'] },
     ] });
     const scripted = new ScriptedAdapter({
       author: { output: 'Result written.', projectFiles: { 'docs/result.md': 'Reviewed result.\n'.repeat(3000) } },
-      assess: { output: JSON.stringify({ successor: 'review', reason: 'Check the declared result.', risk_areas: [] }) },
       review: { runFiles: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'Independently checked.', criteria: { result: { status: 'pass', evidence: 'docs/result.md' } } }) } },
-      full: { runFiles: { 'verdict_full.json': JSON.stringify({ pass: true, reason: 'Independently checked.', criteria: { result: { status: 'pass', evidence: 'docs/result.md' } } }) } },
     });
     const adapter: Adapter = { async run(prompt, role, opts) {
       const result = await scripted.run(prompt, role, opts);
@@ -73,8 +67,7 @@ it('the same declaration with two bodies has identical admission, launch, valida
     const state = await runWorkflow(workflow, '', project, adapter, new Map(), undefined,
       join(import.meta.dirname, '../config/agents'), undefined, brief, true, undefined, admission);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(scripted.calls.map(call => call.stageId)).toEqual(['author', 'assess', 'review']);
-    expect(state.decisionGraph?.records).toContainEqual(expect.objectContaining({ stageId: 'assess', successor: 'review', outcome: 'chosen' }));
+    expect(scripted.calls.map(call => call.stageId)).toEqual(['author', 'review']);
     const directory = join(fcGlobalDir(), 'runs', state.runId);
     const reality = JSON.parse(readFileSync(runRecordPath(directory, '.reality-gate.json'), 'utf8'));
     const validation = ensureAttemptValidationPlan(project, state.runId);
@@ -94,21 +87,6 @@ it('the same declaration with two bodies has identical admission, launch, valida
     });
   }
   expect(digests[0]).not.toBe(digests[1]); expect(decisions[0]).toEqual(decisions[1]);
-});
-
-it('body length cannot select the review route or alter its decision input', () => {
-  const project = join(root, 'project'); mkdirSync(project);
-  gitSync(['init', '-q', project]);
-  const emptyTree = gitSync(['hash-object', '-w', '-t', 'tree', '--stdin'], { cwd: project, input: '', encoding: 'utf8' }).trim();
-  const inputs = ['', hostileBody.repeat(30)].map(body => {
-    const brief = envelope(body), created = createRun(project, 'review', 'name: review', ['assess'], brief);
-    updateRunState(project, created.runId, state => { state.taskDescription = body; state.baseCommit = emptyTree; });
-    const result = decisionInput(StageConfigSchema.parse({ id: 'assess', role: 'qa', depends_on: [],
-      decision: { kind: 'review', successors: ['review', 'full'], default: 'full' } }), project, created.runDirPath,
-      readRunState(project, created.runId), 65_536 + 5_000);
-    return { user: result.user, system: result.system, codeDecided: !!result.adapter };
-  });
-  expect(inputs[0].codeDecided).toBe(false); expect(inputs[0]).toEqual(inputs[1]);
 });
 
 it('incidental check files and brief sidecars cannot select terminal checks; the admitted snapshot survives their deletion', async () => {
@@ -182,7 +160,6 @@ it('framework brief reads remain transport for project-owned commands', async ()
     expect(report.results[0].evidence).toMatchObject({ stdout: body });
   }
 });
-
 
 it.each(['same.json', 'engine/ordinary.json', 'work/data.json'])('allows nonbrief run data at %s with no root fallback', async path => {
   const project = join(root, 'project'); mkdirSync(project);

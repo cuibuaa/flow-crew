@@ -32,12 +32,11 @@ const finding = (id: string, reproduction?: number | null): AuditFinding => ({ i
 
 async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRepair = false, observeAfterRepair = false, needsValidationPreparation = false, variant?: 'long' | 'cwd' | 'bash' | 'unknown' | 'recorded', route?: [string, string, string?]) {
   const project = mkdtempSync(join(tmpdir(), 'confirmed-gate-')); roots.push(project);
-  // Assessment routing requires a complete readable diff, including in the repair scenarios.
+  // The reviewer receives a complete readable patch.
   isolatedProjectCommand('git', ['init', '-q'], project, project);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, project);
   const calls: Array<{ stage: string; prompt: string }> = [];
   let review = 0;
-  let assessments = 0;
   const dependency = mkdtempSync(join(tmpdir(), 'closure-dependency-')); roots.push(dependency);
   const marker = join(dependency, 'ready');
   if (needsValidationPreparation) {
@@ -59,12 +58,11 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     const result = (value: unknown, writes: string[] = []) => ({ output: JSON.stringify(value), exitCode: 0, duration_ms: 1,
       writes, writeAttribution: 'structured' as const });
     if (opts.stageId === 'plan') return plannerReply(opts, proposal);
-    if (opts.stageId === 'assess') return result({ successor: route![Math.min(++assessments - 1, route!.length - 1)], reason: 'Review current value', risk_areas: [] });
     if (opts.stageId === 'later_author') {
       writeFileSync(join(project, 'docs/other.txt'), 'Independent downstream output');
-      return result({ successor: 'assess', reason: 'Review independent later output' }, ['docs/other.txt']);
+      return result({ successor: 'review', reason: 'Review independent later output' }, ['docs/other.txt']);
     }
-    if (['review', 'review_full'].includes(opts.stageId)) {
+    if (opts.stageId === 'review') {
       const first = ++review === 1;
       let sequence: number | undefined;
       if ((first || route?.length === 3 && review === 3) && mode === 'mixed') {
@@ -96,7 +94,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     }
     mkdirSync(join(project, 'docs'), { recursive: true });
     writeFileSync(join(project, 'docs/value.txt'), opts.stageId === 'repair' && !failedRepair ? 'repaired' : 'bad');
-    if (route && opts.stageId === 'repair') return result({ successor: 'assess', reason: 'Reassess the repaired value' }, ['docs/value.txt']);
+    if (route && opts.stageId === 'repair') return result({ successor: 'review', reason: 'Reassess the repaired value' }, ['docs/value.txt']);
     return result({ status: 'delivered', summary: 'Value delivered', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
   const { config, raw } = loadWorkflow(resolve(`config/workflows/${route ? 'entry' : 'direct'}.yaml`));
@@ -104,7 +102,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
   if (route?.length === 3) proposal.push({ id: 'later_author', role: 'coder', depends_on: [route[1]],
     scope: ['docs/other.txt'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false,
     artifact_contract: { version: 1, produces: [], reads: [] },
-    decision: { successors: ['assess'], default: 'assess', kind: 'successor' } });
+    decision: { successors: ['review'], default: 'review', kind: 'successor' } });
   const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The value is independently checked.\"}]\noutputs: [docs/value.txt]\n---\n# Deliver a value\n\n## Acceptance criteria\n1. The value is independently checked.\n";
   const final = await runWorkflow(config, route?.length === 3 ? JSON.stringify(config) : raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
   const directory = runDir(project, final.runId), ledger = readEvidence(directory);
@@ -229,13 +227,11 @@ describe('repair requires a reviewer reproduction', () => {
     expect(value.final.stages.review.gate?.findings?.unconfirmed[0].id).toBe('observation_after_repair');
   });
 
-  it.each([
-    ['review', 'review_full'], ['review_full', 'review'],
-    ['review', 'review'], ['review_full', 'review_full'],
-  ])('retains reproduction closure across assessment choices (%s → %s)', { timeout: 60_000 }, async (first, second) => {
+  it('retains reproduction closure across repeated independent reviews', { timeout: 60_000 }, async () => {
+    const first = 'review', second = 'review';
     for (const failedRepair of [true, false]) {
       const value = await workflow('mixed', failedRepair, false, false, 'recorded', [first, second]);
-      expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', 'assess', first, 'repair', 'assess', second]);
+      expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', first, 'repair', second]);
       expect(value.final.status).toBe(failedRepair ? 'incomplete' : 'complete');
       expect(value.final.stages[second].gate?.pass).toBe(!failedRepair);
       expect(value.final.decisionGraph?.records.filter(record => record.stageId === second).at(-1)?.gateAccepted).toBe(!failedRepair);
@@ -247,10 +243,10 @@ describe('repair requires a reviewer reproduction', () => {
     }
   });
 
-  it.each(['review', 'review_full'])('keeps an accepted repair closed after independent downstream work and reassessment to %s', async last => {
+  it('keeps an accepted repair closed after independent downstream work and another review', async () => {
+    const last = 'review';
     const value = await workflow('mixed', false, false, false, 'recorded', ['review', 'review', last]);
-    expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', 'assess', 'review', 'repair', 'assess',
-      'review', 'later_author', 'assess', last]);
+    expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', 'review', 'repair', 'review', 'later_author', last]);
     const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.exitCode === 1)!;
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;
     const finalProbe = value.ledger.filter(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === last).at(-1)!;

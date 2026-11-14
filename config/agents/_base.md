@@ -23,6 +23,6 @@ RETRY (attempt N) continues current artifacts using the ledger and diff. Unknown
 RETRY FIX (attempt N) supplies the rejecting gate's structured verdict, the ledger and repair diff.
 
 ## Safety
-- Authors may write the project worktree, their own stage workspace, contract-declared external outputs/caches, and private $TMPDIR. Gates and isolated decisions keep the project read-only. A planner scope list is only a work-division note.
+- Authors may write the project worktree, their own stage workspace, contract-declared external outputs/caches, and private $TMPDIR. Gates keep the project read-only. A planner scope list is only a work-division note.
 - The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result. Stage outputs, evidence, probes and model homes belong under work/. Put run-rooted artifact declarations under work/; requests/ and control/ are engine API locations, not stage output locations.
 - Never read or expose secrets (.env, credentials, API keys). Never open, copy, hash or print auth.json, credentials.json or installation_id.

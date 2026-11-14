@@ -53,7 +53,7 @@ for each stage and its matching validation, plus earlier verdict records. Diff e
 keep the existing byte bound and name the full immutable patch; structured records are
 never clipped into invalid JSON. The full brief appears once in the system
 contract; criterion assignments name IDs and `brief_criteria.json` instead of printing
-the requests again. Review risk areas are structured decision records. Earlier gate
+the requests again. The independent reviewer chooses its own risk experiments. Earlier gate
 verdicts and engine conclusions remain structured records, including for old runs
 whose rejection archives predate the ledger. Missing fields are omitted, never inferred
 or summarized. Author final records are visible only to the same stage’s continuation;

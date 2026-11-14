@@ -34,7 +34,6 @@ vi.mock('../src/git-facts.js', async original => {
 });
 
 import { GitNotAnswered, gitSync, gitResultSync, gitAsync, runGit } from '../src/git-facts.js';
-import { changedPaths, decisionInput, reviewFacts } from '../src/decision-context.js';
 import { captureProjectTree, evidenceContext, projectCommit } from '../src/evidence-ledger.js';
 import { campaignBaseDirectory } from '../src/config.js';
 import { createGitWorktree, cmdShipSetupWithDeps, runShipSetup } from '../src/cli-ship-setup.js';
@@ -47,7 +46,7 @@ import { fcGlobalDir, initializeReservedRun, readRunState, reserveRun, setFcGlob
 import { renderRunSummary } from '../src/run-summary.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { listProjectFiles, listProjectFilesAt } from '../src/scheduler/sched_scope/path-capabilities.js';
-import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
+
 import { bindFrozenInputs, restoreFrozenInput } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { recordThrownStageAttempt } from '../src/scheduler/sched_scope/stage-group.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
@@ -166,9 +165,6 @@ describe('one Git owner distinguishes answers from external termination', () => 
 
 describe('synchronous Git consumers preserve immediate and held answers', () => {
   const consumers: Array<[string, () => unknown]> = [
-    ['review changed paths', () => changedPaths(project, state)],
-    ['review routing', () => decisionInput({ id: 'assess', decision: { kind: 'post_author', successors: ['review', 'full'] } } as never, project, directory, state)],
-    ['review no-index diff', () => reviewFacts(project, directory, state, Infinity)],
     ['evidence diff and inventory', () => evidenceContext(project, directory)],
     ['evidence baseline commit', () => projectCommit(project)],
     ['project inventory', () => listProjectFiles(project)],
@@ -179,16 +175,6 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
   it.each(consumers)('%s waits in place and preserves its answer', (_name, operation) => {
     // Make the historical fallback observably different from a valid fact.
     if (_name === 'project inventory' || _name === 'tree inventory') writeFileSync(join(project, 'ignored.txt'), 'ignored');
-    if (_name === 'review changed paths') {
-      const answer = driver.answer;
-      driver.answer = (args, options) => args[0] === 'diff' && args.includes('--name-only') ? success('file.txt\0') : answer(args, options);
-    }
-    // Exercise added-file diffs as well as tracked diffs in both review paths.
-    if (_name.includes('diff') || _name.includes('routing')) {
-      const answer = driver.answer;
-      driver.answer = (args, options) => args[0] === 'ls-files' && args.includes('--others')
-        ? success('file.txt\0') : args.includes('--no-index') ? { status: 1, stdout: 'added patch\n' } : answer(args, options);
-    }
     const immediate = operation();
     expect(heldSync(operation)).toEqual(immediate);
   });
@@ -203,7 +189,7 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     const empty = operation();
     driver.answer = () => ({ status: 128 });
     const error = operation();
-    if (name === 'review changed paths' || name === 'ignored-path set') {
+    if (name === 'ignored-path set') {
       expect(empty).toEqual([]); expect(error).toEqual([]);
     } else if (name === 'evidence baseline commit') {
       expect(empty).toBe(''); expect(error).toBeUndefined();
@@ -215,10 +201,6 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
       expect(empty).toEqual([]); expect(error).toEqual(['file.txt']);
     } else if (name === 'tree inventory') {
       expect(empty).toMatchObject({ files: [] }); expect(error).toMatchObject({ files: [expect.objectContaining({ path: 'file.txt' })] });
-    } else if (name === 'review routing') {
-      expect(empty).not.toHaveProperty('adapter'); expect(error).toHaveProperty('adapter');
-    } else if (name === 'review no-index diff') {
-      expect(empty).toHaveProperty('diff', ''); expect(error).toHaveProperty('unavailable', true);
     } else if (name === 'evidence diff and inventory') {
       expect(empty).not.toContain('Git patch unavailable'); expect(error).toContain('Git patch unavailable');
     } else if (name === 'run summary') {
@@ -226,16 +208,6 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     }
   });
 
-  it.each(['paths', 'untracked', 'patch', 'added'] as const)('review routing propagates termination of the %s read', target => {
-    const answer = driver.answer;
-    driver.answer = (args, options) => args[0] === 'ls-files' && args.includes('--others')
-      ? success('file.txt\0') : args.includes('--no-index') ? { status: 1, stdout: 'added patch\n' } : answer(args, options);
-    terminateAt(args => target === 'paths' ? args[0] === 'diff' && args.includes('--name-only')
-      : target === 'untracked' ? args[0] === 'ls-files' && args.includes('--others') && !args.includes('--cached')
-        : target === 'added' ? args.includes('--no-index') : args[0] === 'diff' && args.includes('--no-textconv') && !args.includes('--no-index'));
-    expect(() => decisionInput({ id: 'assess', decision: { kind: 'post_author', successors: ['review', 'full'] } } as never,
-      project, directory, state)).toThrow(GitNotAnswered);
-  });
   it.each(['patch', 'untracked', 'added'] as const)('evidence publishes no substitute patch after terminated %s', target => {
     const answer = driver.answer;
     driver.answer = (args, options) => args[0] === 'ls-files' && args.includes('--others') && !args.includes('--cached')

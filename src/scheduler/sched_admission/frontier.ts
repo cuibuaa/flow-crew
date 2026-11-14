@@ -87,26 +87,21 @@ function unchosenJoinDependency(stage: StageConfig, dependency: string, stages: 
 /** Follow observed conditional skips upstream, without re-evaluating conditions.
  * A gate skipping itself does not verify its producer's work. Completed,
  * running and failed work still needs settlement even if an ancestor was skipped.
- * Settlement may select a different completed read-only review of the same work;
- * that never makes the old rejection a satisfied dependency for its descendants. */
-export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<string, StageConfig>, state: StoreState,
-  purpose: 'dependency' | 'settlement' = 'dependency'): boolean {
+ * A completed rejection remains a dependency obligation for its descendants. */
+export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<string, StageConfig>, state: StoreState): boolean {
   const seen = new Set<string>();
   const visit = (id: string): boolean => {
     if (seen.has(id)) return false;
     seen.add(id);
     const stage = stages.get(id);
     const status = state.stages[id]?.status;
-    const completedReview = purpose === 'settlement' && id === stageId && status === STAGE_STATUS.COMPLETE
-      && stage?.is_gate === true;
-    if (!stage || (status !== STAGE_STATUS.PENDING && status !== STAGE_STATUS.SKIPPED && !completedReview)) return false;
-    const incoming = [...stages.values()].filter(source => (!completedReview || source.decision?.kind === 'review')
-      && decisionControls(source, id, state) && !transitivelyDependsOn(source.id, id, stages));
+    if (!stage || (status !== STAGE_STATUS.PENDING && status !== STAGE_STATUS.SKIPPED)) return false;
+    const incoming = [...stages.values()].filter(source => decisionControls(source, id, state)
+      && !transitivelyDependsOn(source.id, id, stages));
     if (incoming.length && incoming.every(source => {
       const record = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
       return record?.successor && record.successor !== id;
     }) && !state.decisionGraph?.enabled[id]) return true;
-    if (completedReview) return false;
     if (id !== stageId && status === STAGE_STATUS.SKIPPED && stage.condition?.trim()) return true;
     return (stage.depends_on ?? []).some(dependency => !unchosenJoinDependency(stage, dependency, stages, state) && visit(dependency));
   };

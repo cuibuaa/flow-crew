@@ -117,7 +117,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const unverified = validation.filter(result => result.measurement === 'unverified');
   const validationNote = unverified.length ? ` Validation unverified: ${unverified.map(result => `${result.display ?? result.role} (exit ${result.exitCode ?? 'absent'})`).join('; ')}.` : '';
   const { findings: _findings, validation: _validation, ...authored } = verdict;
-  // Rejections survive review-depth changes. Effective acceptance binds a
+  // Rejections survive later review attempts. Effective acceptance binds a
   // closure to its reviewed tree, so later independent work cannot reopen it.
   const state = verdict.pass && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId) : undefined;
   const gateIds = [stageId, ...(state?.planControl?.stages ?? []).flatMap(stage => stage.retry_to?.includes(stageId) ? stage.retry_to : [])];

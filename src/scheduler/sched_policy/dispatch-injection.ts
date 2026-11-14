@@ -1,5 +1,4 @@
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
-import { declareReviewChoices } from '../../decision-graph.js';
 /** Native dispatch transport parsing, admission and persistence; receives admission, declared-input and scope-disposition services. */
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { type DispatchAdmissionReport, type DispatchAdmissionError, admissionError, collectTransitiveDependents, formatDispatchStageSchemaFailure, readBriefCriteriaForAdmission, resolveDispatchDependencies, shadowStageWithoutInvalidFields, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
@@ -115,9 +114,6 @@ export function inspectDispatchProposal(
   }
   if (itemList.length === 0) skippedReasons.push(admissionError('dispatch_stages_empty', 'dispatch contains no stages', 'stages'));
 
-  if (state.workflowName === 'entry') {
-    try { declareReviewChoices(dispatched); } catch (error) { schemaReasons.push(admissionError('stage_graph', String(error), 'stages')); }
-  }
   normalizeStageContracts(dispatched);
   resolveDispatchDependencies(dispatched, dispatchStageId);
   let criteria: BriefCriteriaArtifact | undefined;

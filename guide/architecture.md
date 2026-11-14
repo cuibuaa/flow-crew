@@ -90,7 +90,7 @@ Sources: [shim](../src/supervise-shim.ts), [supervision records](../src/supervis
 The scheduling frontier admits one stage at a time into a shared mutable project tree.
 The admitted contract and stage kind determine write access. Authors get the whole project worktree,
 their own stage workspace and admitted external outputs/caches. Planner scope lists are only work-division
-notes. Read-only gates and isolated decisions get no project grant; hash-only settlement detects changes
+notes. Read-only gates get no project grant; hash-only settlement detects changes
 on hosts without a kernel grant, fails that attempt and leaves the project untouched by restoration.
 Frozen member identities bind once at admission and survive retries/restart. Settlement fails changes;
 only matching pinned-base Git content can restore a tracked leaf. Untracked and admission-dirty content

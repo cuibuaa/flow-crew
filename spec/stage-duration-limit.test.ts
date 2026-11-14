@@ -22,7 +22,7 @@ import { createRun } from './test-support/create-run.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fcGlobalDir, listRuns, readRunState, readStageStatus, updateRunState, setFcGlobalDir, completedStageAttemptStatus, rependStageStatus, writeStageStatus } from '../src/store.js';
 import { releaseLaunchIntent } from '../src/run-lock.js';
-import { runRecordPath } from '../src/run-layout.js';
+
 import { writeTaskBrief } from '../src/brief-writer.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { createWatchState, pollWatch } from '../src/watch.js';
@@ -112,7 +112,7 @@ describe('stage duration admission and recorded contract', () => {
   });
 });
 
-const workerPaths = ['ordinary', 'review', 'planner', 'successor', 'isolated-shape', 'isolated-review', 'isolated-successor', 'timeout-retry', 'resumed-session'] as const;
+const workerPaths = ['ordinary', 'review', 'planner', 'successor', 'timeout-retry', 'resumed-session'] as const;
 describe('worker attempt entry', () => {
   it.each(workerPaths)('%s: at-limit enters, above-limit refuses before attempt creation', async path => {
     for (const offset of [0, 1]) {
@@ -123,8 +123,7 @@ describe('worker attempt entry', () => {
         stageId: 'work', role, dependsOn: [], promptTemplate: 'Task', artifactContract: contract,
         timeout_ms: limit + offset, deadlineClock: clock(), retries: path === 'timeout-retry' ? 3 : 0,
         isGate: gate, outputSchema: stageRecordSchema({ isGate: gate }), dynamicDispatch: path === 'planner',
-        decisionResult: path === 'successor' || path.startsWith('isolated-'),
-        ...(path.startsWith('isolated-') ? { isolatedInput: { system: 'Read only.', user: 'Task' } } : {}),
+        decisionResult: path === 'successor',
         ...(path === 'resumed-session' ? { resumeSessionId: '123e4567-e89b-42d3-a456-426614174000' } : {}),
       });
       if (offset === 0) { expect(run).toHaveBeenCalledOnce(); expect(readStageStatus(project, created.runId, 'work').attempts).toHaveLength(1); }
@@ -134,19 +133,16 @@ describe('worker attempt entry', () => {
   });
 });
 
-const schedulerPaths = ['ordinary', 'planner', 'review', 'review-decision', 'code-review-decision', 'successor', 'timeout-retry', 'repair', 're-evaluation', 'research-stage', 'research-review'] as const;
+const schedulerPaths = ['ordinary', 'planner', 'review', 'successor', 'timeout-retry', 'repair', 're-evaluation', 'research-stage', 'research-review'] as const;
 describe('real scheduler routing through the entry owner', () => {
   it.each(schedulerPaths)('%s: at-limit enters, above-limit receives the typed refusal', async path => {
     gitProject();
-    if (path === 'code-review-decision') writeFileSync(join(project, 'patch.txt'), 'D'.repeat(400_000));
     const extra = path === 'repair' ? { retry_to: ['review'] } : path === 'planner' ? { dynamic_dispatch: true }
       : ['review', 're-evaluation', 'research-review'].includes(path) ? { is_gate: true }
-      : path.includes('review-decision') ? { decision: { kind: 'review', successors: ['next', 'full'], default: 'full' } }
       : path === 'successor' ? { decision: { kind: 'successor', successors: ['next'], default: 'next' } } : {};
     const config = workflow(extra), stage = config.stages[0];
     for (const offset of [0, 1]) {
-      const created = createdRun(undefined, true, path === 'code-review-decision' ? 100_000 : undefined), state = readRunState(project, created.runId);
-      if (path === 'code-review-decision') state.inputLimitChars = 100_000;
+      const created = createdRun(undefined, true), state = readRunState(project, created.runId);
       if (path === 'repair' || path === 're-evaluation') state.gateRetryRound = { iteration: 1, round: 1 };
       if (path === 'timeout-retry' || path === 're-evaluation') {
         const previous = completedStageAttemptStatus(state.stages.work, 0, {
@@ -159,7 +155,7 @@ describe('real scheduler routing through the entry owner', () => {
         writeStageStatus(project, created.runId, 'work', state.stages.work);
       }
       const run = vi.fn<Adapter['run']>(async (_prompt, _role, opts) => ({ output: opts.outputSchema?.anyOf ? JSON.stringify({ pass: true, reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } })
-        : stage.decision ? JSON.stringify({ successor: 'next', reason: 'Selected.', ...(path === 'review-decision' ? { risk_areas: [] } : {}) }) : valid, exitCode: 0, duration_ms: 0 }));
+        : stage.decision ? JSON.stringify({ successor: 'next', reason: 'Selected.' }) : valid, exitCode: 0, duration_ms: 0 }));
       const transition = deadline.transitionTechnicalRetryBudget;
       // Inject an excessive request at budget selection; entry and its comparison stay real.
       const prepare = vi.spyOn(deadline, 'transitionTechnicalRetryBudget').mockImplementation((chain, event) => {
@@ -179,7 +175,6 @@ describe('real scheduler routing through the entry owner', () => {
       } finally { prepare.mockRestore(); }
       expect(result).toBeDefined();
       if (offset) { numericRefusal(result!); expect(run).not.toHaveBeenCalled(); }
-      else if (path === 'code-review-decision') { expect(result!.exitCode).toBe(0); expect(run).not.toHaveBeenCalled(); expect(JSON.parse(result!.output).successor).toBe('full'); }
       else { expect(run).toHaveBeenCalledOnce(); expect(result!.exitCode).toBe(0);
         if (path === 'repair') expect(run.mock.calls[0][0]).toContain('# Gate repair facts');
         if (path === 'timeout-retry') expect(run.mock.calls[0][0]).toContain('# RETRY facts');

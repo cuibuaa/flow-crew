@@ -221,11 +221,6 @@ export function createDispatchAdmission() {
     errors.push(...inspectStageGraph(all).errors);
     for (const stage of input.dispatched) {
       if (stage.decision) {
-        if (stage.decision.kind === 'review' && (stage.decision.successors.length !== 2
-          || new Set(stage.decision.successors).size !== 2
-          || stage.decision.successors.some(id => !byId.get(id)?.is_gate))) {
-          errors.push(admissionError('stage_graph', `${stage.id}.decision: focused/full review requires two distinct independent read-only gate successors`, 'decision.successors', stage.id));
-        }
         for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor)) {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: unknown successor ${successor}`, 'decision.successors', stage.id));
         }

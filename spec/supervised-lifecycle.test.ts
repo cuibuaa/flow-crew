@@ -198,7 +198,6 @@ async function createHarness(): Promise<Harness> {
     tokens_out: 0,
   }), 'utf-8');
   writeFileSync(join(mockDir, 'plan.json'), JSON.stringify(mockEntryPlan));
-  writeFileSync(join(mockDir, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(mockDir, 'review.json'), JSON.stringify({
     output_text: 'portable fixture gate passed', exit_code: 0,
     write_files: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'deterministic lifecycle evidence' }) },
