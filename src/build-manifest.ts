@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { cpSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 
@@ -27,16 +27,28 @@ export function assertControlCompatibility(...manifests: Array<BuildManifest | u
   }
 }
 
-function retainedResource(root: string, path: string): boolean {
-  const name = portableRelative(root, path);
-  return !['node_modules/.cache', 'node_modules/.vite', 'node_modules/.vite-temp']
-    .some(cache => name === cache || name.startsWith(`${cache}/`));
+function developmentOnlyResources(root: string): string[] {
+  const lockfile = join(root, 'package-lock.json');
+  if (!existsSync(lockfile)) return [];
+  const { packages } = JSON.parse(readFileSync(lockfile, 'utf8')) as {
+    packages?: Record<string, { dev?: boolean }>;
+  };
+  return Object.entries(packages ?? {}).filter(([, entry]) => entry.dev === true).map(([path]) => path);
 }
 
-function resourceRecords(root: string): BuildFileRecord[] {
+function retainedResource(root: string, path: string, developmentOnly: string[] = []): boolean {
+  const name = portableRelative(root, path);
+  const names = [name];
+  if (developmentOnly.length && lstatSync(path).isSymbolicLink()) names.push(portableRelative(root, realpathSync(path)));
+  return !['node_modules/.cache', 'node_modules/.vite', 'node_modules/.vite-temp']
+    .some(cache => name === cache || name.startsWith(`${cache}/`))
+    && !developmentOnly.some(packagePath => names.some(name => name === packagePath || name.startsWith(`${packagePath}/`)));
+}
+
+function resourceRecords(root: string, developmentOnly: string[] = []): BuildFileRecord[] {
   const files: string[] = [];
   const walk = (path: string, ancestors: Set<string>): void => {
-    if (!retainedResource(root, path)) return;
+    if (!retainedResource(root, path, developmentOnly)) return;
     const physical = realpathSync(path);
     const stat = statSync(path);
     if (stat.isFile()) files.push(path);
@@ -56,6 +68,8 @@ function resourceRecords(root: string): BuildFileRecord[] {
 function assertRuntimeResources(root: string, manifest: BuildManifest): void {
   const expected = manifest.inputs.files.filter(record => runtimeResources.some(resource =>
     record.path === resource || record.path.startsWith(`${resource}/`)));
+  // Verification inventories the retained tree without the publication filter:
+  // a development-only package added afterwards is still an undeclared file.
   assertArtifactRecords(resourceRecords(root), expected, 'Runtime resources');
 }
 
@@ -251,7 +265,7 @@ export function collectBuildInputRecords(projectRoot: string): BuildFileRecord[]
       if (existsSync(path)) paths.push(path);
     }
   }
-  for (const record of resourceRecords(root)) paths.push(join(root, record.path));
+  for (const record of resourceRecords(root, developmentOnlyResources(root))) paths.push(join(root, record.path));
   for (const directory of directories.slice(1)) paths.push(...collectRegularFiles(directory, () => true));
   return [...new Set(paths)]
     .map((path) => hashFile(path, root))
@@ -554,9 +568,10 @@ function publishBuildFiles(source: string, destination: string): void {
 
 function copyBuildPayload(dist: string, ui: string | undefined, target: string, manifest: BuildManifest): void {
   mkdirSync(target, { recursive: true });
-  cpSync(realpathSync(dist), join(target, 'dist'), { recursive: true });
+  // Independent inodes with copy-on-write data where supported; otherwise a full copy.
+  cpSync(realpathSync(dist), join(target, 'dist'), { recursive: true, mode: constants.COPYFILE_FICLONE });
   rmSync(join(target, 'dist', '.tsbuildinfo'), { force: true });
-  if (ui) cpSync(realpathSync(ui), join(target, 'ui', 'dist'), { recursive: true });
+  if (ui) cpSync(realpathSync(ui), join(target, 'ui', 'dist'), { recursive: true, mode: constants.COPYFILE_FICLONE });
   writeFileSync(join(target, 'dist', BUILD_MANIFEST_FILENAME), `${JSON.stringify(manifest, null, 2)}\n`);
   assertBuildArtifactInventory(join(target, 'dist'), manifest);
 }
@@ -594,9 +609,10 @@ function publishRuntimeGeneration(options: PublishBuildOptions & {
       if (join(generationRoot, 'dist') === previous) return manifest;
     } else {
       copyBuildPayload(stagedDistDir, stagedUiDir, temporary, manifest);
+      const developmentOnly = developmentOnlyResources(projectRoot);
       for (const resource of runtimeResources) {
         const source = join(projectRoot, resource);
-        if (existsSync(source)) cpSync(source, join(temporary, resource), { recursive: true, dereference: true, filter: source => retainedResource(projectRoot, source) });
+        if (existsSync(source)) cpSync(source, join(temporary, resource), { recursive: true, mode: constants.COPYFILE_FICLONE, dereference: true, filter: source => retainedResource(projectRoot, source, developmentOnly) });
       }
       assertRuntimeResources(temporary, manifest);
       symlinkSync(projectRoot, join(temporary, '.project-root'));
