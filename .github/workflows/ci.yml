@@ -176,14 +176,11 @@ jobs:
 
       - run: npm ci --ignore-scripts
       - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
+      # A build's identity covers the dependencies it retains, and those are
+      # installed natively here, so the runtime under test is built here too
+      # instead of restoring the Linux job's artifact.
+      - run: npm run build
 
-      # JavaScript/declarations and browser assets are platform-independent;
-      # dependencies install natively here and lifecycle tests run on macOS.
       # Blocking lifecycle and Darwin contracts cover process identity, signals
       # and supervision fate; separate best-effort probes duplicated them and
       # could hide a missing runtime export.
