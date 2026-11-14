@@ -185,6 +185,26 @@ describe('Dashboard admission handshake', () => {
     }
   });
 
+  it.each(['skipped', 'absent'] as const)('dashboard refuses an unmeasured old %s setup even with a current receipt', async execution => {
+    const registerTask = vi.fn(async () => ({ id: 1, unit: 'never.service', pid: process.pid, build: 'fixture' }));
+    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
+      registerTask, isProjectBusy: () => null,
+    });
+    const brief = '# Old dashboard setup';
+    const path = writeReadySetupRecord(projectDir, brief, fcGlobalDir());
+    const setup = JSON.parse(readFileSync(path, 'utf8'));
+    if (execution === 'absent') delete setup.validationBaseline.execution;
+    else setup.validationBaseline.execution = execution;
+    writeFileSync(path, JSON.stringify(setup));
+    const checked = (await app.inject({ method: 'POST', url: '/api/brief-preflight', payload: { brief } })).json();
+    const held = await app.inject({ method: 'POST', url: '/api/tasks', payload: { brief, ...admissionFields(checked) } });
+    expect(held.statusCode).toBe(409);
+    expect(held.json().error).toContain('setup_unmeasured');
+    expect(held.json().error).toContain('Rerun flowcrew ship-setup');
+    expect(registerTask).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(JSON.stringify(setup));
+  });
+
   it('invalidates an old receipt when the Dashboard process changes', async () => {
     const brief = 'Restart-bound receipt';
     app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {

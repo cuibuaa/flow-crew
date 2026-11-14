@@ -1107,51 +1107,54 @@ async function cmdQuick(preview = false) {
 
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
   if (!initializedContinuation) {
-    const { inspectShipSetupRecord } = await import('./ship-setup-record.js');
+    const { inspectShipSetupRecord, measuredSetupFacts, measuredSetupSummary, assertMeasuredSetupLaunch } = await import('./ship-setup-record.js');
     let setup = inspectShipSetupRecord(projectDir, task);
-    if (written?.evidenceDir && setup.state === 'missing') {
-      // A generated brief owns a deterministic isolated target, never the source tree.
-      const sourceDir = realpathSync(projectDir);
-      const name = `brief-${written.digest.slice(0, 12)}`;
+    // Inspect an existing generated target before acknowledging or measuring it.
+    const name = written?.evidenceDir && setup.state === 'missing' ? `brief-${written.digest.slice(0, 12)}` : undefined;
+    const sourceDir = name ? realpathSync(projectDir) : projectDir;
+    if (name) {
       projectDir = join(dirname(sourceDir), `${basename(sourceDir)}-wt`, name);
-      const { runShipSetup } = await import('./cli-ship-setup.js');
-      const report = await runShipSetup(['--project', sourceDir,
-        '--brief', join(written.evidenceDir, 'brief.md'), '--target', projectDir,
-        '--base', 'HEAD', '--branch', name]);
-      fsModule.atomicWrite(join(written.evidenceDir, 'setup.json'), `${JSON.stringify(report, null, 2)}\n`);
-      if (report.state !== 'ready') {
-        const refusal = `Launch refused by ship-setup:\n${report.blockers.map(b => b.reason).join('\n')}`;
+      if (existsSync(projectDir)) setup = inspectShipSetupRecord(projectDir, task);
+    }
+    try {
+      // The flag can acknowledge only a measurement that predates this invocation.
+      if (setup.state === 'ready' && acknowledgementPresent && briefAdmission.acknowledgement.kind === 'explicit') {
+        briefAdmission.acknowledgement.measuredSetupIdentity = measuredSetupFacts(setup.validationBaseline).identity;
+      }
+      if (written?.evidenceDir && name && setup.state === 'missing') {
+        const { runShipSetup } = await import('./cli-ship-setup.js');
+        const report = await runShipSetup(['--project', sourceDir,
+          '--brief', join(written.evidenceDir, 'brief.md'), '--target', projectDir,
+          '--base', 'HEAD', '--branch', name]);
+        fsModule.atomicWrite(join(written.evidenceDir, 'setup.json'), `${JSON.stringify(report, null, 2)}\n`);
+        if (report.state !== 'ready') {
+          const refusal = `Launch refused by ship-setup:\n${report.blockers.map(b => b.reason).join('\n')}`;
+          recordLaunchRefusal(refusal);
+          console.error(refusal);
+          process.exitCode = EXIT_CODE.failed;
+          return;
+        }
+        const { indexBriefWritingEvidence } = await import('./brief-writer.js');
+        indexBriefWritingEvidence(task, written.evidenceDir);
+        console.error(`Prepared target: ${projectDir} (branch ${name}, base HEAD)`);
+        setup = inspectShipSetupRecord(projectDir, task);
+      }
+      if (setup.state !== 'ready') {
+        const detail = setup.state === 'missing'
+          ? `no exact setup record exists at ${setup.recordPath}`
+          : setup.state === 'refused'
+            ? `ship-setup refused this exact target and brief: ${setup.reason}`
+            : `the exact setup record is invalid: ${setup.reason}`;
+        const refusal = `Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`;
         recordLaunchRefusal(refusal);
         console.error(refusal);
         process.exitCode = EXIT_CODE.failed;
         return;
       }
-      const { indexBriefWritingEvidence } = await import('./brief-writer.js');
-      indexBriefWritingEvidence(task, written.evidenceDir);
-      console.error(`Prepared target: ${projectDir} (branch ${name}, base HEAD)`);
-      setup = inspectShipSetupRecord(projectDir, task);
-    }
-    if (setup.state !== 'ready') {
-      const detail = setup.state === 'missing'
-        ? `no exact setup record exists at ${setup.recordPath}`
-        : setup.state === 'refused'
-          ? `ship-setup refused this exact target and brief: ${setup.reason}`
-          : `the exact setup record is invalid: ${setup.reason}`;
-      const refusal = `Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`;
-      recordLaunchRefusal(refusal);
-      console.error(refusal);
-      process.exitCode = EXIT_CODE.failed;
-      return;
-    }
-    const { measuredSetupFacts, measuredSetupSummary, assertMeasuredSetupLaunch } = await import('./ship-setup-record.js');
-    try {
       console.error(measuredSetupSummary(setup.validationBaseline).trimEnd());
-      const facts = measuredSetupFacts(setup.validationBaseline);
-      if (acknowledgementPresent && briefAdmission.acknowledgement.kind === 'explicit') {
-        briefAdmission.acknowledgement.measuredSetupIdentity = facts.identity;
-      }
       assertMeasuredSetupLaunch(projectDir, task, briefAdmission);
     } catch (error) {
+      rethrowGitNotAnswered(error);
       const refusal = error instanceof Error ? error.message : String(error);
       recordLaunchRefusal(refusal); console.error(refusal);
       process.exitCode = EXIT_CODE.failed; return;
