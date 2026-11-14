@@ -160,6 +160,11 @@ Only `frozen: true` freezes an input; omission or `false` leaves it mutable. Non
 values and unknown annotations are schema errors. Input/output identity and admitted frozen
 bytes are checked by hashes and physical paths, not by preservation wording.
 Settlement fails changed frozen bytes and accepts identical bytes. Restoration uses only a pinned-base Git object whose content matches the admitted digest; untracked or locally dirty inputs are reported unrestored.
+The shared tree identity used for validation, review freshness and settlement covers Git's
+tracked and untracked-not-ignored source plus declared outputs and admitted products,
+including ignored products. A declared input's ignored content is excluded. Its setup and
+authoring checks and frozen content hashes remain independent; changes confined to ignored
+inputs no longer invalidate earlier validation or review.
 
 Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
 and `on_existing: create|update|append|replace`. They are create-only by default. Declaring an existing

@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 56 -->
+<!-- flowcrew-skill-revision: 57 -->
 
 # Ship a conversation to FlowCrew
 
@@ -35,6 +35,9 @@ frontmatter `inputs:` array, using path strings or `{path, frozen?, type?, sha25
 Declare gitignored inputs in the block and intentional reuse of existing outputs. Freeze a file
 or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
 not enforce freezing. Explain evidence gaps and dependencies of quantities.
+Tree identity covers Git's source inventory plus declared outputs and admitted products.
+Ignored input content does not affect validation coverage or review freshness; input setup,
+authoring checks and `frozen: true` content verification still apply.
 
 State effect constraints as plain brief text for the stages to read under their existing
 authority. Execution never waits for a human. A stage that lacks a resource continues as far

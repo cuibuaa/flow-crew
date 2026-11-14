@@ -163,8 +163,8 @@ export function validationForTree(entries: EvidenceEntry[], treeHash: string | n
   return treeHash === null ? undefined : facts.filter(fact => fact.treeHash === treeHash).filter(fact => fact.resourceState === 'complete').at(-1) ?? facts.filter(fact => fact.treeHash === treeHash).at(-1);
 }
 
-/** Identity covers Git's source inventory, plus explicitly declared ignored
- * inputs. Generated ignored outputs are not source. Unreadable members fail closed. */
+/** Identity covers Git's source inventory plus declared outputs and products.
+ * Declared inputs do not add ignored members. Unreadable members fail closed. */
 export function captureProjectTree(projectDir: string, brief = '', runDir?: string): ProjectTree {
   try {
     const stateRoot = resolve(fcGlobalDir());
@@ -182,7 +182,8 @@ export function captureProjectTree(projectDir: string, brief = '', runDir?: stri
     const products = [...Object.values(state?.terminalStates ?? {}).flatMap(entry => entry.paths),
       ...(state?.planControl?.stages ?? []).flatMap(stage => stage.artifact_contract?.produces
         .filter(output => output.root === 'project').map(output => output.path) ?? [])];
-    for (const path of [...declaredInputs, ...contract.outputs.map(output => output.path), ...products]) {
+    const declaredProducts = [...contract.outputs.map(output => output.path), ...products];
+    for (const path of declaredProducts) {
       if (!ordinary(path) || !safeEvidencePath(path)) continue;
       for (const member of listProjectFilesAt(projectDir, path, declaredInputs.has(path), { complete: true, skipDirectory: path => !safeEvidencePath(path) })) {
         if (safeEvidencePath(member) && !lstatSync(join(projectDir, member)).isDirectory()) paths.add(member);
@@ -191,7 +192,7 @@ export function captureProjectTree(projectDir: string, brief = '', runDir?: stri
     const files: TreeFile[] = [...paths].sort().map(path => {
       const content = readContentIdentity(join(projectDir, path));
       const file: TreeFile = { path, mode: content.state === 'present' ? lstatSync(join(projectDir, path)).mode & 0o777 : 0, content };
-      if (declaredInputs.has(path) && content.state === 'present' && content.type === 'symlink') {
+      if (declaredProducts.includes(path) && declaredInputs.has(path) && content.state === 'present' && content.type === 'symlink') {
         const target = realpathSync(join(projectDir, path));
         if (!safeEvidencePath(target)) throw new Error('Declared input resolves to a credential/control path');
         if (lstatSync(target).isFile()) file.targetContent = readContentIdentity(target);

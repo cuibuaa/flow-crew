@@ -229,11 +229,11 @@ describe('legitimate work outside planner estimates', () => {
     for (const path of paths) expect(readFileSync(join(project, path), 'utf8')).toBe('required bytes');
   });
 
-  it('keeps ignored predecessor fixtures when git add -f changes only the index', async () => {
+  it('keeps ignored predecessor bytes and records their admission to the source inventory', async () => {
     write('.gitignore', 'samples/\n'); write('source.txt', 'source'); commit(); write('samples/baseline.json', 'predecessor fixture');
     create('---\ninputs: [samples]\n---\nRetain and stage predecessor fixtures.');
     const result = await execute(() => { git('add', '-f', 'samples/baseline.json'); return ['samples/baseline.json']; });
-    accepted(result); expect(result.audits[0].appliedWrites).not.toContain('samples/baseline.json');
+    accepted(result); expect(result.audits[0].appliedWrites).toContain('samples/baseline.json');
     expect(readFileSync(join(project, 'samples/baseline.json'), 'utf8')).toBe('predecessor fixture');
   });
 

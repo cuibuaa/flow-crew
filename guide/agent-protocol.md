@@ -274,6 +274,13 @@ author invocation and its deadline. Authors run related tests, finish code and d
 and return; they neither execute full validation nor poll its record. The scheduler requests
 one content-addressed record and reuses every completed result across stages, gates and resume.
 
+The shared tree identity covers Git's source inventory (tracked files plus untracked files
+that are not ignored), plus declared outputs and admitted terminal/stage products, including
+ignored products. Declaring an input does not add its ignored content to that identity.
+Changes confined to ignored inputs therefore retain validation coverage and review
+freshness. Input setup, authoring checks and independent `frozen: true` content verification
+still apply.
+
 Engine configuration declares `validation_attempts`, `validation_concurrency` and
 `validation_priority` (Unix niceness adjustment). The brief's `validation.timeoutMs` and
 `validation.attempts` override the project's `config/validation.json` per field. An omitted

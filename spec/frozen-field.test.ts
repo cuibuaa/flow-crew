@@ -10,6 +10,7 @@ import { cmdShipPreflightWithDeps } from '../src/cli-ship-preflight.js';
 import { rehearseBriefIsolated } from './test-support/rehearse.js';
 
 import { parseBriefInputs } from '../src/ship-inputs.js';
+import { captureProjectTree } from '../src/evidence-ledger.js';
 import { resolveImmutableEvidenceBindings } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js';
@@ -47,7 +48,7 @@ const structured = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Deliver `re
 const genericProse = '---\ninputs: [notes.md, evidence]\noutputs: [report.md]\n---\nChoose ordinary helper and scratch paths. Do not modify existing validation or baseline input bytes. 只读约束由声明决定。';
 const genericStructured = '---\ninputs: [{path: notes.md, frozen: true}]\noutputs: [report.md]\n---\nThe frontmatter marks baseline input as frozen immutable evidence. This negative control deliberately changes it and leaves changed bytes at author settlement. Write the observation report.';
 
-async function author(brief: string, restore = false) {
+async function author(brief: string, restore = false, observe?: () => void) {
   const stage = StageConfigSchema.parse({ id: 'author', role: 'coder', scope: ['report.md'] });
   const { runId, runDirPath } = createRun(project, 'frozen-field', 'name: fixture\nstages: []\n', ['author'], brief);
   directory = runDirPath;
@@ -57,6 +58,7 @@ async function author(brief: string, restore = false) {
     calls++;
     writeFileSync(join(project, 'notes.md'), 'changed bytes');
     if (restore) writeFileSync(join(project, 'notes.md'), original);
+    observe?.();
     writeFileSync(join(project, 'report.md'), 'delivered');
     return { output: 'Delivered.', exitCode: 0, processExitCode: 0, duration_ms: 1, writes: ['notes.md', 'report.md'], writeAttribution: 'structured' };
   } };
@@ -108,6 +110,22 @@ it.each([['literal', structured], ['generic', genericStructured]])('recheck decl
   expect(result.audit.rollbackFailures).toEqual([]);
   expect(readFileSync(join(project, 'notes.md'))).toEqual(original);
   expect(readFileSync(join(project, 'report.md'), 'utf8')).toBe('delivered');
+});
+
+it('fails an ignored frozen input mutation even when the source identity stays unchanged', async () => {
+  isolatedProjectCommand('git', ['rm', '--cached', 'notes.md'], project, root);
+  writeFileSync(join(project, '.gitignore'), 'notes.md\n');
+  const before = captureProjectTree(project, structured);
+  expect(before.hash).not.toBeNull();
+  expect(before.files.map(file => file.path)).not.toContain('notes.md');
+  const result = await author(structured, false, () => expect(captureProjectTree(project, structured)).toEqual(before));
+  const frozen = JSON.parse(readFileSync(runRecordPath(directory, 'frozen_inputs.json'), 'utf8'));
+  expect(frozen.members['notes.md']).toMatchObject({ state: 'present', type: 'file', sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  expect(result.status.status).toBe('failed');
+  expect(result.status.attempts[0]).toMatchObject({ processExitCode: 0, exitCode: 1 });
+  expect(result.audit.violations).toEqual([expect.objectContaining({ path: 'notes.md' })]);
+  expect(result.audit.rolledBackWrites).toEqual(['notes.md']);
+  expect(readFileSync(join(project, 'notes.md'))).toEqual(original);
 });
 
 it('accepts a structured frozen input restored to identical bytes before settlement', async () => {

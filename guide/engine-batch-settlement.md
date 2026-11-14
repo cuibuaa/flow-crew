@@ -23,7 +23,7 @@ acceptance must rerun the retained specs against the final source.
 | E08 | already fixed | Pending scope input does not preempt an admitted repair; see [repair and replan specs](../spec/repair-replan-budget.test.ts). |
 | E09 | already fixed | The planner may publish its dispatch carrier while other roles remain constrained; see [planner carrier publication specs](../spec/planner-carrier.test.ts). |
 | E10 | fixed | Domain hand/hands nouns no longer imply supplied operator figures; real supplied-number controls remain in [batch regressions](../spec/engine-batch-regressions.test.ts). |
-| E11 | fixed | Declared ignored outputs are distinguished from ignored inputs, with exact file and directory coverage; see [batch regressions](../spec/engine-batch-regressions.test.ts). |
+| E11 | fixed | Tree identity includes declared ignored outputs and products, while ignored inputs retain their independent frozen checks; see [tree identity](../spec/tree-identity.test.ts) and [frozen inputs](../spec/frozen-field.test.ts). |
 | E12 | already fixed | The reported watchdog carrier-deletion failure did not reproduce on the base: deletion controls returned 125 and restored the carrier. See [carrier integrity](../spec/engine-integrity-settlement.test.ts). No carrier-deletion repair or historical-flake cause is claimed. |
 | E13 | already fixed | Later attempts preserve earlier native provider streams; see [per-attempt log specs](../spec/livelog-per-attempt.test.ts). |
 | E14 | historical fix; machinery retired in C1 | Generic baseline resettlement is removed; actual content deltas remain in [settlement specs](../spec/write-scope-subtraction.test.ts). |

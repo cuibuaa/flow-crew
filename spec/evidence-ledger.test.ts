@@ -151,17 +151,18 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(command.identityOwner).toBe('unknown');
   });
 
-  it('binds changed ignored inputs and validates their repair once', async () => {
+  it('keeps ignored inputs available while source repair changes validation identity', async () => {
     const result = await fixture({ input: 'introduced' });
     expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(2);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
     expect(result.executions.map(value => value.input)).toEqual(['BAD', 'GOOD']);
     expect(result.validations.map(value => value.executions[0].commands[0].exitCode)).toEqual([1, 0]);
     expect(result.validations[0].treeHash).not.toBe(result.validations[1].treeHash);
+    expect(captureProjectTree(result.target, '---\ninputs: [data]\n---\n').files.map(file => file.path)).not.toContain('data/value.txt');
     expect(result.validations[0].failures).toEqual([]);
   });
 
-  it.each([false, true])('retains ignored descendant identity and modes without replaying a base tree after setup (readonly=%s)', async readonlyInput => {
+  it.each([false, true])('retains tracked descendant identity and ignored input modes without replaying a base tree after setup (readonly=%s)', async readonlyInput => {
     const result = await fixture({ input: 'mixed', readonlyInput });
     expect(result.final.status).toBe('incomplete');
     expect(result.executions.every(value => value.cwd === result.target)).toBe(true);
