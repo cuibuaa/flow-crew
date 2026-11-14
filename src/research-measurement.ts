@@ -29,10 +29,13 @@ function inventory(root: string, paths: string[], changes = false): Inventory {
   const result: Inventory = {};
   const walk = (path: string): void => {
     const absolute = resolve(root, path);
-    // Reject symlinks in every component, including declared directory parents.
+    // Ancestors bind paths; only declared members carry change stamps. Reject symlinks in every component.
     for (let p = absolute; p !== resolve(root); p = dirname(p)) {
-      if (relative(root, p).startsWith('..') || lstatSync(p).isSymbolicLink()) throw new Error('measurement inputs must be regular, local, non-symlink paths');
+      const stat = lstatSync(p, { bigint: true }), member = relative(root, p);
+      if (member.startsWith('..') || stat.isSymbolicLink()) throw new Error('measurement inputs must be regular, local, non-symlink paths');
+      if (changes && p !== absolute && !Object.hasOwn(result, member)) result[member] = `${stat.dev}:${stat.ino}`;
     }
+    // Change stamps retain temporary byte/metadata edits even after restoration.
     const stat = lstatSync(absolute, { bigint: true });
     if (stat.isDirectory()) {
       result[path] = changes ? `${stat.dev}:${stat.ino}:${stat.ctimeNs}` : `directory:${stat.mode}`;
@@ -131,17 +134,6 @@ if code < 0:
 sys.exit(code)
 `;
 
-// Landlock does not mediate chmod/chown/utime. Kernel change stamps also refuse
-// temporary metadata edits, including edits restored before the final digest.
-function inputChanges(root: string, paths: string[]): string {
-  const entries = inventory(root, paths, true);
-  for (const path of Object.keys(entries)) for (let p = dirname(path); p !== '.'; p = dirname(p)) {
-    const s = lstatSync(join(root, p), { bigint: true });
-    entries[p] = `${s.dev}:${s.ino}:${s.ctimeNs}`;
-  }
-  return digest(entries);
-}
-
 export function restoreResearchBest(project: string, run: string): void {
   const state = researchInstrumentState(run);
   const paths = state.config.candidate;
@@ -182,10 +174,10 @@ async function execute(state: ResearchInstrumentState, run: string, request: Res
     if (deadline <= Date.now()) throw new Error('research_wall_budget_exhausted');
     assertInputs();
     const changes = () => digest([
-      inputChanges(join(root, 'instrument'), state.config.frozen), inputChanges(join(root, 'executables'), ['command']),
-      inputChanges(candidate.path, state.config.candidate),
-      inputChanges(state.projectDir, [...state.config.frozen, ...state.config.candidate]),
-      inputChanges(dirname(requestRef.path), [basename(requestRef.path)]),
+      inventory(join(root, 'instrument'), state.config.frozen, true), inventory(join(root, 'executables'), ['command'], true),
+      inventory(candidate.path, state.config.candidate, true),
+      inventory(state.projectDir, [...state.config.frozen, ...state.config.candidate], true),
+      inventory(dirname(requestRef.path), [basename(requestRef.path)], true),
     ]);
     const before = changes();
     receipt = await withAdmittedExecution({ projectDir: state.projectDir, runDir: run, stageId: '_research_instrument' }, () => new Promise<ExecutionReceipt>(resolveReceipt => {

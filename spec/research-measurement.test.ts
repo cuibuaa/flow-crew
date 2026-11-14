@@ -1,6 +1,6 @@
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureMeasuredCandidate, finalizeResearchInstrument, initializeResearchInstrument, invokeResearchInstrument,
@@ -35,6 +35,15 @@ function candidate(value: Record<string, unknown>, label = 'round-1') {
   return captureMeasuredCandidate(project, run, label);
 }
 const evaluate = (value: Record<string, unknown> = {}, round = 1) => invokeResearchInstrument(run, 'evaluate', candidate(value, `round-${round}`), round);
+function duringExecution(mutate: () => void) {
+  const spawn = commands.spawnOwnedCommand;
+  return vi.spyOn(commands, 'spawnOwnedCommand').mockImplementation((cmd, args, options) => {
+    const owned = spawn(cmd, args, options);
+    // The confinement acknowledgement arrives after the pre-execution inventory.
+    owned.child.stdout!.once('data', mutate);
+    return owned;
+  });
+}
 
 describe('frozen project instrument execution', () => {
   it('initializes once and leaves project policy and payloads opaque', async () => {
@@ -61,6 +70,62 @@ describe('frozen project instrument execution', () => {
   });
   it('refuses temporary permission edits even after the original mode is restored', async () => {
     await setup(); expect(await evaluate({ metadata: true })).toMatchObject({ outcome: 'execution_error', reason: 'instrument_input_changed_during_execution' });
+  });
+  it.each(['frozen', 'candidate'])('ignores undeclared siblings of %s inputs during execution', async target => {
+    await setup(config => {
+      config.frozen = ['instrument/run.cjs', 'instrument/config.json'];
+      config.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree')); writeFileSync(join(project, 'tree/input.json'), '100');
+    });
+    const submitted = candidate({ value: 200 });
+    const clean = await invokeResearchInstrument(run, 'evaluate', submitted, 1);
+    const parent = join(project, target === 'frozen' ? 'instrument' : 'tree');
+    const files = target === 'candidate' ? ['input.json'] : ['run.cjs', 'config.json'];
+    const before = files.map(file => readFileSync(join(parent, file)));
+    const spawn = duringExecution(() => writeFileSync(join(parent, 'unrelated.txt'), 'unrelated'));
+    const changed = await invokeResearchInstrument(run, 'evaluate', submitted, 2);
+    expect(spawn).toHaveBeenCalledTimes(1); expect(existsSync(join(parent, 'unrelated.txt'))).toBe(true);
+    expect(files.map(file => readFileSync(join(parent, file)))).toEqual(before);
+    expect({ outcome: changed.outcome, reason: changed.reason }).toEqual({ outcome: clean.outcome, reason: clean.reason });
+    expect(changed.outcome).toBe('reject');
+  });
+  it('refuses frozen source bytes changed during execution', async () => {
+    await setup(); const spawn = duringExecution(() => writeFileSync(join(project, 'instrument/config.json'), '{}'));
+    const result = await evaluate();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: expect.stringContaining('frozen_source_fingerprint_mismatch') });
+  });
+  it.each(['bytes', 'member metadata', 'directory metadata'])('refuses temporary declared candidate %s edits during execution', async target => {
+    await setup(config => {
+      config.candidate.push('tree'); mkdirSync(join(project, 'tree')); writeFileSync(join(project, 'tree/input.json'), '100');
+    });
+    const submitted = candidate({}), path = join(submitted.path, target === 'directory metadata' ? 'tree' : 'tree/input.json');
+    const mode = lstatSync(path).mode;
+    duringExecution(() => {
+      if (target === 'bytes') { writeFileSync(path, '101'); writeFileSync(path, '100'); }
+      else { chmodSync(path, mode ^ 64); chmodSync(path, mode); }
+    });
+    const result = await invokeResearchInstrument(run, 'evaluate', submitted, 1);
+    expect(lstatSync(path).mode).toBe(mode); expect(readFileSync(join(submitted.path, 'tree/input.json'), 'utf8')).toBe('100');
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: 'instrument_input_changed_during_execution' });
+  });
+  it.each(['symlink', 'directory'])('refuses an input ancestor replaced by a %s during execution with identical member stamps', async replacement => {
+    await setup(config => {
+      config.candidate.push('tree/input.json'); mkdirSync(join(project, 'tree')); writeFileSync(join(project, 'tree/input.json'), '100');
+    });
+    const parent = join(project, 'tree'), detached = join(root, 'detached'), alternate = join(root, 'alternate');
+    mkdirSync(alternate); linkSync(join(parent, 'input.json'), join(alternate, 'input.json'));
+    const submitted = candidate({}), before = lstatSync(join(parent, 'input.json'), { bigint: true });
+    duringExecution(() => {
+      renameSync(parent, detached);
+      if (replacement === 'symlink') symlinkSync(detached, parent);
+      else renameSync(alternate, parent);
+    });
+    const result = await invokeResearchInstrument(run, 'evaluate', submitted, 1);
+    const after = lstatSync(join(parent, 'input.json'), { bigint: true });
+    expect([after.dev, after.ino, after.ctimeNs]).toEqual([before.dev, before.ino, before.ctimeNs]);
+    expect(readFileSync(join(parent, 'input.json'), 'utf8')).toBe('100');
+    expect(result).toMatchObject({ outcome: 'execution_error', reason: replacement === 'directory'
+      ? 'instrument_input_changed_during_execution' : expect.stringContaining('non-symlink paths') });
   });
   it('confines truncation, renaming and hardlinks while scratch stays writable', async () => {
     await setup(); expect((await evaluate({ operations: true })).outcome).toBe('keep');
