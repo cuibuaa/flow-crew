@@ -27,7 +27,7 @@ import { createRun } from './test-support/create-run.js';
 import { RUN_STATUS, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import type { SupervisorBackend, UnitStatus } from '../src/supervision.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const temporaryRoots: string[] = [];
 const role: AgentConfig = {
