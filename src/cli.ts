@@ -1121,7 +1121,7 @@ async function cmdQuick(preview = false) {
       if (setup.state === 'ready' && acknowledgementPresent && briefAdmission.acknowledgement.kind === 'explicit') {
         briefAdmission.acknowledgement.measuredSetupIdentity = measuredSetupFacts(setup.validationBaseline).identity;
       }
-      if (written?.evidenceDir && name && setup.state === 'missing') {
+      if (written?.evidenceDir && name && setup.state !== 'ready') {
         const { runShipSetup } = await import('./cli-ship-setup.js');
         const report = await runShipSetup(['--project', sourceDir,
           '--brief', join(written.evidenceDir, 'brief.md'), '--target', projectDir,
