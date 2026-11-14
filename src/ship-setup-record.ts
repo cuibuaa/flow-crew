@@ -178,7 +178,7 @@ export function measuredSetupFacts(baseline: ProjectValidationBaseline) {
     canonicalJson({ role: command.role, command: command.command, args: command.args, env: command.env ?? {} });
   const commands = baseline.discovery.commands.map(command => ({ command: identity(command),
     results: baseline.results.filter(result => identity(result) === identity(command)).map(result => ({
-      exitCode: result.exitCode ?? null, unfinished: result.unfinished === true,
+      exitCode: result.exitCode ?? null, unfinished: Boolean(result.unfinished),
     })),
   }));
   const acknowledgementRequired = commands.some(command => !command.results.some(result => result.exitCode === 0 && !result.unfinished));
