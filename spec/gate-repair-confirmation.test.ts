@@ -1,3 +1,4 @@
+import { entryPlan, plannerReply } from './test-support/planner-entry.js';
 import './test-support/policy-runtime.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath } from '../src/run-layout.js';
@@ -57,7 +58,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     calls.push({ stage: opts.stageId, prompt });
     const result = (value: unknown, writes: string[] = []) => ({ output: JSON.stringify(value), exitCode: 0, duration_ms: 1,
       writes, writeAttribution: 'structured' as const });
-    if (opts.stageId === 'choose') return result({ successor: 'implement', reason: 'One output', assumptions: [] });
+    if (opts.stageId === 'plan') return plannerReply(opts, proposal);
     if (opts.stageId === 'assess') return result({ successor: route![Math.min(++assessments - 1, route!.length - 1)], reason: 'Review current value', risk_areas: [] });
     if (opts.stageId === 'later_author') {
       writeFileSync(join(project, 'docs/other.txt'), 'Independent downstream output');
@@ -99,7 +100,8 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     return result({ status: 'delivered', summary: 'Value delivered', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
   const { config, raw } = loadWorkflow(resolve(`config/workflows/${route ? 'entry' : 'direct'}.yaml`));
-  if (route?.length === 3) config.dispatch!.push({ id: 'later_author', role: 'coder', depends_on: [route[1]],
+  const proposal: unknown[] = structuredClone(entryPlan);
+  if (route?.length === 3) proposal.push({ id: 'later_author', role: 'coder', depends_on: [route[1]],
     scope: ['docs/other.txt'], prompt_template: '', skills: [], dynamic_dispatch: false, is_gate: false,
     artifact_contract: { version: 1, produces: [], reads: [] },
     decision: { successors: ['assess'], default: 'assess', kind: 'successor' } });
@@ -233,7 +235,7 @@ describe('repair requires a reviewer reproduction', () => {
   ])('retains reproduction closure across assessment choices (%s → %s)', { timeout: 60_000 }, async (first, second) => {
     for (const failedRepair of [true, false]) {
       const value = await workflow('mixed', failedRepair, false, false, 'recorded', [first, second]);
-      expect(value.calls.map(call => call.stage)).toEqual(['choose', 'implement', 'assess', first, 'repair', 'assess', second]);
+      expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', 'assess', first, 'repair', 'assess', second]);
       expect(value.final.status).toBe(failedRepair ? 'incomplete' : 'complete');
       expect(value.final.stages[second].gate?.pass).toBe(!failedRepair);
       expect(value.final.decisionGraph?.records.filter(record => record.stageId === second).at(-1)?.gateAccepted).toBe(!failedRepair);
@@ -247,7 +249,7 @@ describe('repair requires a reviewer reproduction', () => {
 
   it.each(['review', 'review_full'])('keeps an accepted repair closed after independent downstream work and reassessment to %s', async last => {
     const value = await workflow('mixed', false, false, false, 'recorded', ['review', 'review', last]);
-    expect(value.calls.map(call => call.stage)).toEqual(['choose', 'implement', 'assess', 'review', 'repair', 'assess',
+    expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', 'assess', 'review', 'repair', 'assess',
       'review', 'later_author', 'assess', last]);
     const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.exitCode === 1)!;
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;

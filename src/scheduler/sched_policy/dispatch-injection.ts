@@ -29,7 +29,7 @@ export function selectDispatchProposalContext(sorted: StageConfig[], state: Stor
   if (!dispatchStageId && planners.length !== 1) throw new Error('Proposal context has no unique dispatch stage');
   dispatchStageId ??= planners[0].id;
   const revising = state.decisionGraph?.replan?.stageId === dispatchStageId && Boolean(state.planControl);
-  return { dispatchStageId, revising, sorted: revising ? sorted.filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape') : sorted };
+  return { dispatchStageId, revising, sorted: revising ? sorted.filter(stage => stage.dynamic_dispatch) : sorted };
 }
 
 /** The same read-only proposal inspection serves scheduler injection and planner self-checks. */
@@ -229,7 +229,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
         if (!base.path) throw new Error('PLAN_REVISION_DECISION_UNBOUND: replan base carrier is absent');
         const original = JSON.parse(readFileSync(runRecordPath(runDirPath, base.path), 'utf8'));
         if (!Array.isArray(original.stages) || planDigest(original.stages) !== base.digest) throw new Error('PLAN_HISTORY_CONFLICT: replan base bytes differ');
-        requestBootstrap = (original.stages as StageConfig[]).filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape');
+        requestBootstrap = (original.stages as StageConfig[]).filter(stage => stage.dynamic_dispatch);
       }
       const candidate = [...requestBootstrap, ...dispatched];
       const result = applyPlanRevision({ projectDir, runId, request: {

@@ -52,7 +52,7 @@ export async function executeIteration(
     if (Object.values(state.stages).some(isContinuingStage)) return state;
 
     if (!await validateSettledTree(projectDir, runId)) return readRunState(projectDir, runId);
-    state = settleDecisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
+    state = settleDecisions(sorted, state, projectDir, runId, runDirPath);
     if (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status)) return state;
     if (state.decisionGraph?.replan) injectedDispatchStages.delete(state.decisionGraph.replan.stageId);
     const admitted = admitPlannerDispatches(sorted, state, projectDir, runId, runDirPath, roleRegistry, injectedDispatchStages);

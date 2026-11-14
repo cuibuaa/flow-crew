@@ -25,10 +25,10 @@ export interface ParsedBriefFrontmatter {
   frontmatterErrorKind?: BriefFrontmatterDocument['errorKind'];
 }
 
-/** An instrument declaration owns research shape; engineering enters the chooser. */
+/** An instrument declaration owns research shape; engineering enters the planner. */
 export function entryWorkflow(parsed: ParsedBriefFrontmatter): { workflow: string; reason: string; error?: string } {
   const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError ?? parsed.researchPolicyError;
-  return { workflow: parsed.research ? 'research' : 'entry', reason: parsed.research ? 'The instrument declaration fixes the research loop.' : 'The model chooser selects the engineering shape.', ...(error ? { error } : {}) };
+  return { workflow: parsed.research ? 'research' : 'entry', reason: parsed.research ? 'The instrument declaration fixes the research loop.' : 'The planner proposes the engineering graph for admission.', ...(error ? { error } : {}) };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {

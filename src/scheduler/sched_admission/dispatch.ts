@@ -226,7 +226,7 @@ export function createDispatchAdmission() {
           || stage.decision.successors.some(id => !byId.get(id)?.is_gate))) {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: focused/full review requires two distinct independent read-only gate successors`, 'decision.successors', stage.id));
         }
-        for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor) && stage.decision.kind !== 'shape') {
+        for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor)) {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: unknown successor ${successor}`, 'decision.successors', stage.id));
         }
       }
@@ -264,7 +264,7 @@ export function createDispatchAdmission() {
     // Empty refs mean conservative whole-brief responsibility. Explicit subsets
     // keep large plans precise without making small plans repeat generated IDs.
     for (const stage of input.dispatched) {
-      if (!stage.dynamic_dispatch && stage.decision?.kind !== 'shape' && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
+      if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
     }
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {

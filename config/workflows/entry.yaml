@@ -1,47 +1,8 @@
 name: entry
-description: One entry; a schema-constrained model chooses a fixed shape or decomposition.
+description: The planner proposes the engineering graph for scheduler admission.
 stages:
-  - id: choose
-    role: planner
-    scope: []
-    decision:
-      kind: shape
-      successors: [implement, plan]
-      default: plan
-    artifact_contract: {version: 1, produces: [], reads: []}
   - id: plan
     role: planner
     scope: []
-    depends_on: [choose]
     dynamic_dispatch: true
     artifact_contract: {version: 1, produces: [], reads: []}
-dispatch:
-  - id: implement
-    role: coder
-    scope: ["."]
-  - id: assess
-    role: qa
-    scope: []
-    depends_on: [implement]
-    decision:
-      kind: review
-      successors: [review, review_full]
-      default: review_full
-  - id: review
-    role: qa
-    scope: []
-    depends_on: [assess]
-    is_gate: true
-  - id: review_full
-    role: qa
-    scope: []
-    depends_on: [assess]
-    is_gate: true
-  - id: repair
-    role: coder
-    scope: ["."]
-    depends_on: [review, review_full]
-    retry_to: [review, review_full]
-    decision:
-      successors: [assess, replan]
-      default: assess

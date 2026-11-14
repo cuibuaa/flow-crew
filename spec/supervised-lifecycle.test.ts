@@ -1,3 +1,4 @@
+import { mockEntryPlan } from './test-support/planner-entry.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -196,7 +197,7 @@ async function createHarness(): Promise<Harness> {
     tokens_in: 0,
     tokens_out: 0,
   }), 'utf-8');
-  writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', assumptions: [] }) }));
+  writeFileSync(join(mockDir, 'plan.json'), JSON.stringify(mockEntryPlan));
   writeFileSync(join(mockDir, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(mockDir, 'review.json'), JSON.stringify({
     output_text: 'portable fixture gate passed', exit_code: 0,

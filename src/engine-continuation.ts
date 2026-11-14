@@ -13,11 +13,30 @@ import { RecordedWorkflowConfigSchema } from './scheduler/sched_admission/config
 import { persistedPlanErrors, checkpointConsumers, engineGeneration } from './restart-recovery.js';
 import { readRunState, readStageStatus, requireKnownRunStatus, runDir, RUN_STATUS, STAGE_STATUS, updateOperationalRunStateAtPath, type StoreState } from './store.js';
 
+export class ContinuationRefusal extends Error {
+  readonly code = 'retired_shape_decision';
+  constructor() { super('CONTINUATION_INCOMPATIBLE: retired_shape_decision; start a new planner run with the historical evidence as inputs.'); this.name = 'ContinuationRefusal'; }
+}
+
+export function assertExecutableWorkflow(workflow: unknown): void {
+  const stages = workflow && typeof workflow === 'object' && 'stages' in workflow ? workflow.stages : undefined;
+  if (Array.isArray(stages) && stages.some(stage => stage?.decision?.kind === 'shape')) throw new ContinuationRefusal();
+}
+
 export function recordContinuationRefusal(projectDir: string, runId: string, reason: string): void {
   try {
     // A refusal is not acceptance of a legacy continuation or a cache repair.
     const snapshot = readRunState(projectDir, runId);
     if (!snapshot.briefAdmission?.contract || !hasLifecycleAuthority(snapshot) || snapshot.status === RUN_STATUS.CANCELLED) return;
+    // Retired workflow records remain immutable even when callers publish a refusal.
+    try {
+      assertExecutableWorkflow(snapshot.planControl);
+      const path = runRecordPath(runDir(projectDir, runId), 'workflow.yaml');
+      if (existsSync(path)) assertExecutableWorkflow(parse(readFileSync(path, 'utf8')));
+    } catch (error) {
+      if (error instanceof ContinuationRefusal) return;
+      rethrowGitNotAnswered(error); // Ordinary unreadable carriers keep their existing refusal publication.
+    }
     updateOperationalRunStateAtPath(runDir(projectDir, runId), state => {
       if (state.status !== RUN_STATUS.CANCELLED) state.continuationFailure = { at: new Date().toISOString(), reason, generation: engineGeneration() };
     });
@@ -32,6 +51,8 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('run/project binding mismatch');
     if (state.recovery?.kind === 'blocked') throw new Error(state.recovery.reason);
     const workflow = RecordedWorkflowConfigSchema.parse(parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'workflow.yaml'), 'utf8')));
+    assertExecutableWorkflow(workflow);
+    if (state.planControl) assertExecutableWorkflow(state.planControl);
     const errors = persistedPlanErrors(state);
     const checkpoint = state.engineCheckpoint;
     if (checkpoint && (checkpoint.version !== 2 || checkpoint.runId !== runId
@@ -84,7 +105,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     if (errors.length) throw new Error(errors.join('; '));
     return state;
   } catch (error) {
-    if (error instanceof ContractRefusal) throw error;
+    if (error instanceof ContractRefusal || error instanceof ContinuationRefusal) throw error;
     const reason = `CONTINUATION_INCOMPATIBLE: ${error instanceof Error ? error.message : String(error)}`;
     recordContinuationRefusal(projectDir, runId, reason);
     throw new Error(reason, { cause: error });

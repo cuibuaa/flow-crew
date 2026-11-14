@@ -1,3 +1,4 @@
+import { mockEntryPlan } from './test-support/planner-entry.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -264,7 +265,7 @@ describe('CLI adapter behavior', () => {
 
     const result = quickUntilWorkflowLookup(fixture);
 
-    expect(result.status).toBe(1); // Invalid chooser output fails the attempt and existing retry.
+    expect(result.status).toBe(1); // Missing planner proposal fails admission and uses the existing retry.
     expect(`${result.stdout}${result.stderr}`).toContain('failed');
     expect(`${result.stdout}${result.stderr}`).not.toContain('parked');
     expect(`${result.stdout}${result.stderr}`).toContain(`Adapter resolution: ${adapter}`);
@@ -386,7 +387,7 @@ describe('CLI adapter behavior', () => {
     const mockDir = join(fixture.root, 'mock');
     const brief = structuredBrief();
     mkdirSync(mockDir);
-    writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single fixture change.', assumptions: [] }) }));
+    writeFileSync(join(mockDir, 'plan.json'), JSON.stringify(mockEntryPlan));
     writeFileSync(join(mockDir, 'implement.json'), JSON.stringify({
       output_text: 'fixture stage failure detail',
       exit_code: 1,

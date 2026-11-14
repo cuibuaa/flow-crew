@@ -55,7 +55,7 @@ const StageFields = z.object({
   /** Declared run-time edges. continue releases ordinary dependencies; replan retains this iteration. */
   decision: z.object({
     successors: z.array(z.string().min(1)).min(1), default: z.string().min(1),
-    kind: z.enum(['successor', 'shape', 'review']).optional(),
+    kind: z.enum(['successor', 'review']).optional(),
   }).strict().refine(value => value.successors.includes(value.default), 'default must be a declared successor').optional(),
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
   criterion_refs: z.array(z.string()).optional().default([]),
@@ -66,8 +66,13 @@ const StageFields = z.object({
 export const StageConfigSchema = StageFields;
 
 /** Read-only history retains the ownership marker; it never enables execution. */
-export const RecordedStageConfigSchema = StageFields.extend({ race: z.boolean().optional(), artifact_contract: RecordedArtifactContractSchema.optional() });
-export type StageConfig = z.infer<typeof StageFields>;
+export const RecordedStageConfigSchema = StageFields.extend({
+  race: z.boolean().optional(), artifact_contract: RecordedArtifactContractSchema.optional(),
+  // Historical routing metadata is readable, never an active decision kind.
+  decision: z.object({ ...StageFields.shape.decision.unwrap().shape, kind: z.enum(['successor', 'review', 'shape']).optional() })
+    .refine(value => value.successors.includes(value.default), 'default must be a declared successor').optional(),
+});
+export type StageConfig = z.infer<typeof RecordedStageConfigSchema>;
 export type RecordedStageConfig = z.infer<typeof RecordedStageConfigSchema>;
 
 const WorkflowFields = z.object({
@@ -84,8 +89,11 @@ const WorkflowFields = z.object({
   path: ['dispatch'], message: 'a fixed dispatch is the answer of a dynamic_dispatch stage; declare that stage',
 });
 export const WorkflowConfigSchema = WorkflowFields;
-export const RecordedWorkflowConfigSchema = WorkflowFields.safeExtend({ stages: z.array(RecordedStageConfigSchema).min(1) });
-export type WorkflowConfig = z.infer<typeof WorkflowFields>;
+export const RecordedWorkflowConfigSchema = z.object({ ...WorkflowFields.shape, stages: z.array(RecordedStageConfigSchema).min(1) })
+  .refine(workflow => !workflow.dispatch || workflow.stages.some(stage => stage.dynamic_dispatch), {
+    path: ['dispatch'], message: 'a fixed dispatch is the answer of a dynamic_dispatch stage; declare that stage',
+  });
+export type WorkflowConfig = z.infer<typeof RecordedWorkflowConfigSchema>;
 
 /** The scheduler resolves conditions; every consumer reads the same admitted facts. */
 export function refreshRunQueryState(state: StoreState, stages: StageConfig[]): void {
@@ -119,7 +127,6 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
     raw = { ...fields, prompt_template: fields.prompt_template ?? task };
   }
   const stage = StageConfigSchema.parse(raw);
-  if (stage.decision?.kind === 'shape') throw new Error('shape decisions belong to the single entry workflow');
   if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
   normalizeStageContracts([stage]);
   delete stage.max_retries;

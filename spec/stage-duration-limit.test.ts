@@ -134,14 +134,13 @@ describe('worker attempt entry', () => {
   });
 });
 
-const schedulerPaths = ['ordinary', 'planner', 'review', 'shape', 'review-decision', 'code-review-decision', 'successor', 'timeout-retry', 'repair', 're-evaluation', 'research-stage', 'research-review'] as const;
+const schedulerPaths = ['ordinary', 'planner', 'review', 'review-decision', 'code-review-decision', 'successor', 'timeout-retry', 'repair', 're-evaluation', 'research-stage', 'research-review'] as const;
 describe('real scheduler routing through the entry owner', () => {
   it.each(schedulerPaths)('%s: at-limit enters, above-limit receives the typed refusal', async path => {
     gitProject();
     if (path === 'code-review-decision') writeFileSync(join(project, 'patch.txt'), 'D'.repeat(400_000));
     const extra = path === 'repair' ? { retry_to: ['review'] } : path === 'planner' ? { dynamic_dispatch: true }
       : ['review', 're-evaluation', 'research-review'].includes(path) ? { is_gate: true }
-      : path === 'shape' ? { decision: { kind: 'shape', successors: ['next'], default: 'next' } }
       : path.includes('review-decision') ? { decision: { kind: 'review', successors: ['next', 'full'], default: 'full' } }
       : path === 'successor' ? { decision: { kind: 'successor', successors: ['next'], default: 'next' } } : {};
     const config = workflow(extra), stage = config.stages[0];
@@ -160,7 +159,7 @@ describe('real scheduler routing through the entry owner', () => {
         writeStageStatus(project, created.runId, 'work', state.stages.work);
       }
       const run = vi.fn<Adapter['run']>(async (_prompt, _role, opts) => ({ output: opts.outputSchema?.anyOf ? JSON.stringify({ pass: true, reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } })
-        : stage.decision ? JSON.stringify({ successor: 'next', reason: 'Selected.', ...(path === 'shape' ? { assumptions: [] } : path === 'review-decision' ? { risk_areas: [] } : {}) }) : valid, exitCode: 0, duration_ms: 0 }));
+        : stage.decision ? JSON.stringify({ successor: 'next', reason: 'Selected.', ...(path === 'review-decision' ? { risk_areas: [] } : {}) }) : valid, exitCode: 0, duration_ms: 0 }));
       const transition = deadline.transitionTechnicalRetryBudget;
       // Inject an excessive request at budget selection; entry and its comparison stay real.
       const prepare = vi.spyOn(deadline, 'transitionTechnicalRetryBudget').mockImplementation((chain, event) => {

@@ -58,15 +58,14 @@ export interface GateReadServices {
   readGateEvaluation(projectDir: string, stageId: string, runId?: string, contract?: GateContract | null, requireValidationDelta?: boolean): { pass: boolean; reason?: string } | null;
 }
 
-/** Deferred entry targets belong to the fixed shape; a decomposition may reuse the same stage IDs. */
+/** Committed edges control their declared targets until consumed by a revision. */
 function decisionControls(source: StageConfig, target: string, state: StoreState): boolean {
   if (source.id === target || !source.decision?.successors.includes(target)) return false;
-  const dispatched = (state.dispatchedStages as StageConfig[] | undefined)?.some(stage => stage.id === target);
   const latest = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
   // A replan edge is consumed by its admitted revision; history cannot suppress that revision's remaining duties.
   if (latest?.successor === 'replan' && latest.planRevision !== undefined
     && (state.queryState?.planRevision?.revision ?? latest.planRevision) > latest.planRevision) return false;
-  return !(source.decision.kind === 'shape' && dispatched && latest?.successor !== target);
+  return true;
 }
 
 /** A join may name the ends of alternatives, not only their immediate targets. */

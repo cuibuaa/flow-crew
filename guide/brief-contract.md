@@ -30,7 +30,7 @@ The model supplies no workflow field. When `quick` generates a brief and the sup
 project has no exact setup record, it requires a clean Git source and prepares a sibling
 worktree from `HEAD` through `ship-setup`, retaining all its admission checks. Target
 and branch names use the composed digest, never model prose. An authored brief keeps
-its existing exact-record requirement. The entry chooser and independent gates apply; research loops require the versioned instrument declaration.
+its existing exact-record requirement. The entry planner and independent gates apply; research loops require the versioned instrument declaration.
 Static rehearsal and preflight validate generated content, with reasons returned for up
 to two correction retries. Authored briefs passed to inspection/setup/rehearsal do not need Markdown criteria;
 invalid declarations are refused with their field names. Failed provider calls stop with exit 4, are not
@@ -59,8 +59,9 @@ validation:
 ---
 ```
 
-Follow it with stage-readable goal, constraints and acceptance prose. Engineering enters a
-model chooser, which chooses author/review/repair work or decomposition. A `research` block with
+Follow it with stage-readable goal, constraints and acceptance prose. Engineering starts at the
+planner, whose admitted graph may be one author followed by an independent gate or a decomposition.
+Both pass through the same scheduler admission and required repair routing. A `research` block with
 `protocol: research-instrument/v1` constructs an author and an optional declared project
 review directly. No model chooses the research workflow. Legacy active declarations,
 including `objective:`, are refused with a diagnostic naming the required version.
@@ -92,11 +93,11 @@ If a stage cannot obtain a resource, it continues as far as possible and names t
 its structured result. Independent gates assess that result; the human reads it at wrap-up.
 Historical authorization frontmatter is refused as an unknown declaration key. State such instructions in the body.
 
-The engineering entry chooser chooses a shape and records `assumptions` in its closed-schema
-result. Those assumptions are retained in the run record and summary. Invalid output fails
-its attempt and uses the existing retry allowance. The chooser cannot change the declared
+The engineering planner records necessary assumptions in the assigned work. It cannot change
 mode or demand research fields from an engineering brief. Research authoring errors are
-reported by parse/preflight before execution.
+reported by parse/preflight before execution. Historical chooser assumptions remain visible
+in archived summaries; runs containing retired shape decisions cannot resume and return
+`retired_shape_decision`. Start a new planner run with their evidence as explicit inputs.
 
 ## Inputs, outputs and validation
 

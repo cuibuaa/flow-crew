@@ -100,7 +100,7 @@ export async function executeOrdinaryStage(
       if (roundDiffPath && existsSync(roundDiffPath)) fixStageIds = JSON.parse(readFileSync(roundDiffPath, 'utf8')).repairStageIds;
       const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
       if (reviewDecision) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}${reviewDecision.decision?.successors[1] === stage.id ? '\nPerform the full independent review; these risks do not narrow coverage.' : ''}`;
-      const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
+      const isolatedInput = stage.decision?.kind === 'review'
         ? decisionInput(stage, projectDir, runDirPath, state, adapterInputLimit(stageAdapter, state.inputLimitChars))
         : undefined;
       // A code-decided substitute retains the configured identity used to size its input.
@@ -108,13 +108,13 @@ export async function executeOrdinaryStage(
       const result = await runStage(executionAdapter, {
         scope: stage.scope,
         stageId: stage.id,
-        role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,
+        role: stage.decision?.kind === 'review' ? { ...agent, tools: [] } : agent,
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
         isolatedInput,
-        decisionResult: stage.decision?.kind === 'shape' ? 'shape' : Boolean(stage.decision && !stage.is_gate),
+        decisionResult: Boolean(stage.decision && !stage.is_gate),
         outputSchema: stage.decision && !stage.is_gate ? decisionSchema(stage) : stageRecordSchema({ isGate: stage.is_gate, runDir: runDirPath,
           criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,

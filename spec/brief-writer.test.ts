@@ -1,3 +1,4 @@
+import { mockEntryPlan } from './test-support/planner-entry.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
@@ -252,7 +253,7 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
 
 function launchFixtures(root: string, brief: string): string {
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
-  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Fixture declares separate work and evidence duties.', assumptions: [] }) }));
+  writeFileSync(join(fixtures, 'plan.json'), JSON.stringify(mockEntryPlan));
   writeFileSync(join(fixtures, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(brief).criteria.map(c => c.id);
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'The greeting is available.' }));
@@ -274,7 +275,6 @@ it('raw text reaches the single entry with evidence attached', async () => {
   const raw = 'write a greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([fields])));
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
-  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'plan', reason: 'Fixture declares separate work and evidence duties.', assumptions: [] }) }));
   writeFileSync(join(fixtures, 'review_assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(written.brief).criteria.map(c => c.id);
   const fixture = (id: string, output: unknown) => writeFileSync(join(fixtures, `${id}.json`),

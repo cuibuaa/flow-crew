@@ -1,20 +1,20 @@
 import { isReadOnlyStage } from '../sched_scope/frozen-inputs.js';
-import { runRecordPath, stageWorkPath } from '../../run-layout.js';
+import { runRecordPath } from '../../run-layout.js';
 import { topoSort } from '../sched_admission/frontier.js';
 import { normalizedProjectPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
 import { readEvidence } from '../../evidence-ledger.js';
 import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
 import { existsSync } from 'node:fs';
-import { atomicWrite, unlinkSync } from '../../engine-fs.js';
+import { unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
 import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
-import { loadDefaults, type StageConfig, type WorkflowConfig } from '../sched_admission/configuration.js';
+import { loadDefaults, type StageConfig } from '../sched_admission/configuration.js';
 import { collectGateRuntimeFacts, classifyGateRecoveryFact, findGateRecoveryStages, gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
-import { injectDispatchedStages, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
+import { terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 
 export function decisionKey(state: StoreState, stage: StageConfig): string {
   const status = state.stages[stage.id], attempt = status?.attempts?.at(-1);
@@ -62,8 +62,7 @@ export function reconcileDecisionEvents(state: StoreState, project: string, run:
   for (const record of state.decisionGraph.records) if (!published.has(record.key)) event(record, state, project, run);
 }
 
-export function settleDecisions(sorted: StageConfig[], state: StoreState, project: string, run: string, directory: string,
-  workflow: WorkflowConfig, roles: Map<string, { name: string; description: string }>): StoreState {
+export function settleDecisions(sorted: StageConfig[], state: StoreState, project: string, run: string, directory: string): StoreState {
   if (Object.values(state.stages).some(s => s.status === STAGE_STATUS.RUNNING)) return state;
   state.decisionGraph ??= emptyDecisionGraph();
   const graph = state.decisionGraph;
@@ -124,7 +123,6 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const targetsToPublish: string[] = [];
     const target = choice.successor;
     const destination = sorted.find(s => s.id === target);
-    const fixedShape = source.decision?.kind === 'shape' && target === 'implement';
     const used = graph.visits[`${iteration}/${target}`] ?? 0;
     const limit = graph.maxVisits;
     const resumed = destination && isPendingStageStatus(state.stages[target]?.status ?? '') && (state.stages[target]?.attempts?.length ?? 0) > 0;
@@ -151,7 +149,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
               return declaration.kind !== 'unknown' && scopeMatchesProjectPath(declaration, path);
             });
           }))))?.id : undefined;
-    if (repeatedGap || unconfirmedRejection || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
+    if (repeatedGap || unconfirmedRejection || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
       record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination or exhausted visit budget (${used}/${limit}). ${record.reason}`;
       delete record.successor;
@@ -165,11 +163,6 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
         graph.enabled[planner.id] = source.id;
         repend(planner.id, state); targetsToPublish.push(planner.id);
       }
-    } else if (fixedShape) {
-      atomicWrite(stageWorkPath(directory, 'dispatch.yaml'), JSON.stringify({ stages: workflow.dispatch }));
-      if (!injectDispatchedStages(source.id, roles, sorted, state, project, run).length) {
-        record.outcome = 'refused'; record.reason = 'Fixed shape failed full dispatch admission; see dispatch_admission.json.'; delete record.successor;
-      } else graph.enabled[target] = source.id;
     } else if (destination) {
       if (source.is_gate) {
         const facts = collectGateRuntimeFacts(sorted, state, project, run);

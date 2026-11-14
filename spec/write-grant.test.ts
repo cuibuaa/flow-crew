@@ -778,9 +778,14 @@ fs.writeFileSync(path.join(process.env.HOME,'own'),'ok');fs.writeFileSync(${JSON
       contract = readRunState(project, runId).writeGrant!;
       writeBriefCriteriaArtifact(directory, brief);
       const isolated = kind === 'isolated-decision', gate = kind === 'gate';
+      if (isolated) {
+        // Review isolation needs a readable diff so the real stub adapter executes.
+        git(project, ['init', '-q']);
+        git(project, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']);
+      }
       const author = !isolated && !gate;
       const stage = StageConfigSchema.parse({ id: 'left', role: 'local', scope: ['arbitrary project work note'], artifact_contract: gate ? { ...artifacts, produces: [{ id: 'project', root: 'project', path: 'left', kind: 'directory', nonempty: false }] } : artifacts,
-        ...(kind === 'author' || gate ? {} : { decision: { successors: ['right'], default: 'right', ...(isolated ? { kind: 'shape' } : {}) } }),
+        ...(kind === 'author' || gate ? {} : { decision: { successors: ['right'], default: 'right', ...(isolated ? { kind: 'review' } : {}) } }),
         ...(gate ? { is_gate: true } : {}),
         ...(kind === 'successor-repair' ? { retry_to: ['right'], depends_on: ['right'] } : {}),
       });
@@ -799,7 +804,7 @@ console.log(JSON.stringify({
  alias:attempt(()=>fs.linkSync(source,${JSON.stringify(join(output, 'alias'))}))
 }));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts, captureStreams: true });
         const record = gate ? { pass: true, reason: 'Read-only gate.', criteria: {}, audit_findings: { version: 1, findings: [] } }
-          : stage.decision ? { successor: 'right', reason: 'Declared output observed.', ...(isolated ? { assumptions: [] } : {}) }
+          : stage.decision ? { successor: 'right', reason: 'Declared output observed.', ...(isolated ? { risk_areas: [] } : {}) }
           : { status: 'delivered', summary: 'Declared output observed.', caveats: [], remaining_work: [], blocks: null };
         return { ...child, output: JSON.stringify(record) };
       } };

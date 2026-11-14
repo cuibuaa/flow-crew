@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 55 -->
+<!-- flowcrew-skill-revision: 56 -->
 
 # Ship a conversation to FlowCrew
 
@@ -41,7 +41,8 @@ authority. Execution never waits for a human. A stage that lacks a resource cont
 as possible and names the gap in its result and report; there is no authorization frontmatter.
 
 State whether the goal is an engineering outcome or candidate research. Engineering shape is chosen by
-the entry chooser. A `research.protocol: research-instrument/v1` declaration fixes the research mechanism:
+the entry planner, whose admitted graph may be one author and an independent gate or a
+decomposition. Both use the same admission and required repair routes. A `research.protocol: research-instrument/v1` declaration fixes the research mechanism:
 candidate roots, frozen instrument/config roots, absolute argv and allowed environment, ordinary author
 role/instruction, finite round budget and optional wall/invocation caps, an optional review hook with
 explicit project criteria, and an optional publication destination. The frozen project instrument owns

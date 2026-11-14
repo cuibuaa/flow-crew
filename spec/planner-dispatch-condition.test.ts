@@ -63,30 +63,30 @@ it('admits planner roots as conditional DAG duties without inventing a chosen su
   expect(readRunEvents(project, state.runId).filter(event => event.type === 'decision_chosen')).toEqual([]);
 });
 
-it('grants the entry fixed-shape choice before dispatching its conditional implement stage', async () => {
+it('keeps planner-authored root conditions active without a pre-planner grant', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fixed-shape-condition-'));
   temporary.push(root);
   const project = join(root, 'project'); mkdirSync(project);
   setFcGlobalDir(join(root, 'fc'));
   setEngineDefaults({ max_iterations: 1 });
   const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-  config.dispatch = [{ id: 'implement', role: 'coder', scope: [], condition: 'choose.status == failed',
+  const proposal = [{ id: 'implement', role: 'coder', scope: [], condition: 'plan.status == failed',
     artifact_contract: { version: 1, produces: [], reads: [] } }];
   const calls: string[] = [];
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
-    return { output: JSON.stringify(opts.stageId === 'choose'
-      ? { successor: 'implement', reason: 'One implementation duty.', assumptions: [] }
-      : { status: 'delivered', summary: 'Completed selected duty.', checks: [], caveats: [], remaining_work: [] }),
-    exitCode: 0, duration_ms: 1 };
+    if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
+    return { output: JSON.stringify({ status: 'delivered', summary: 'Planned duty.', caveats: [], remaining_work: [] }),
+      exitCode: 0, duration_ms: 0, writes: opts.stageId === 'plan' ? ['run:work/dispatch.yaml'] : [], writeAttribution: 'structured' };
+
   } };
   const state = await track(runWorkflow(config, JSON.stringify(config), project, adapter, new Map(), undefined,
     join(import.meta.dirname, '../config/agents')));
   expect(state.status, state.failureReason).toBe('complete');
-  expect(calls).toEqual(['choose', 'implement']);
-  expect(state.stages.plan.status).toBe('skipped');
-  expect(state.stages.implement.status).toBe('complete');
-  expect(state.stages.implement.attempts).toHaveLength(1);
-  expect(state.decisionGraph!.records).toEqual([expect.objectContaining({ stageId: 'choose', successor: 'implement', outcome: 'chosen' })]);
-  expect(state.decisionGraph!.enabled.implement).toBe('choose');
+  expect(calls).toEqual(['plan']);
+  expect(state.stages.plan.status).toBe('complete');
+  expect(state.stages.implement.status).toBe('skipped');
+  expect(state.stages.implement.attempts ?? []).toHaveLength(0);
+  expect(state.decisionGraph!.records).toEqual([]);
+  expect(state.decisionGraph!.enabled).toEqual({});
 });

@@ -1,4 +1,5 @@
 import { evidenceContext } from '../src/evidence-ledger.js';
+import { entryPlan, plannerReply } from './test-support/planner-entry.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -152,7 +153,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
 
   it('gives first and later gates and repair one contract, structured facts, diff and readable paths', async () => {
     const { config, raw } = loadWorkflow(join(engine, 'config/workflows/entry.yaml'));
-    for (const stage of (config.dispatch ?? []) as Array<{ id: string; prompt_template?: string }>) {
+    for (const stage of entryPlan as Array<{ id: string; prompt_template?: string }>) {
       if (stage.id === 'review' || stage.id === 'repair') stage.prompt_template = '{task_description}';
     }
     const calls: Array<{ id: string; system: string; user: string; opts: RunOpts }> = [];
@@ -160,7 +161,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     const adapter: Adapter = { async run(user, role, opts) {
       calls.push({ id: opts.stageId, system: role.prompt, user, opts });
       let output = delivered('AUTHOR_NARRATIVE_SENTINEL');
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One change.', assumptions: [] });
+      if (opts.stageId === 'plan') return plannerReply(opts, entryPlan);
       if (opts.stageId === 'implement') writeFileSync(join(project, 'greeting.txt'), 'wrong\n');
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Inspect the greeting.', risk_areas: [{ file: 'greeting.txt', risk: 'Greeting correctness.', experiment: 'Read the greeting independently.' }] });
       if (opts.stageId === 'repair') { writeFileSync(join(project, 'greeting.txt'), 'required greeting\n'); output = JSON.stringify({ successor: 'assess', reason: 'REPAIR_NARRATIVE_SENTINEL' }); }
@@ -177,7 +178,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     } };
     const final = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, task, true);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(calls.map(c => c.id)).toEqual(['choose', 'implement', 'assess', 'review', 'repair', 'assess', 'review']);
+    expect(calls.map(c => c.id)).toEqual(['plan', 'implement', 'assess', 'review', 'repair', 'assess', 'review']);
     const author = calls.find(c => c.id === 'implement')!.opts;
     const peerContext = evidenceContext(project, author.runDir);
     expect(peerContext).not.toContain('AUTHOR_NARRATIVE_SENTINEL');
@@ -206,20 +207,20 @@ describe('ledger handoff at the rendered adapter boundary', () => {
   });
 
   it('keeps isolated decision retries cold while retaining their exact own final record', async () => {
-    const created = createRun(project, 'fixture', 'name: fixture', ['choose']);
+    const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
-    const stage = StageConfigSchema.parse({ id: 'choose', role: 'planner', scope: [],
-      decision: { kind: 'shape', successors: ['implement', 'plan'], default: 'plan' } });
-    const answer = { successor: 'implement', reason: 'Own previous choice.', assumptions: [] };
+    const stage = StageConfigSchema.parse({ id: 'assess', role: 'planner', scope: [],
+      decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } });
+    const answer = { successor: 'review', reason: 'Own previous choice.', risk_areas: [] };
     const inputs: Array<{ user: string; opts: RunOpts }> = [];
     const adapter: Adapter = { async run(user, _role, opts) {
       inputs.push({ user, opts });
       return { output: JSON.stringify(answer), exitCode: inputs.length === 1 ? 1 : 0, duration_ms: 1, sessionId: uuid };
     } };
     for (let retries = 0; retries < 2; retries++) {
-      await runStage(adapter, { stageId: 'choose', role: { name: 'planner', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: '' },
+      await runStage(adapter, { stageId: 'assess', role: { name: 'planner', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: '' },
         dependsOn: [], promptTemplate: '', timeout_ms: 60_000, projectDir: project, runId: created.runId, runDir: created.runDirPath, retries,
-        artifactContract: fixtureArtifactContract('choose'), outputSchema: decisionSchema(stage), decisionResult: true,
+        artifactContract: fixtureArtifactContract('assess'), outputSchema: decisionSchema(stage), decisionResult: true,
         isolatedInput: decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId)) });
     }
     expect(inputs.map(input => input.opts.resumeSessionId)).toEqual([undefined, undefined]);

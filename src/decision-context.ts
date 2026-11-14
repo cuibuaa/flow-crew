@@ -2,7 +2,7 @@
 import { gitSync, rethrowGitNotAnswered } from './git-facts.js';
 import { readAdmittedContract } from './brief-criteria.js';
 import type { StoreState } from './store.js';
-import { POST_AUTHOR_PROMPT, CHOOSER_PROMPT } from './decision-graph.js';
+import { POST_AUTHOR_PROMPT } from './decision-graph.js';
 import type { StageConfig } from './scheduler/sched_admission/configuration.js';
 import { captureProjectTree, projectValidationFact, readEvidence, stagePredecessor, validationForTree } from './evidence-ledger.js';
 import { adapterInputLimit, INPUT_RESERVE_CHARS } from './adapter-input.js';
@@ -57,8 +57,6 @@ const decidedBy = (output: string): Adapter => ({ capturesInvocationInput: true,
 /** The assessor receives the complete legacy input or code routes to the full independent review. */
 export function decisionInput(stage: StageConfig, projectDir: string, directory: string, state: StoreState, inputLimit = adapterInputLimit()): { system: string; user: string; adapter?: Adapter } {
   const predecessor = stagePredecessor(readEvidence(directory), stage.id, state.stages[stage.id]?.attempts?.at(-1));
-  if (stage.decision?.kind === 'shape') return { system: CHOOSER_PROMPT,
-    user: JSON.stringify({ task: state.taskDescription, research: state.research ?? null, predecessor }) };
   const task = readAdmittedContract(directory).declaration.criteria ?? [];
   const room = inputLimit - INPUT_RESERVE_CHARS - JSON.stringify({ task, predecessor }).length;
   const facts = reviewFacts(projectDir, directory, state, room);

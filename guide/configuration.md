@@ -142,17 +142,20 @@ task-declared immutable evidence, with exact task outputs taking precedence.
 See [content settlement](../src/scheduler/sched_scope/reconciliation.ts).
 
 A brief declaring `research.protocol: research-instrument/v1` constructs its author and optional declared project reviewer directly. The frozen project instrument owns verdicts and final report content.
-Engineering briefs enter `entry.yaml`; its chooser selects a fixed author/review/repair shape or
-releases the dynamic planner. The parsed declaration alone decides research versus engineering. The fixed author's result routes
+Engineering briefs enter `entry.yaml` at the planner. Its admitted graph may contain one author
+and an independent gate or a decomposition; both use the same admission and required repair routes.
+The parsed declaration alone decides research versus engineering. Every planned author result routes
 through a read-only assessment to focused or full independent review. Full review remains available.
-Historical workflow files remain readable for admitted runs and library fixtures.
+Historical workflow files remain readable. `planner.yaml` remains the `plan-check --brief` carrier;
+`direct.yaml` remains a fixed-plan library workflow loaded through `loadWorkflow`/`runWorkflow`.
+Neither selects the shape of a new CLI engineering run.
 
 Any stage can declare `decision: {successors: [next_stage, replan], default: next_stage}`.
 A decision returns one JSON object with `successor` and `reason`; review decisions also return
-closed risk-area objects and the engineering chooser returns `assumptions`.
+closed risk-area objects.
 The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
 reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
-declared default and record why; invalid chooser outputs fail their attempt and use the existing retry. Outside-set
+declared default and record why. Outside-set
 choices are refused and recorded. Declared paths remain subject to full plan, result-duty
 and finite-budget admission. Replanning cannot change executed duties or discard result obligations.
 Gate verdicts and historical repair edges translate to these same bounded successor transitions.

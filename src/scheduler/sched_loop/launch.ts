@@ -24,7 +24,7 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinui
 import { atomicWrite, mkdirSync, rmSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { deploymentHeld } from '../../deployment-hold.js';
-import { assertContinuationCompatible } from '../../engine-continuation.js';
+import { assertContinuationCompatible, assertExecutableWorkflow } from '../../engine-continuation.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 /** Interrupted work keeps its iteration; a settled rejection spends the next one. */
@@ -52,6 +52,7 @@ export function prepareWorkflowLaunch(
   maxIterations: number; baseStages: StageConfig[]; workflowYaml: string;
   resumingExistingRun: boolean; briefWasAdmitted: boolean; resumeAtIteration: number; schedulerPidPath: string;
 } {
+  assertExecutableWorkflow(workflow);
   const initialReservation = existingRunId ? readRunReservation(projectDir, existingRunId) : undefined;
   const reservedAdmission = initialReservation?.briefAdmission;
   if (reservedAdmission) admittedContract(reservedAdmission);
@@ -64,6 +65,9 @@ export function prepareWorkflowLaunch(
     const archived = readRunState(projectDir, existingRunId);
     requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
     assertSeparatedRunLayout(runDir(projectDir, existingRunId));
+    assertExecutableWorkflow(archived.planControl);
+    const workflowPath = runRecordPath(runDir(projectDir, existingRunId), 'workflow.yaml');
+    if (existsSync(workflowPath)) assertExecutableWorkflow(parseYaml(readFileSync(workflowPath, 'utf8')));
     launchState = archived;
     briefWasAdmitted = true;
     if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))

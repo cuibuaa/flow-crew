@@ -129,7 +129,7 @@ author stages, including authors and repairs that return successor decisions.
 Returning a successor selects the next stage; it does not change the author's
 admitted output authority.
 These shared output trees receive the same no-REFER boundary as shared caches;
-read-only gates and isolated chooser/assessment decisions receive no write grant
+read-only gates and isolated assessment decisions receive no write grant
 for them. Their declarations do not grant parents or siblings.
 
 Each stage also receives its own agent home, invocation scratch and `/dev/null`.
@@ -295,7 +295,7 @@ Sources: [state](../src/run-state-access.ts), [status/guide/interrupt](../src/cl
 After launch, stages use their existing authority under the brief and continue as far as
 possible when a resource is unavailable. Their structured result and terminal report state
 any gap. There is no execution request/decision transport or entry clarification pause.
-The chooser chooses and records assumptions for wrap-up. Missing author-owned facts end
+The planner records necessary assumptions in the assigned work for wrap-up. Missing author-owned facts end
 the run with a result naming what the author must supply before launching again.
 
 Historical approval logs and paused run records remain readable by the CLI, dashboard and

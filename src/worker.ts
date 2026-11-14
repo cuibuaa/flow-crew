@@ -104,7 +104,7 @@ export interface StageOpts {
   outputSchema?: Schema;
   /** Engine-built allowlist input; excludes handoffs, guidance and previous sessions. */
   isolatedInput?: { system: string; user: string };
-  decisionResult?: boolean | 'shape';
+  decisionResult?: boolean;
   artifactContract?: ArtifactContract;
   planRevision?: { revision: number; digest: string };
   artifactStatuses?: Record<string, StageStatus>;
@@ -976,7 +976,7 @@ export async function runStage(
   const stageRecord = (output: string): Record<string, unknown> => {
     // Older native/fixture answers remain readable; only the response schema
     // advertises new output. Admission still checks every executable field.
-    if (opts.decisionResult && opts.decisionResult !== 'shape') return {}; // Review/successor defaults remain scheduler-owned.
+    if (opts.decisionResult) return {}; // Review/successor defaults remain scheduler-owned.
     const record = parseStageRecord(output, recordedOutputSchema ?? opts.outputSchema!);
     if (opts.isGate) {
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)

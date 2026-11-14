@@ -157,7 +157,7 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
   const author = readEvidence(base).filter(entry => {
     if (entry.kind !== 'attempt' || entry.status !== STAGE_STATUS.COMPLETE || entry.continuation || entry.endingCause === 'environment_gap') return false;
     const stage = state.planControl?.stages.find(stage => stage.id === entry.stageId);
-    return stage && !stage.is_gate && !stage.dynamic_dispatch && !['shape', 'review'].includes(stage.decision?.kind ?? '');
+    return stage && !stage.is_gate && !stage.dynamic_dispatch && stage.decision?.kind !== 'review';
   }).at(-1);
   if (!author || author.kind !== 'attempt') return true;
   const control = new AbortController();

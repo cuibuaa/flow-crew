@@ -1,3 +1,4 @@
+import { plannerReply } from './test-support/planner-entry.js';
 import './test-support/policy-runtime.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
@@ -154,7 +155,7 @@ describe('independent post-author routing', () => {
         calls.push(opts.stageId);
         seen[opts.stageId] = { system: role.prompt, user };
         let output = delivered;
-        if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', assumptions: [] });
+        if (opts.stageId === 'plan') return plannerReply(opts);
         if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); output = JSON.stringify({ status: 'delivered', summary: 'PRIVATE_AUTHOR_TRANSCRIPT', caveats: [], remaining_work: [] }); }
         if (opts.stageId === 'assess') output = JSON.stringify({ successor: selected, reason: 'Independent review.', risk_areas: [{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }] });
         if (['review', 'review_full'].includes(opts.stageId)) output = gate(opts);
@@ -162,7 +163,7 @@ describe('independent post-author routing', () => {
       } };
       const state = await execute(config, adapter, task);
       expect(state.status, state.failureReason).toBe('complete');
-      expect(calls).toEqual(selected === 'base' ? ['implement', 'review'] : ['choose', 'implement', 'assess', selected]);
+      expect(calls).toEqual(selected === 'base' ? ['implement', 'review'] : ['plan', 'implement', 'assess', selected]);
       expect(state.stages.repair.status).toBe('skipped');
       for (const id of ['implement', selected === 'base' ? 'review' : selected]) {
         const prompt = seen[id];
@@ -179,7 +180,7 @@ describe('independent post-author routing', () => {
           .replace(/'[^'\n]*\/record-command\.cjs' '[^'\n]*\/command\.sock'/g, "'<RECORDER_CLIENT>' '<RECORDER_SOCKET>'")
           .replace(/[a-f0-9]{64}/g, '<HASH>')
           .replace(/Ledger facts:\n[\s\S]*?\nDiff:\n/, 'Ledger facts: <ENGINE_FACTS>\nDiff:\n')
-          .replace(/^- (choose|assess) attempt 1: .*\n/gm, '')
+          .replace(/^- (plan|assess) attempt 1: .*\n/gm, '')
           .replaceAll('review_full', 'review');
         if (selected !== 'base' && id !== 'implement') {
           const facts = prompt.user.match(/\n\n# Independent review facts\n([^\n]+)\nRun your own targeted experiments[^\n]+/)![0];
@@ -212,7 +213,7 @@ describe('independent post-author routing', () => {
     const adapter: Adapter = { async run(_user, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', assumptions: [] });
+      if (opts.stageId === 'plan') return plannerReply(opts);
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: ++assessments === 1 ? first : second, reason: 'Review the current output independently.', risk_areas: [] });
       if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = choice('assess'); }
@@ -224,7 +225,7 @@ describe('independent post-author routing', () => {
     const state = await execute(config, adapter, task);
     expect(state.status, state.failureReason).toBe('complete');
     expect(readFileSync(join(project, 'docs/report.md'), 'utf8')).toBe('Required greeting.\n');
-    expect(calls).toEqual(['choose', 'implement', 'assess', first, 'repair', 'assess', second]);
+    expect(calls).toEqual(['plan', 'implement', 'assess', first, 'repair', 'assess', second]);
     const directory = runDir(project, state.runId);
     const preimage = runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1/repair_preimage.json');
     expect(existsSync(preimage), 'generic repair preimages are retired').toBe(false);
@@ -249,7 +250,7 @@ describe('independent post-author routing', () => {
     const adapter: Adapter = { async run(user, role, opts) {
       seen[opts.stageId] = role.prompt + '\n' + user;
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', assumptions: [] });
+      if (opts.stageId === 'plan') return plannerReply(opts);
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Actual diff greeting.\n'); output = JSON.stringify({ status: 'delivered', summary: 'AUTHOR_TRANSCRIPT_SECRET_MARKER', checks: [], caveats: [], remaining_work: [] }); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'One bounded output.', risk_areas: [{ file: 'docs/report.md', risk: 'Greeting content could be wrong.', experiment: 'Read output and compare it to task.' }] });
       if (opts.stageId === 'review') output = gate(opts);
@@ -298,9 +299,8 @@ describe('in-iteration replanning through the revision authority', () => {
     const adapter: Adapter = { async run(user, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate revision and review duties.', assumptions: [] });
       if (opts.stageId === 'plan') {
-        const candidate = ++plans === 1 ? proposal : readRunState(project, opts.runDir.split('/').at(-1)!).planControl!.stages.filter(stage => !stage.dynamic_dispatch && stage.decision?.kind !== 'shape');
+        const candidate = ++plans === 1 ? proposal : readRunState(project, opts.runDir.split('/').at(-1)!).planControl!.stages.filter(stage => !stage.dynamic_dispatch);
         writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: candidate }));
       }
       if (opts.stageId === 'work') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); output = choice('replan'); }
@@ -324,7 +324,7 @@ describe('in-iteration replanning through the revision authority', () => {
       { command: process.execPath, args: ['check.cjs'] }])) };
     const state = await execute(config, adapter, `---\nvalidation: ${JSON.stringify(validation)}\noutputs: [docs/report.md]\n---\n${task}`);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(calls).toEqual(['choose', 'plan', 'work', 'plan', 'review_assess', 'review', 'repair', 'review_assess', 'review_full']);
+    expect(calls).toEqual(['plan', 'work', 'plan', 'review_assess', 'review', 'repair', 'review_assess', 'review_full']);
     expect(plans).toBe(2); expect(state.queryState!.planRevision!.revision).toBe(1);
     const ledger = readEvidence(runDir(project, state.runId));
     const validations = ledger.filter(entry => entry.kind === 'validation');
@@ -374,8 +374,7 @@ describe('in-iteration replanning through the revision authority', () => {
     });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Distinct execution and review duties.', assumptions: [] });
-      else if (opts.stageId === 'plan') {
+      if (opts.stageId === 'plan') {
         plans++;
         if (plans === 1) { startedAt = readRunState(project, opts.runDir.split('/').at(-1)!).startedAt; writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages })); }
         else {
@@ -384,7 +383,7 @@ describe('in-iteration replanning through the revision authority', () => {
           expect(createHash('sha256').update(readFileSync(firstPath)).digest('hex')).toBe(firstHash);
           expect(before.startedAt).toBe(startedAt); expect(before.currentIteration).toBe(1);
           // Full candidate retains every executed identity and all result obligations.
-          writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: before.planControl!.stages.filter(stage => !stage.dynamic_dispatch && stage.decision?.kind !== 'shape') }));
+          writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: before.planControl!.stages.filter(stage => !stage.dynamic_dispatch) }));
         }
       } else if (opts.stageId === 'work') {
         const before = readRunState(project, opts.runDir.split('/').at(-1)!);
@@ -405,7 +404,7 @@ describe('in-iteration replanning through the revision authority', () => {
     expect(state.queryState!.planHistory).toHaveLength(2);
     expect(createHash('sha256').update(readFileSync(firstPath)).digest('hex')).toBe(firstHash);
     const firstStages = JSON.parse(readFileSync(firstPath, 'utf8')).stages;
-    expect(state.planControl!.stages.find(stage => stage.id === 'choose')).toEqual(firstStages.find((stage: { id: string }) => stage.id === 'choose'));
+    expect(state.planControl!.stages.find(stage => stage.id === 'plan')).toEqual(firstStages.find((stage: { id: string }) => stage.id === 'plan'));
     expect(state.stages.plan.attempts).toHaveLength(2);
     expect(state.stages.work.attempts).toHaveLength(1);
     expect(state.decisionGraph!.visits['1/replan']).toBe(1);
@@ -474,7 +473,6 @@ describe('decision descendants and joins', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Declare alternatives and their shared independent review.', assumptions: [] });
       if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages }));
       if (opts.stageId === 'route') output = choice(selected);
       if (opts.stageId === selected) { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
@@ -494,7 +492,7 @@ describe('decision descendants and joins', () => {
       expect(calls).not.toContain('review_assess'); expect(calls).not.toContain('review');
     } else {
       expect(state.status, state.failureReason).toBe('complete');
-      expect(calls.filter(id => !id.startsWith('_'))).toEqual(['choose', 'plan', 'route', selected, `${selected}_end`, 'review_assess', 'review']);
+      expect(calls.filter(id => !id.startsWith('_'))).toEqual(['plan', 'route', selected, `${selected}_end`, 'review_assess', 'review']);
     }
   });
 });
@@ -504,7 +502,7 @@ describe('new review branches retain write isolation', () => {
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', assumptions: [] });
+      if (opts.stageId === 'plan') return plannerReply(opts);
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Author output.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Focused review sufficient.', risk_areas: [] });
       if (opts.stageId === 'review') { writeFileSync(join(project, 'docs/report.md'), 'Reviewer attempted repair.\n'); output = gate(opts); }
@@ -517,7 +515,7 @@ describe('new review branches retain write isolation', () => {
   });
 });
 
-describe('model-selected decomposition', () => {
+describe('planner-authored decomposition', () => {
   // Scrubbed topology of #2441: the planner names the focused verdict in a
   // repair condition, while review assessment selects the full alternative.
   it.each([false, true])('honors the full gate choice over a planner repair condition (initial pass=%s)', async initialPass => {
@@ -534,7 +532,6 @@ describe('model-selected decomposition', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate author and independent review.', assumptions: [] });
       if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
       if (opts.stageId === 'implement') {
         mkdirSync(join(project, 'docs'));
@@ -560,7 +557,7 @@ describe('model-selected decomposition', () => {
     } };
     const state = await execute(config, adapter, task);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(calls).toEqual(['choose', 'plan', 'implement', 'review_assess', 'review_full',
+    expect(calls).toEqual(['plan', 'implement', 'review_assess', 'review_full',
       ...(initialPass ? [] : ['repair', 'review_assess', 'review_full'])]);
     expect(state.planControl!.stages.find(stage => stage.id === 'repair')).toMatchObject({ condition: 'review.pass == false', depends_on: ['review', 'review_full'] });
     expect(state.stages.review.status).toBe('skipped');
@@ -628,7 +625,6 @@ describe('model-selected decomposition', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Importer and migration need separately assigned duties.', assumptions: [] });
       if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: [
         { id: 'implement', role: 'coder', scope: ['docs/'], depends_on: ['plan'], artifact_contract: contract },
         { id: 'review', role: 'qa', scope: [], depends_on: ['implement'], is_gate: true, artifact_contract: contract },
@@ -641,8 +637,8 @@ describe('model-selected decomposition', () => {
     } };
     const state = await execute(config, adapter, task);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(calls.filter(id => !id.startsWith('_'))).toEqual(['choose', 'plan', 'implement', 'review_assess', 'review']);
-    expect(state.decisionGraph!.records[0]).toMatchObject({ successor: 'plan', reason: 'Importer and migration need separately assigned duties.' });
+    expect(calls.filter(id => !id.startsWith('_'))).toEqual(['plan', 'implement', 'review_assess', 'review']);
+    expect(state.decisionGraph!.records[0]).toMatchObject({ stageId: 'review_assess', successor: 'review' });
     expect(state.planControl!.stages.find(stage => stage.id === 'review_full')?.scope).toEqual([]);
   });
 });
@@ -679,7 +675,7 @@ describe('full review remains an independent successor', () => {
     let fullInput = '';
     const adapter: Adapter = { async run(user, role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent task.', assumptions: [] });
+      if (opts.stageId === 'plan') return plannerReply(opts);
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Invalid reference.', risk_areas: [{ file: 'absent.ts', risk: 'STALE_RISK_MARKER', experiment: 'Probe an absent file.' }] });
       if (opts.stageId === 'review_full') { fullInput = role.prompt + '\n' + user; output = gate(opts); }
@@ -712,7 +708,6 @@ describe('review alternatives preserve result duties and joins', () => {
     let reviewerInput = '', published = false;
     const adapter: Adapter = { async run(user, role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate author, review and publication duties.', assumptions: [] });
       if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
       if (opts.stageId === 'work') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
       if (opts.stageId === 'review_assess') output = JSON.stringify({ successor: selected, reason: 'Independent declared review.', risk_areas: [] });
