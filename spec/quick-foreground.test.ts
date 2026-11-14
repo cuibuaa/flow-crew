@@ -29,6 +29,9 @@ afterEach(async () => {
 // unexpected request fails the test instead of contacting any real frontend.
 function metadataServer(calls: any[]) {
   return createServer(socket => {
+    // The metadata client closes its disposable connection after its reply.
+    // A reset while the peer still has buffered bytes is a normal disconnect.
+    socket.on('error', error => { expect(['ECONNRESET', 'EPIPE']).toContain((error as NodeJS.ErrnoException).code); });
     let input = Buffer.alloc(0);
     let upgraded = false;
     socket.on('data', chunk => {
@@ -72,6 +75,7 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
   const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The tiny task completes with a wrap-up obligation.\"}]\n---\n# Foreground task\n\n## Acceptance criteria\n1. The tiny task completes with a wrap-up obligation.\n";
   const gate = { pass: true, reason: 'Tiny task checked.', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(c => [c.id, { status: 'pass', evidence: 'The deterministic stage completed.' }])), audit_findings: { version: 1, findings: [] } };
   writeFileSync(join(fixtures, 'plan.json'), JSON.stringify(mockEntryPlan));
+  writeFileSync(join(fixtures, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'Tiny task completed.' }));
   writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify(gate) }));
   const queueFile = join(root, 'queue.jsonl');

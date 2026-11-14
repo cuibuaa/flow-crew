@@ -41,9 +41,13 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-darwin-'));
 });
 
-afterEach(() => {
+afterEach(async () => {
   setPlatform(realPlatform);
-  if (ownedChild?.pid && ownedChild.exitCode === null) ownedChild.kill('SIGTERM');
+  if (ownedChild?.pid && ownedChild.exitCode === null && ownedChild.signalCode === null) {
+    const exited = new Promise<void>(resolve => ownedChild!.once('close', () => resolve()));
+    ownedChild.kill('SIGTERM');
+    await exited;
+  }
   ownedChild = undefined;
   rmSync(root, { recursive: true, force: true });
 });
@@ -51,15 +55,24 @@ afterEach(() => {
 async function spawnOwnedChild(marker: string): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
-    ['-e', 'setInterval(() => {}, 1000)', marker],
+    ['-e', "setInterval(() => {}, 1000); process.send('ready')", marker],
     {
       cwd: root,
       env: { ...process.env, HOME: root, FC_HOME: root },
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     },
   );
+  ownedChild = child;
   await new Promise<void>((resolveSpawn, rejectSpawn) => {
-    child.once('spawn', resolveSpawn);
+    // spawn only acknowledges the OS process; the child must have exec'd and
+    // reached its own code before a command-line probe has binding authority.
+    child.once('message', message => {
+      if (message !== 'ready') return;
+      child.off('exit', exited);
+      resolveSpawn();
+    });
+    const exited = () => rejectSpawn(new Error('owned child exited before ready'));
+    child.once('exit', exited);
     child.once('error', rejectSpawn);
   });
   return child;

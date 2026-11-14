@@ -73,6 +73,7 @@ const originalRm = fs.rmSync;
 function blockTraversal(path) {
   if ([${JSON.stringify(archive)}, ${JSON.stringify(runRecordPath(missingRecord, 'scratch'))}].includes(String(path))) {
     fs.writeFileSync(${JSON.stringify(entered)}, String(path));
+    process.send({ kind: 'traversal', path: String(path) });
     const deadline = Date.now() + 5000;
     while (!fs.existsSync(${JSON.stringify(release)})) {
       if (Date.now() > deadline) throw new Error('test scan latch timed out');
@@ -91,6 +92,7 @@ fs.rmSync = function(path, ...options) {
 syncBuiltinESMExports();
 const { cmdDaemon } = await import(${JSON.stringify(pathToFileURL(resolve('src/cli-daemon.ts')).href)});
 process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.stringify(socket)}], { distDir: ${JSON.stringify(dist)} });
+process.send({ kind: 'ready' });
 `);
 
   let child: ChildProcess | undefined;
@@ -107,16 +109,28 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
       child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), runner], {
         cwd: root,
         env: { ...process.env, HOME: process.env.HOME, FC_HOME: home, FLOWCREW_DAEMON_SOCKET: socket },
-        stdio: ['ignore', 'ignore', 'pipe'],
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
       });
       child.stderr!.on('data', chunk => { errors += String(chunk); });
-      const deadline = Date.now() + 10000;
-      while (!existsSync(socket) && !existsSync(entered) && child.exitCode === null && Date.now() < deadline) await delay(10);
-      if (existsSync(entered)) {
+      // A pathname proves bind, not completed initialization. Race the real
+      // ready event against forbidden traversal and child failure, with no probe
+      // retries and no filesystem-speed deadline deciding startup's verdict.
+      const startup = await new Promise<{ kind: string; path?: string }>((resolve, reject) => {
+        const failed = () => reject(new Error(`daemon exited before ready: ${errors}`));
+        child!.once('error', reject);
+        child!.once('exit', failed);
+        child!.once('message', message => {
+          child!.off('exit', failed);
+          resolve(message as { kind: string; path?: string });
+        });
+      });
+      if (startup.kind === 'traversal') {
         expect(existsSync(socket), 'blocked retention has not yet opened the RPC socket').toBe(false);
-        expect(readFileSync(entered, 'utf8')).toBe(start === 0 ? archive : runRecordPath(missingRecord, 'scratch'));
+        expect(startup.path).toBe(start === 0 ? archive : runRecordPath(missingRecord, 'scratch'));
+        expect(readFileSync(entered, 'utf8')).toBe(startup.path);
         throw new Error('terminal-run retention traversed retained history before the daemon could listen');
       }
+      expect(startup.kind).toBe('ready');
       expect(existsSync(socket), errors).toBe(true);
       let output = '';
       const stream = { write: (chunk: string) => { output += String(chunk); return true; } };
