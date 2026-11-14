@@ -1,6 +1,6 @@
 import { rethrowGitNotAnswered } from '../../git-facts.js';
 import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
-import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence, validateSettledTree } from '../sched_settlement/gate-validation.js';
+import { bindReviewedGateValidation, recordGateValidationDelta, validateSettledTree } from '../sched_settlement/gate-validation.js';
 // Run serialized shared-tree authors and settle each closed attempt.
 import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
 import { attemptEventFields, recordRunEvent, recordStageOutcome } from "../../run-events.js";
@@ -178,7 +178,6 @@ export async function settleStageGroup(projectDir: string, runId: string, stages
       if (!bindReviewedGateValidation(projectDir, runId, stage.id, stages.map(peer => peer.id))) {
         await recordGateValidationDelta(projectDir, runId, stage.id);
       }
-      await settleGateValidationEvidence(projectDir, runId, stage.id);
     } catch (error) {
       rethrowGitNotAnswered(error);
       // A missing bound receipt fails closed in gate evaluation. Keep launch

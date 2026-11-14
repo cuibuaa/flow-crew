@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { findAllReady, parseDispatchedStageConfig, StageConfigSchema } from '../src/scheduler.js';
 import { createReadyFinder } from '../src/scheduler/sched_admission/frontier.js';
-import { summarizeCampaignPhaseProgress, readCampaignEntries } from '../src/campaigns.js';
+import { readCampaignEntries } from '../src/campaigns.js';
 import type { StoreState, StageStatus } from '../src/store.js';
 
 /**
@@ -97,12 +97,9 @@ describe('FM Anomaly Detection Campaign — Multi-Phase Orchestration', () => {
       expect(plannerYaml).toContain('Revisit mechanisms when the goal or evidence calls for replication or retuning');
     });
 
-    it('with no campaign history, phase progress shows nothing — planner must self-constrain', () => {
+    it('with no campaign history, the planner receives no phase records', () => {
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
       expect(entries).toHaveLength(0);
-      const progress = summarizeCampaignPhaseProgress(entries);
-      expect(progress.completedPhases).toHaveLength(0);
-      expect(progress.currentPhase).toBeUndefined();
     });
 
     it('a Phase-1-only dispatch is valid and parseable', () => {
@@ -216,9 +213,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       });
 
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const progress = summarizeCampaignPhaseProgress(entries);
-      expect(progress.completedPhases).toContain('phase_1');
-      expect(progress.currentPhase).toBe('phase_2');
+      expect(entries).toContainEqual(expect.objectContaining({ phase: 'phase_1', phaseComplete: true }));
+      expect(entries.at(-1)?.nextPhase ?? entries.at(-1)?.phase).toBe('phase_2');
     });
 
     it('Phase 2 dispatch includes benchmark stages, not research', () => {
@@ -265,7 +261,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       if (existsSync(f)) rmSync(f);
     });
 
-    it('gate failure keeps task on Phase 2 (does not advance)', () => {
+    it('gate failure retains incomplete Phase 2 metadata', () => {
       // Phase 1 complete
       writeCampaignEntry({
         runId: 'run-001', seq: 1, iteration: 1,
@@ -280,9 +276,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       });
 
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const progress = summarizeCampaignPhaseProgress(entries);
-      expect(progress.currentPhase).toBe('phase_2'); // Still on phase 2
-      expect(progress.completedPhases).not.toContain('phase_2');
+      expect(entries.at(-1)?.nextPhase ?? entries.at(-1)?.phase).toBe('phase_2'); // Still on phase 2
+      expect(entries).not.toContainEqual(expect.objectContaining({ phase: 'phase_2', phaseComplete: true }));
     });
 
     it('admits a declared researcher role for alternative exploration', () => {
@@ -430,9 +425,8 @@ Injecting research to explore alternative approaches.
 
       // Verify final state
       entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const progress = summarizeCampaignPhaseProgress(entries);
-      expect(progress.completedPhases).toContain('phase_1');
-      expect(progress.completedPhases).toContain('phase_2');
+      expect(entries).toContainEqual(expect.objectContaining({ phase: 'phase_1', phaseComplete: true }));
+      expect(entries).toContainEqual(expect.objectContaining({ phase: 'phase_2', phaseComplete: true }));
     });
 
     it('campaign score progression is trackable across iterations', () => {
@@ -478,10 +472,8 @@ Injecting research to explore alternative approaches.
       writeCampaignEntry({ runId: 'r2', seq: 2, gate: 'g', pass: false, score: 0, metric: 'm', threshold: 1 });
 
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const progress = summarizeCampaignPhaseProgress(entries);
-      // No phase info — should gracefully return empty
-      expect(progress.completedPhases).toHaveLength(0);
-      expect(progress.currentPhase).toBeUndefined();
+      expect(entries).toHaveLength(2);
+      expect(entries.every(entry => entry.phase === undefined)).toBe(true);
     });
   });
 });

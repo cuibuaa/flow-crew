@@ -102,7 +102,7 @@ managed execution does not use that API. Settings isolation is not OS filesystem
 
 Source: [role parser](../src/scheduler/sched_admission/configuration.ts),
 [availability](../src/adapters/availability.ts), [Codex adapter](../src/adapters/codex.ts),
-[Claude adapter](../src/adapters/claude.ts), [session admission](../src/scheduler/sched_admission/sessions.ts).
+[Claude adapter](../src/adapters/claude.ts), [historical session cleanup](../src/scheduler/sched_admission/sessions.ts).
 
 ## Roles and workflows
 
@@ -173,7 +173,6 @@ Sources: [schemas](../src/scheduler/sched_admission/configuration.ts),
 | `PROJECT_DIR` | Default project selection in core CLI/dashboard startup |
 | `PORT` | Dashboard port, default 3000 |
 | `FLOWCREW_DAEMON_SOCKET` | Ignored; select a private state root with `FC_HOME` or an explicit endpoint with `--socket` |
-| `FC_SESSION_REUSE` | Legacy literal 0/1 setting; managed execution always starts fresh |
 | `FC_TASKS_ROOT`, `CODEX_THREAD_ID` | Optional ledger selection; see [ledger](fc_tasks.md) |
 | `MOCK_FIXTURE_DIR` | Mock fixture input directory |
 | `CODEX_HOME` | Source adapter configuration/home location |

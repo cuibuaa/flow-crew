@@ -19,12 +19,7 @@ import { parse } from 'yaml';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
 import { buildGateDispatchPreamble } from '../src/scheduler/sched_settlement/gate-archives.js';
-import {
-  canResumeOwnGateSession,
-  gateVerdictCorrectionPath,
-  GATE_VERDICT_CORRECTION_VERSION,
-  type WorkflowConfig,
-} from '../src/scheduler.js';
+import { gateVerdictCorrectionPath, GATE_VERDICT_CORRECTION_VERSION, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
@@ -267,11 +262,6 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
     expect(result.gateOpts[0].sessionOwnerStageId).toBeUndefined();
     expect(result.gateOpts[0].resumeSessionId).not.toBe(BUILDER_UUID);
-    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false,
-      id: GATE_ID, role: 'qa', depends_on: ['plan'], prompt_template: '', is_gate: true, skills: [],
-    }, {
-      version: 1, sessionId: BUILDER_UUID, ownerStageId: 'plan', capturedAt: '2026-08-01T00:00:00.000Z',
-    }, false)).toBe(false);
   });
 
   it('cold-starts after a structured marker proves the previous verdict wrong', async () => {
@@ -280,11 +270,6 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
     expect(existsSync(gateVerdictCorrectionPath(result.runDirPath, GATE_ID))).toBe(false);
-    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false,
-      id: GATE_ID, role: 'qa', depends_on: [], prompt_template: '', is_gate: true, skills: [],
-    }, {
-      version: 1, sessionId: GATE_UUID, ownerStageId: GATE_ID, capturedAt: '2026-08-01T00:00:00.000Z',
-    }, true)).toBe(false);
   });
 
   it('hands off the complete round diff and drives revalidation of a touched check', async () => {

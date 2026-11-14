@@ -288,18 +288,13 @@ describe('settled gate results', () => {
 
 
 describe('stage group settlement boundaries', () => {
-  it.each(['initial', 'retry'] as const)('contains a validation launch exception during %s settlement', async phase => {
+  it('contains a validation launch exception during settlement', async () => {
     writeVerdict({ pass: true });
     writeValidation('pass');
     unlinkSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`));
     vi.spyOn(gateValidation, 'bindReviewedGateValidation').mockReturnValue(false);
     const record = vi.spyOn(gateValidation, 'recordGateValidationDelta');
-    const retry = vi.spyOn(gateValidation, 'settleGateValidationEvidence');
-    if (phase === 'initial') record.mockRejectedValue(new Error('fixture validation launch exception'));
-    else {
-      record.mockResolvedValue(undefined);
-      retry.mockRejectedValue(new Error('fixture validation retry launch exception'));
-    }
+    record.mockRejectedValue(new Error('fixture validation launch exception'));
     const gate = parseDispatchedStageConfig({ id: gateId, role: 'qa', is_gate: true });
     await expect(settleStageGroup(projectDir, runId, [gate])).resolves.toBeUndefined();
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
@@ -329,7 +324,6 @@ describe('stage group settlement boundaries', () => {
         ? { exitCode: 1, stdout: 'FAILED tests/test_product.py::test_missing_result\n1 failed' }
         : { exitCode: 0 });
     const bind = vi.spyOn(gateValidation, 'bindReviewedGateValidation');
-    const retry = vi.spyOn(gateValidation, 'settleGateValidationEvidence');
     const runner = createScopeSafeStageRunner({
       reconcileCompletedStageAttempts: () => ({ violation: false }),
     });
@@ -349,7 +343,7 @@ describe('stage group settlement boundaries', () => {
         seedAttemptValidation(projectDir, runId, measured.results, { stageId: 'deferred' });
       }
     };
-    return { stages, runner, execute, executed, commands, bind, retry };
+    return { stages, runner, execute, executed, commands, bind };
   }
 
   it('settles the complete serialized group using the later author writes', async () => {
@@ -364,7 +358,6 @@ describe('stage group settlement boundaries', () => {
     expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
     expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'audit_findings' });
     expect(f.bind).toHaveBeenCalledOnce();
-    expect(f.retry).toHaveBeenCalledOnce();
     expect(f.commands).toHaveBeenCalledOnce();
   });
 

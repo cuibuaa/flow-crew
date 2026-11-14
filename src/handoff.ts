@@ -7,8 +7,6 @@ import { join } from 'node:path';
 import { evidenceContext } from './evidence-ledger.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
-
-export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
 
 export type HandoffVisibility = 'full' | 'minimal' | 'none';
@@ -105,11 +103,6 @@ export function parseStageRecord(output: string, schema: Schema): Record<string,
   const errors = validate(checked, schema, '$');
   if (errors.length) throw new Error(`STAGE_RECORD_INVALID: ${errors.join('; ')}`);
   return record as Record<string, unknown>;
-}
-
-/** Kept as an API for callers; verbosity never grants transcript access. */
-export function buildDependencyContext(opts: Pick<HandoffOpts, 'dependsOn' | 'handoffVisibility' | 'projectDir' | 'runId' | 'runDir'>): string {
-  return evidenceContext(opts.projectDir, opts.runDir);
 }
 
 function substituteTemplate(template: string, vars: Record<string, string>): string {

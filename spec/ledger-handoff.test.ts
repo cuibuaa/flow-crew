@@ -1,3 +1,4 @@
+import { evidenceContext } from '../src/evidence-ledger.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -12,7 +13,7 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { decisionInput } from '../src/decision-context.js';
 import { decisionSchema } from '../src/decision-graph.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { HANDOFF_SCHEMA, buildDependencyContext } from '../src/handoff.js';
+import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { runStage } from '../src/worker.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState } from '../src/store.js';
@@ -178,7 +179,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls.map(c => c.id)).toEqual(['choose', 'implement', 'assess', 'review', 'repair', 'assess', 'review']);
     const author = calls.find(c => c.id === 'implement')!.opts;
-    const peerContext = buildDependencyContext({ dependsOn: ['implement'], projectDir: project, runId: author.runId, runDir: author.runDir });
+    const peerContext = evidenceContext(project, author.runDir);
     expect(peerContext).not.toContain('AUTHOR_NARRATIVE_SENTINEL');
     expect(peerContext).toContain('change.diff');
     for (const call of calls.filter(c => c.id === 'review' || c.id === 'repair')) {

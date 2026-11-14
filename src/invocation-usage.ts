@@ -34,9 +34,6 @@ export function tokensComplete(value: InvocationUsage): boolean {
   return value.tokenUsage !== 'partial' && value.tokenUsage !== 'unknown'
     && quantity(value.tokens_in) && quantity(value.tokens_out);
 }
-export function usageComplete(value: InvocationUsage): boolean {
-  return tokensComplete(value) && cost(value.cost_usd) && value.costUsage !== 'partial' && value.costUsage !== 'unknown';
-}
 export function sumInvocationUsage(values: InvocationUsage[]): InvocationUsage {
   const result: InvocationUsage = {};
   for (const field of fields) {

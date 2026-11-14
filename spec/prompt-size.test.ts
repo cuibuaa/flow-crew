@@ -17,7 +17,7 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { AVAILABLE_ADAPTER_NAMES } from '../src/adapters/loader.js';
 import { MockAdapter } from '../src/adapters/mock.js';
 import type { AgentConfig, RunOpts } from '../src/adapters/base.js';
-import { buildStagePrompt, MAX_PREDECESSOR_CONTEXT_BYTES, HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
+import { buildStagePrompt, HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 

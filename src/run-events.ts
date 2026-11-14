@@ -9,9 +9,7 @@ import { isSettledStageStatus, requireExistingRunArtifactDirectory, requireRunAr
 export type RunEventType =
   | 'decision_chosen' | 'decision_defaulted' | 'decision_refused'
   | 'execution_notice'
-  | 'stage_wrap_up_requested'
   | 'stage_wrap_up_delivered'
-  | 'stage_wrap_up_completed'
   | 'stage_wrap_up_forced'
   | 'plan_revision_decided'
   | 'recovery_reconciled'
@@ -26,7 +24,6 @@ export type RunEventType =
   | 'interrupted_command_repeated'
   | 'scheduler_loop_stalled'
   | 'scheduler_loop_recovered'
-  | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'run_status_imported'
@@ -41,8 +38,6 @@ export type RunEventType =
   | 'research_injected'
   | 'plan_dispatch_retry'
   | 'research_gate_exhausted'
-  | 'research_round_contract_repaired'
-  | 'research_gate_candidate_settled'
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized';
 

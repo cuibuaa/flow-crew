@@ -46,7 +46,6 @@ export interface GuardObservation {
   /** Optional independently collected guard identity, checked before its status. */
   fingerprint?: string; expectedFingerprint?: string;
 }
-export interface Calibration { fingerprint: string; items: string[]; metrics: Record<string, number> }
 export interface Comparison {
   keep: boolean; reason: string;
   metrics: Record<string, { baseline: number; candidate: number; improvement: number; noise: number; threshold: number; improved: boolean }>;

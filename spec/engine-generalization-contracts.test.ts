@@ -1,3 +1,4 @@
+import { collectGateRuntimeFacts } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { firstImmutableEvidenceConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
@@ -12,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
+import { deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import {
   STAGE_STATUS,
@@ -147,7 +148,7 @@ describe('engine generalization binding contracts', () => {
     expect(admitted.pass, admitted.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(noWorker.pass, noWorker.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(noGate.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a gate');
-    expect(checkGates([work, gate], state, projectDir, state.runId)).toEqual({
+    expect(collectGateRuntimeFacts([work, gate], state, projectDir, state.runId)).toMatchObject({
       allPass: false,
       failedGateIds: ['qa'],
     });

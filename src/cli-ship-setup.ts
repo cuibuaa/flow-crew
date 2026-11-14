@@ -439,8 +439,6 @@ function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; d
   }
 }
 
-export type BriefValidationParseResult = import('./project-validation.js').ValidationParseResult;
-
 export { parseBriefValidationCommands } from './project-validation.js';
 
 function canonicalProject(path: string, fs: ShipSetupFileSystem): string {

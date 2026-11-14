@@ -36,7 +36,6 @@ vi.mock('../src/git-facts.js', async original => {
 import { GitNotAnswered, gitSync, gitResultSync, gitAsync, runGit } from '../src/git-facts.js';
 import { changedPaths, decisionInput, reviewFacts } from '../src/decision-context.js';
 import { captureProjectTree, evidenceContext, projectCommit } from '../src/evidence-ledger.js';
-import { ignoredProjectPaths } from '../src/project-identity.js';
 import { campaignBaseDirectory } from '../src/config.js';
 import { createGitWorktree, cmdShipSetupWithDeps, runShipSetup } from '../src/cli-ship-setup.js';
 import { cmdShipPreflightWithDeps, collectShipPreflight } from '../src/cli-ship-preflight.js';
@@ -172,7 +171,6 @@ describe('synchronous Git consumers preserve immediate and held answers', () => 
     ['review no-index diff', () => reviewFacts(project, directory, state, Infinity)],
     ['evidence diff and inventory', () => evidenceContext(project, directory)],
     ['evidence baseline commit', () => projectCommit(project)],
-    ['ignored-path set', () => [...ignoredProjectPaths(project, ['ignored.txt', 'file.txt'])]],
     ['project inventory', () => listProjectFiles(project)],
     ['tree inventory', () => captureProjectTree(project)],
     ['campaign identity', () => campaignBaseDirectory(project)],

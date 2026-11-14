@@ -1603,8 +1603,6 @@ interface GuideRunCandidate {
   stageIds: string[];
 }
 
-function printGuideUsage() { console.log(commandUsage('guide')); }
-
 function guideArgumentError(message: string): never {
   console.error(message);
   console.error(commandUsage('guide'));

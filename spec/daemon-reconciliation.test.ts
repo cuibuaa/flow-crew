@@ -1,3 +1,4 @@
+import { listRunIdsFromIndex } from '../src/run-index.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +13,6 @@ import * as recovery from '../src/restart-recovery.js';
 import * as runLock from '../src/run-lock.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, fcGlobalDir, readRunState, runsRoot, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
-import { listRunningRunIdsFromIndex } from '../src/run-index.js';
 
 let root: string, project: string, previousStore: string, registry: TaskRegistry;
 const scratchAliases: string[] = [];
@@ -114,7 +114,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
   });
 
   it('discovers an externally restored carrier inside the index seed TTL', () => {
-    expect(listRunningRunIdsFromIndex(project)).toEqual([]);
+    expect(listRunIdsFromIndex(project)?.filter(id => readRunState(project, id).status === 'running')).toEqual([]);
     const id = 'restored-run';
     const directory = join(runsRoot(), id); mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, 'run.json'), JSON.stringify({
@@ -139,13 +139,13 @@ describe('daemon-owned previous-boot orphan recovery', () => {
       }));
     }
     const sweep = createDaemonReconciler(registry, vi.fn());
-    sweep(); expect(listRunningRunIdsFromIndex(project)).toHaveLength(3);
-    sweep(); expect(listRunningRunIdsFromIndex(project)).toHaveLength(0);
+    sweep(); expect(listRunIdsFromIndex(project)?.filter(id => readRunState(project, id).status === 'running')).toHaveLength(3);
+    sweep(); expect(listRunIdsFromIndex(project)?.filter(id => readRunState(project, id).status === 'running')).toHaveLength(0);
   });
 
   it('reobserves scheduler ownership under the publication lock', () => {
     const id = orphan();
-    expect(listRunningRunIdsFromIndex(project)).toContain(id);
+    expect(listRunIdsFromIndex(project)?.filter(id => readRunState(project, id).status === 'running')).toContain(id);
     const bytes = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
     const ledger = readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8');
     vi.mocked(runLock.inspectRunScheduler).mockReturnValueOnce({ kind: 'missing' }).mockReturnValue({ kind: 'live', pid: 10 });

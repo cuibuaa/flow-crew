@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { stageSessionHome } from '../src/adapter-session.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,15 +8,12 @@ import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage } from '
 import {
   buildCodexExecArgs,
   parseCodexJsonl,
-  type CodexSessionMetadata,
 } from '../src/adapters/codex.js';
 import {
   StageConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
-import type { StageStatus, StoreState } from '../src/store.js';
-import { canReuseSession, clearGateContinuationsForStages, sessionResumeForStage, shouldPreserveSession } from '../src/scheduler/sched_admission/sessions.js';
-import { isSessionReuseEnabled } from '../src/config.js';
+import { clearGateContinuationsForStages } from '../src/scheduler/sched_admission/sessions.js';
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
 
@@ -49,47 +46,7 @@ function stage(id: string, input: Partial<StageConfig> = {}): StageConfig {
   return StageConfigSchema.parse({ id, role: 'coder', scope: [`${id}.ts`], ...input });
 }
 
-function successfulStatus(overrides: Partial<StageStatus> = {}): StageStatus {
-  return {
-    status: 'complete',
-    retries: 0,
-    reruns: 0,
-    attempts: [{
-      index: 1,
-      startedAt: '2026-07-31T00:00:00.000Z',
-      completedAt: '2026-07-31T00:00:01.000Z',
-      status: 'complete',
-      exitCode: 0,
-      duration_ms: 1000,
-    }],
-    ...overrides,
-  };
-}
-
-const session: CodexSessionMetadata = {
-  version: 1,
-  sessionId: UUID,
-  ownerStageId: 'build',
-  capturedAt: '2026-07-31T00:00:01.000Z',
-};
-
 describe('UUID-only Codex sessions', () => {
-  const originalOverride = process.env.FC_SESSION_REUSE;
-
-  afterEach(() => {
-    if (originalOverride === undefined) delete process.env.FC_SESSION_REUSE;
-    else process.env.FC_SESSION_REUSE = originalOverride;
-  });
-
-  it('defaults to cold stages after the below-threshold A/B and remains explicitly opt-in', () => {
-    delete process.env.FC_SESSION_REUSE;
-    expect(isSessionReuseEnabled()).toBe(false);
-    process.env.FC_SESSION_REUSE = '1';
-    expect(isSessionReuseEnabled()).toBe(true);
-    process.env.FC_SESSION_REUSE = '0';
-    expect(isSessionReuseEnabled()).toBe(false);
-  });
-
   it('builds an explicit UUID resume command with a stdin sentinel and never selects global recency', () => {
     const args = buildCodexExecArgs('continue', UUID);
     expect(args.slice(0, 3)).toEqual(['exec', 'resume', '--json']);
@@ -138,120 +95,22 @@ describe('UUID-only Codex sessions', () => {
     expect(parsed.output).toBe('recovered result');
     expect(parsed.providerFailure).toBeUndefined();
   });
-
-  it('keeps even a successful dependency edge cold with ledger handoff', () => {
-    const build = stage('build');
-    const continueStage = stage('continue', { depends_on: ['build'] });
-    expect(canReuseSession({
-      stage: continueStage,
-      predecessor: build,
-      allStages: [build, continueStage],
-      predecessorStatus: successfulStatus(),
-      destinationStatus: { status: 'pending', retries: 0 },
-      session,
-    })).toBe(false);
-  });
-
-  it('forces cold start for validation roles and failed/retried predecessors', () => {
-    const build = stage('build');
-    const qa = stage('verify_release', { role: 'qa', is_gate: true, depends_on: ['build'] });
-    expect(canReuseSession({
-      stage: qa,
-      predecessor: build,
-      allStages: [build, qa],
-      predecessorStatus: successfulStatus(),
-      destinationStatus: { status: 'pending', retries: 0 },
-      session,
-    })).toBe(false);
-
-    const next = stage('next', { depends_on: ['build'] });
-    expect(canReuseSession({
-      stage: next,
-      predecessor: build,
-      allStages: [build, next],
-      predecessorStatus: successfulStatus({ retries: 1 }),
-      destinationStatus: { status: 'pending', retries: 0 },
-      session,
-    })).toBe(false);
-    expect(canReuseSession({
-      stage: next,
-      predecessor: build,
-      allStages: [build, next],
-      predecessorStatus: successfulStatus({ status: 'failed' }),
-      destinationStatus: { status: 'pending', retries: 0 },
-      session,
-    })).toBe(false);
-  });
-
-  it('forces cold start for multiple predecessors, multiple reusable successors, or a rerun destination', () => {
-    const build = stage('build');
-    const sibling = stage('sibling', { depends_on: ['build'] });
-    const next = stage('next', { depends_on: ['build'] });
-    const multi = stage('multi', { depends_on: ['build', 'sibling'] });
-    const base = {
-      predecessor: build,
-      predecessorStatus: successfulStatus(),
-      destinationStatus: { status: 'pending', retries: 0 } as StageStatus,
-      session,
-    };
-    expect(canReuseSession({ ...base, stage: next, allStages: [build, next, sibling] })).toBe(false);
-    expect(canReuseSession({ ...base, stage: multi, allStages: [build, sibling, multi] })).toBe(false);
-    expect(canReuseSession({
-      ...base,
-      stage: next,
-      allStages: [build, next],
-      destinationStatus: successfulStatus(),
-    })).toBe(false);
-  });
 });
 
 
-describe('own-stage continuation', () => {
-  it('does not resume settled stage UUIDs or foreign reasoning', () => {
-    const root = mkdtempSync(join(tmpdir(), 'fc-own-session-'));
-    try {
-      const subject = stage('work');
-      const state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
-      const writeSession = (record: object) => { mkdirSync(runRecordPath(root, 'stages', 'work'), { recursive: true }); writeFileSync(runRecordPath(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
-      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
-      // Native session storage is CLI-owned; admitted UUID metadata is sufficient.
-      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
-      expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
-      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });
-      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-});
-
-describe('repair continues its author', () => {
-  it('keeps repairs cold even with a sole same-role author route', () => {
+describe('repair session cleanup', () => {
+  it('retires author session storage after the repair loop', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-repair-session-'));
     try {
       const implement = stage('implement');
       const review = stage('review', { role: 'qa', is_gate: true, depends_on: ['implement'] });
       const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
       const all = [implement, review, repair];
-      const state = { stages: { implement: successfulStatus() } } as StoreState;
       mkdirSync(stageSessionHome(root, 'implement'), { recursive: true });
       writeFileSync(runRecordPath(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
 
-      // Independent of the predecessor-reuse opt-in, and never for the gate.
-      expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
-      expect(sessionResumeForStage(review, all, state, root, false)).toBeUndefined();
-      expect(shouldPreserveSession(implement, all, false)).toBe(false);
-      expect(shouldPreserveSession(repair, all, false)).toBe(false);
-      expect(shouldPreserveSession(implement, [implement, review], false)).toBe(false);
-
-      // Ambiguous or foreign continuations start fresh.
-      const otherRole = [stage('implement', { role: 'doc_writer' }), review, repair];
-      expect(sessionResumeForStage(repair, otherRole, state, root, false)).toBeUndefined();
-      const secondRoute = [...all, stage('repair_scoped', { depends_on: ['review'], retry_to: ['review'] })];
-      expect(sessionResumeForStage(repair, secondRoute, state, root, false)).toBeUndefined();
-      expect(sessionResumeForStage(repair, all, { stages: { implement: successfulStatus({ status: 'failed' }) } } as StoreState, root, false)).toBeUndefined();
-
       clearGateContinuationsForStages(root, all);
       expect(existsSync(stageSessionHome(root, 'implement'))).toBe(false);
-      expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

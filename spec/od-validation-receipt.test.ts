@@ -11,7 +11,7 @@ import { runProjectValidationBaseline, runValidationCommand } from '../src/proje
 import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { bindReviewedGateValidation, gateValidationRefusal, currentValidationResults, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { bindReviewedGateValidation, currentValidationResults, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
@@ -62,7 +62,6 @@ describe('configured validation has one attempt owner and read-only gate binding
       ));
       const status = readStageStatus(project, f.runId, 'review');
       expect(status.status, JSON.stringify(status)).toBe('complete');
-      expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
       const total = readFileSync(f.counter, 'utf8').trim().split('\n').filter(Boolean).length;
       counts.push(total - counts.reduce((sum, count) => sum + count, 0));
     }
@@ -105,7 +104,6 @@ describe('configured validation has one attempt owner and read-only gate binding
     });
     expect(readFileSync(f.counter, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(1);
     expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'failed', measurement: 'unverified', failureIdentifiers: expect.arrayContaining([expect.stringContaining('test_missing_result')]) })]);
-    expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
   });
 
   it.each(['gate-write', 'peer-write', 'peer-unknown', 'generated-write', 'baseline-change', 'prior-write'])(
@@ -132,7 +130,6 @@ describe('configured validation has one attempt owner and read-only gate binding
       if (!bound) await recordGateValidationDelta(project, f.runId, 'review');
       expect(readFileSync(f.counter, 'utf8')).toBe('');
       if (kind !== 'prior-write' && kind !== 'baseline-change') expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'unverified', exitCode: null })]);
-      if (kind === 'baseline-change') expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
     },
   );
 
@@ -146,7 +143,6 @@ describe('configured validation has one attempt owner and read-only gate binding
     }));
     await recordGateValidationDelta(project, f.runId, 'review', { runCommand: () => { throw Error('Decisions cannot run the suite'); } });
     expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'failed', measurement: 'unverified', failureIdentifiers: expect.arrayContaining([expect.stringContaining('test_missing_result')]) })]);
-    expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
   });
 });
 

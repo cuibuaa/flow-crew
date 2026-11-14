@@ -7,11 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { runProjectValidationBaseline, runValidationCommand, type ProjectValidationBaseline } from '../src/project-validation.js';
-import {
-  gateValidationRefusal,
-  recordGateValidationDelta,
-  settleGateValidationEvidence,
-} from '../src/scheduler/sched_settlement/gate-validation.js';
+import { recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
 
@@ -133,8 +129,6 @@ describe('validation dependencies follow the current lockfile', () => {
     rmSync(join(project.packageDir, 'node_modules'), { recursive: true, force: true });
     run.complete();
     await recordGateValidationDelta(project.project, run.runId, 'review');
-    expect(await settleGateValidationEvidence(project.project, run.runId, 'review')).toEqual({ kind: 'unchanged' });
-    expect(gateValidationRefusal(project.project, run.runId, 'review')).toBeUndefined();
   });
 
   it('installs dependencies before capturing the setup baseline', async () => {
@@ -156,7 +150,6 @@ describe('validation dependencies follow the current lockfile', () => {
     const live = await recordGateValidationDelta(project.project, run.runId, 'review');
     expect(live?.pass).toBe(false);
     expect(live?.current.every(result => result.state === 'failed'), JSON.stringify(live?.current)).toBe(true);
-    expect(gateValidationRefusal(project.project, run.runId, 'review')).toBeUndefined();
     expect(live?.delta.every(result => result.state === 'unverified')).toBe(true);
   });
 

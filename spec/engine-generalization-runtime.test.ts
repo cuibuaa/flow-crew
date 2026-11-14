@@ -42,7 +42,6 @@ import {
   type StoreState,
 } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
-import { gateValidationRefusal, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { settleGateRetries } from '../src/scheduler/sched_loop/gate-loop.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
@@ -279,7 +278,7 @@ describe('engine generalization runtime bindings', () => {
     expect(verdict?.pass).toBe(failure === 'post-write-regression');
     const kind = semantic || failure === 'post-write-regression' ? undefined : 'audit_findings';
     expect(verdict?.refusal?.kind).toBe(kind);
-    for (let read = 0; read < 3; read++) await settleGateValidationEvidence(projectDir, created.runId, 'qa', dependencies);
+    for (let read = 0; read < 3; read++) expect(readGateEvaluation(projectDir, 'qa', created.runId)).toEqual(verdict);
     expect(commands).toBe(0);
     expect(readStageStatus(projectDir, created.runId, 'qa').attempts).toHaveLength(1);
     if (!semantic) expect(verdict?.validation?.every(result => result.measurement === 'unverified')).toBe(true);
@@ -342,13 +341,7 @@ describe('engine generalization runtime bindings', () => {
     }] });
     const verdict = JSON.stringify({ pass: true, reason: 'Authored work passes' });
     writeFileSync(runRecordPath(created.runDirPath, `verdict_${gate.id}.json`), verdict);
-    expect(gateValidationRefusal(projectDir, created.runId, gate.id)).toBeUndefined();
     expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
-    let commands = 0;
-    expect(await settleGateValidationEvidence(projectDir, created.runId, gate.id, {
-      runCommand: request => { commands++; return validationRunner(0)(request); },
-    })).toMatchObject({ kind: 'unchanged' });
-    expect(commands).toBe(0);
     expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
     expect(readFileSync(runRecordPath(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
     expect(readdirSync(runRecordPath(created.runDirPath, '.')).some(name => name.startsWith('validation_delta_terminal_author_attempt_0'))).toBe(false);
@@ -367,7 +360,6 @@ describe('engine generalization runtime bindings', () => {
     const receipt = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
     expect(receipt?.pass).toBe(true);
     writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
-    expect(gateValidationRefusal(projectDir, created.runId, 'qa')).toBeUndefined();
     expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
   });
 
@@ -419,12 +411,8 @@ describe('engine generalization runtime bindings', () => {
     const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     expect(first?.pass).toBe(false);
     expect(first?.delta.every((entry) => entry.state === 'unverified')).toBe(true);
-    let commands = 0;
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'unchanged' });
-    expect(commands).toBe(0);
     expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
     expect(readFileSync(runRecordPath(created.runDirPath, first!.immutablePath!), 'utf8')).not.toContain('ledgerSequence');
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toMatchObject({ kind: 'unchanged' });
     expect(readGateEvaluation(projectDir, 'qa', created.runId)?.pass).toBe(true);
   });
   it('does not let a gate retry a persistent unfinished engine execution', async () => {
@@ -440,9 +428,8 @@ describe('engine generalization runtime bindings', () => {
     let commands = 0;
     const deps = { runCommand: () => { commands++; return { exitCode: null, error: 'validation runner unavailable' }; } };
     await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
-    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('unchanged');
-    expect(commands).toBe(0);
-    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('unchanged');
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
     expect(commands).toBe(0);
   });
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {

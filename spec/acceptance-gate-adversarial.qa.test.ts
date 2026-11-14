@@ -4,26 +4,13 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, wr
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  canResumeOwnGateSession,
-  writeRepairRoundDiffArtifact,
-  type StageConfig,
-} from '../src/scheduler.js';
+import { writeRepairRoundDiffArtifact, type StageConfig } from '../src/scheduler.js';
 import type { StageStatus } from '../src/store.js';
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
-
-const UUID = '33333333-3333-4333-8333-333333333333';
 let root: string;
 let project: string;
 let runDir: string;
-
-const gate = (isGate = true): StageConfig => ({
-  id: 'audit_gate', role: 'qa', scope: [], depends_on: [], prompt_template: '', is_gate: isGate, skills: [],
-});
-const session = (ownerStageId: string) => ({
-  version: 1 as const, sessionId: UUID, ownerStageId, capturedAt: '2026-08-01T00:00:00.000Z',
-});
 const repair: StageConfig = {
   id: 'repair', role: 'coder', scope: ['src'], depends_on: [], prompt_template: '', is_gate: false, skills: [],
 };
@@ -64,20 +51,6 @@ beforeEach(() => {
 });
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
-
-describe('adversarial gate-continuation boundaries', () => {
-  it('rejects a same-UUID session owned by another stage', () => {
-    expect(canResumeOwnGateSession(gate(), session('builder'), false)).toBe(false);
-  });
-
-  it('rejects self continuation for a non-gate stage', () => {
-    expect(canResumeOwnGateSession(gate(false), session('audit_gate'), false)).toBe(false);
-  });
-
-  it('rejects self continuation after a wrong prior verdict', () => {
-    expect(canResumeOwnGateSession(gate(), session('audit_gate'), true)).toBe(false);
-  });
-});
 
 describe('complete repair diff edge cases', () => {
   it('records deletion of a declared-scope text file with its content identity', () => {

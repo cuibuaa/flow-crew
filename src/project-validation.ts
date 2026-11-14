@@ -158,9 +158,6 @@ export function projectValidationResult(result: {
   const state = !completed ? 'unverified' : result.exitCode === 0 ? 'passed' : 'failed';
   return { state, measurement: state === 'passed' ? 'verified' : 'unverified' };
 }
-export function validationMeasurement(result: Parameters<typeof projectValidationResult>[0]): ValidationMeasurement {
-  return projectValidationResult(result).measurement;
-}
 
 /** Sample only: load never delays, suppresses or reclassifies a command. */
 export async function withValidationLoad(request: ValidationRunRequest, execute: ValidationCommandRunner,
@@ -660,11 +657,6 @@ export async function runProjectValidationBaseline(
     discovery,
     results,
   };
-}
-
-/** Compatibility API for setup displays: no environment diagnosis is inferred. */
-export function unmeasured(result: ValidationCommandResult): boolean {
-  return projectValidationResult(result).measurement === 'unverified';
 }
 
 /** Compatibility projection for old delta readers. Base facts never decide

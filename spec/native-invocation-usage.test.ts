@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { writeSession } from '../src/adapter-session.js';
-import { NativeUsageAccumulator, normalizeNativeUsage, sumInvocationUsage, usageComplete } from '../src/invocation-usage.js';
+import { NativeUsageAccumulator, normalizeNativeUsage, sumInvocationUsage } from '../src/invocation-usage.js';
 import { createRun } from './test-support/create-run.js';
 import { completedStageAttemptStatus, fcGlobalDir, interruptedStageStatus, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
@@ -83,9 +83,6 @@ describe('native invocation usage', () => {
 
   it('requires cost evidence as well as token counters for a complete usage ledger', () => {
     const tokens = { tokens_in: 20, tokens_out: 2, tokenUsage: 'known' as const };
-    expect(usageComplete(tokens)).toBe(false);
-    expect(usageComplete({ ...tokens, cost_usd: 0, costUsage: 'known' })).toBe(true);
-    expect(usageComplete({ ...tokens, cost_usd: 0.1, costUsage: 'partial' })).toBe(false);
     expect(sumInvocationUsage([{ ...tokens, cost_usd: 0.1 }, tokens])).toMatchObject({ tokenUsage: 'known', cost_usd: 0.1, costUsage: 'partial' });
   });
 
@@ -150,7 +147,6 @@ describe('native invocation usage', () => {
     expect(result.cost_usd).toBeUndefined();
     expect(result.invocations?.[0]).toMatchObject({ costUsage: 'unknown' });
     expect(result.invocations?.[0].cost_usd).toBeUndefined();
-    expect(usageComplete(result)).toBe(false);
     expect(JSON.parse(readFileSync(costPath, 'utf8'))).toEqual({ cumulativeCostUsd: 0.5 });
     const next = await adapter.run('continue again', role, { ...opts, stageId: 'build', resumeSessionId: sessionId });
     expect(next).toMatchObject({ cost_usd: 0, costUsage: 'known' });
@@ -194,7 +190,6 @@ describe('native invocation usage', () => {
       tokenUsage: 'partial', costUsage: 'unknown', invocations: [invocation] });
     expect(settled.cost_usd).toBeUndefined();
     expect(sumInvocationUsage(settled.attempts!)).toMatchObject({ tokens_in: 40, tokens_out: 3, tokenUsage: 'partial', costUsage: 'unknown' });
-    expect(usageComplete(settled.attempts![0])).toBe(false);
     const missing = interruptedStageStatus({ ...previous, attempts: [{ index: 1, status: 'running', startedAt, tokenUsage }] }, completedAt, 'interrupted');
     expect(missing.attempts?.[0]).toMatchObject({ tokenUsage: 'unknown', costUsage: 'unknown' });
     expect(missing.tokens_in).toBeUndefined();

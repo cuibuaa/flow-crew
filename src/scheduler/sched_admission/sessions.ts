@@ -1,29 +1,9 @@
 import { runRecordPath, requestPath } from '../../run-layout.js';
 /** Stage/session reuse and gate continuation lifecycle; reads/writes only the supplied run directory. */
-import { type StageStatus, type StoreState } from '../../store.js';
-import { type SessionMetadata, finalizeStageSessions } from '../../adapter-session.js';
+import { finalizeStageSessions } from '../../adapter-session.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { type StageConfig } from './configuration.js';
-
-export function isValidationStage(stage: StageConfig): boolean {
-  const tagged = `${stage.id} ${stage.role}`;
-  return stage.role.toLowerCase() === 'qa'
-    || stage.is_gate === true
-    || /(^|[\s_-])(gate|verify|verification)(?=$|[\s_-])/i.test(tagged);
-}
-
-/** Compatibility entry points: opt-in reuse no longer carries conversations.
- * Every stage starts with current duties, the evidence ledger and the diff. */
-export function canReuseSession(_input: {
-  stage: StageConfig; predecessor: StageConfig; allStages: StageConfig[];
-  predecessorStatus: StageStatus | undefined; destinationStatus: StageStatus | undefined;
-  session: SessionMetadata | undefined;
-}): boolean { return false; }
-export function sessionResumeForStage(_stage: StageConfig, _allStages: StageConfig[], _state: StoreState,
-  _runDirPath: string, _enabled: boolean, _adapter?: string): { sessionId: string; ownerStageId: string } | undefined {
-  return undefined;
-}
 
 export const GATE_VERDICT_CORRECTION_VERSION = 1;
 
@@ -63,9 +43,6 @@ function readAndConsumeGateVerdictCorrection(runDirPath: string, gateId: string)
   }
 }
 
-export function canResumeOwnGateSession(_stage: StageConfig, _session: SessionMetadata | undefined,
-  _previousVerdictWrong: boolean): boolean { return false; }
-
 function clearContinuationArtifacts(runDirPath: string, gateId: string): void {
   finalizeStageSessions(runDirPath, gateId);
   try { const path = runRecordPath(runDirPath, 'stages', gateId, 'session.json'); unlinkSync(path); } catch { /* best effort */ }
@@ -83,4 +60,3 @@ export function gateContinuationSessionForStage(stage: StageConfig, runDirPath: 
   if (stage.is_gate && readAndConsumeGateVerdictCorrection(runDirPath, stage.id)) clearContinuationArtifacts(runDirPath, stage.id);
   return undefined;
 }
-export function shouldPreserveSession(_stage: StageConfig, _allStages: StageConfig[], _enabled: boolean): boolean { return false; }

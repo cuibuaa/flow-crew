@@ -7,7 +7,7 @@ export { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contrac
 export { buildRetryPreamble, decideEmptyDispatchAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
 export { StageConfigSchema, WorkflowConfigSchema, normalizeStageContracts, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';
 export { findScopeConflict, selectRunnableBatch } from './scheduler/sched_admission/frontier.js';
-export { GATE_VERDICT_CORRECTION_VERSION, canResumeOwnGateSession, gateVerdictCorrectionPath, isValidationStage } from './scheduler/sched_admission/sessions.js';
+export { GATE_VERDICT_CORRECTION_VERSION, gateVerdictCorrectionPath } from './scheduler/sched_admission/sessions.js';
 export { applyBasePrompt, buildRoleRegistry, collectTransitiveDependents, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
 export { inspectRealityCheckReachability } from './scheduler/sched_admission/reality-reads.js';
 export type { ParsedBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
@@ -23,7 +23,7 @@ export { loadGateContract } from './scheduler/sched_settlement/gate-contract.js'
 export { recordGateValidationDelta, snapshotShipSetupValidationBaseline } from './scheduler/sched_settlement/gate-validation.js';
 export { deriveCriterionDischarges, readGateEvaluation } from './scheduler/sched_settlement/gate-verdict.js';
 export type { GateRecoveryFact } from './scheduler/sched_settlement/gate-recovery.js';
-export { checkGates, findAllRetryToStages, findGateRecoveryStages } from './scheduler/sched_settlement/gate-recovery.js';
+export { findAllRetryToStages, findGateRecoveryStages } from './scheduler/sched_settlement/gate-recovery.js';
 export { recoverTerminalStudyCompletion } from './scheduler/sched_settlement/completion.js';
 export { archivedGateRejections, buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 export { recordSchedulerTechnicalAttemptResult } from './scheduler/sched_settlement/stage-execution.js';

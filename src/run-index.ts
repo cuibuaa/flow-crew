@@ -299,16 +299,6 @@ export function countStandaloneRunsFromIndex(projectDir: string): number | null 
   return Number.isFinite(count) ? count : 0;
 }
 
-/** Run ids whose status is 'running' (for orphan reconciliation), newest first. */
-export function listRunningRunIdsFromIndex(projectDir: string): string[] | null {
-  ensureIndexSeeded(projectDir);
-  const db = openDb(projectDir);
-  if (!db) return null;
-  return db.prepare("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id DESC")
-    .all()
-    .map((row) => String(row.run_id));
-}
-
 /**
  * Bounded candidates for watch and ownership probes. Unknown/non-terminal
  * statuses remain visible, and a scheduler marker keeps a terminal-status run

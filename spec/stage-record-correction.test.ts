@@ -12,7 +12,6 @@ import { readRunEvents } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
-import { structuredFailingGateCriteria } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
@@ -204,14 +203,6 @@ describe('record correction uses the existing attempt', () => {
       expect(result.exitCode, result.friendlyError).toBe(0);
       expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     }
-  });
-
-  it('keeps carried results out of the next repair obligations', () => {
-    writeFileSync(runRecordPath(runDir, 'verdict_review.json'), JSON.stringify({ ...rejected(), criteria: {
-      criterion: { status: 'fail', evidence: 'Repair me' },
-      stable: { status: 'carried', evidence: 'Previously met', from: { iteration: 1, round: 1 } },
-    } }));
-    expect(structuredFailingGateCriteria(runDir, 'review')).toEqual(['criterion']);
   });
 
   it('corrects a slow malformed result before the declared allowance', async () => {

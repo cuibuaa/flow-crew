@@ -10,7 +10,7 @@ import { confirmedRepairFindings } from './gate-archives.js';
 import { runProcessAbortSignal } from '../../adapters/base.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
-import { readStageStatus, readRunState, updateRunState, runDir, RUN_STATUS, STAGE_STATUS, type GateVerdict } from '../../store.js';
+import { readStageStatus, readRunState, updateRunState, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 import {
   reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, projectValidationResult, evaluateValidationDelta, runProjectCommand,
   type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationLimits, type ValidationDeltaResult, type ValidationCommand,
@@ -58,18 +58,8 @@ function gateExecution(projectDir: string, runId: string, stageId: string, statu
       executionId: validationExecutionId(runId, stageId, attempt.index, attempt.startedAt, end) };
   } catch { return undefined; }
 }
-export function settledGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
-  return gateExecution(projectDir, runId, stageId, ['complete']);
-}
 export function closedGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
   return gateExecution(projectDir, runId, stageId, ['complete', 'failed']);
-}
-export function validationDeltaMatchesExecution(delta: GateValidationDeltaArtifact, execution: GateValidationExecutionIdentity | undefined): boolean {
-  return delta.version === 2 && execution !== undefined && Number.isSafeInteger(delta.attemptIndex)
-    && typeof delta.attemptStartedAt === 'string' && typeof delta.attemptCompletedAt === 'string'
-    && typeof delta.executionId === 'string' && delta.attemptIndex === execution.attemptIndex
-    && delta.attemptStartedAt === execution.attemptStartedAt && delta.attemptCompletedAt === execution.attemptCompletedAt
-    && delta.executionId === execution.executionId;
 }
 export function readRunValidationBaseline(base: string): RunValidationBaselineArtifact | undefined {
   try {
@@ -289,9 +279,3 @@ export function currentValidationRegressions(projectDir: string, runId: string):
         validationRecord: fact.sequence } }];
   });
 }
-
-/** Historical entry points remain read-only. */
-export function currentAuthorValidationRefusal(_projectDir: string, _runId: string): GateVerdict | undefined { return undefined; }
-export function gateValidationRefusal(_projectDir: string, _runId: string, _stageId: string): GateVerdict | undefined { return undefined; }
-export async function settleGateValidationEvidence(_projectDir: string, _runId: string, _stageId: string,
-  _dependencies: ProjectValidationDependencies = {}): Promise<{ kind: 'unchanged' }> { return { kind: 'unchanged' }; }

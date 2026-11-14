@@ -15,7 +15,7 @@ import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { fcGlobalDir, runDir } from '../src/store.js';
 import { captureProjectTree, readEvidence, VALIDATION_FACT_VERSION, type ValidationFact } from '../src/evidence-ledger.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { gateValidationRefusal, currentValidationResults, recordAttemptValidation, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { currentValidationResults, recordAttemptValidation } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { stageFixtureCommand } from './test-support/stage-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
@@ -240,8 +240,6 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.validations.every(value => value.executions.length === 1)).toBe(true);
     expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[0].pass).toBe(false);
-    const settlement = await settleGateValidationEvidence(result.target, result.final.runId, 'review', { runCommand: () => { throw new Error('decision reran the suite'); } });
-    expect(settlement.kind).toBe('unchanged'); expect(result.executions).toHaveLength(2);
   });
 
   it('hands source-changing validation facts to review and validates the resulting tree', async () => {
@@ -257,7 +255,6 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it('rejects a stale receipt after a later source write without rerunning validation', async () => {
     const result = await fixture(); const before = result.executions.length;
     writeFileSync(join(result.target, 'value.txt'), 'later write\n');
-    expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
     expect(currentValidationResults(result.target, result.final.runId)).toEqual([expect.objectContaining({ exitCode: null, state: 'unverified' })]);
     expect(readGateEvaluation(result.target, 'review', result.final.runId)?.pass).toBe(true);
     expect(result.executions).toHaveLength(before);
@@ -268,7 +265,6 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const legacy = readEvidence(result.rd).map(fact => fact.kind === 'validation' ? { ...fact, validationVersion } : fact);
     writeFileSync(runRecordPath(result.rd, 'evidence-ledger.jsonl'), legacy.map(fact => JSON.stringify(fact)).join('\n') + '\n');
     expect(readEvidence(result.rd).some(fact => fact.kind === 'validation')).toBe(true);
-    expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
     await recordAttemptValidation(result.target, result.final.runId, 'implement', { runCommand: () => { throw new Error('old receipt reran its suite'); } });
     expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
   });

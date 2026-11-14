@@ -18,7 +18,7 @@ import { discoverProjectValidation, evaluateValidationDelta, projectValidationRe
   runProjectCommand, runProjectValidationBaseline, type ValidationCommandResult } from '../src/project-validation.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { classifyGateRecoveryFact, findGateRecoveryStages } from '../src/scheduler/sched_settlement/gate-recovery.js';
-import { currentAuthorValidationRefusal, currentValidationResults, readValidationDelta, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { currentValidationResults, readValidationDelta, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { decodeRunnerReport } from '../src/validation-identity.js';
 import { pollWatch, createWatchState } from '../src/watch.js';
 import { readRunStateView } from '../src/run-state-view.js';
@@ -304,7 +304,6 @@ describe('one projection across historic receipts and every reader', () => {
     for (const command of commands) expect(projectValidationResult(command)).toEqual({ state: 'passed', measurement: 'verified' });
     expect(evaluateValidationDelta({ results: commands }, commands).map(entry => entry.state)).toEqual(['verified', 'verified', 'verified']);
     expect(projectValidationFact(fact).delta.map(entry => entry.state)).toEqual(['verified', 'verified', 'verified']);
-    expect(currentAuthorValidationRefusal(root, runId)).toBeUndefined();
     const verdict = readGateEvaluation(root, 'review', runId)!;
     expect(verdict.pass).toBe(true);
     expect(verdict.validation?.map(command => command.state)).toEqual(['passed', 'passed', 'passed']);
@@ -399,7 +398,6 @@ describe('one projection across historic receipts and every reader', () => {
     const projected = projectValidationFact(fact);
     expect(projectValidationFact(projected)).toEqual(projected);
     expect(projected).toMatchObject({ pass: true, delta, executions: [{ commands: [{ ...expected, storedState: 'launch_error', exitCode: 0 }] }] });
-    expect(currentAuthorValidationRefusal(root, runId)).toBeUndefined();
     writeStageStatus(root, runId, 'review', { status: 'complete', retries: 0,
       gate: { pass: false, validation: [once] } });
     const verdict = readGateEvaluation(root, 'review', runId)!;

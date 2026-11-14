@@ -103,11 +103,3 @@ export function loadEngineDefaults(): EngineDefaults {
   _cacheMtime = mtime;
   return parsed;
 }
-
-/** Per-process measurement override; only literal 0/1 are accepted. */
-export function isSessionReuseEnabled(): boolean {
-  const override = process.env.FC_SESSION_REUSE;
-  if (override === '0') return false;
-  if (override === '1') return true;
-  return loadEngineDefaults().session_reuse;
-}

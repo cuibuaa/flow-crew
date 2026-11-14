@@ -399,36 +399,3 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
     .map(({ runIds, ...summary }) => summary)
     .sort((a, b) => (b.latestTimestamp ?? '').localeCompare(a.latestTimestamp ?? ''));
 }
-
-export interface CampaignPhaseProgress {
-  entries: CampaignHistoryEntry[];
-  completedPhases: string[];
-  currentPhase?: string;
-  latest?: CampaignHistoryEntry;
-}
-
-export function summarizeCampaignPhaseProgress(entries: CampaignHistoryEntry[]): CampaignPhaseProgress {
-  const phaseEntries = entries
-    .filter((entry) => entry.phase || entry.nextPhase || entry.outcome || typeof entry.phaseComplete === 'boolean')
-    .sort((a, b) => {
-      if (a.seq !== b.seq) return a.seq - b.seq;
-      const iterDiff = (a.iteration ?? 0) - (b.iteration ?? 0);
-      if (iterDiff !== 0) return iterDiff;
-      return a.timestamp.localeCompare(b.timestamp);
-    });
-  const completedPhases = [...new Set(
-    phaseEntries
-      .filter((entry) => entry.phaseComplete === true && entry.phase)
-      .map((entry) => entry.phase as string),
-  )];
-  const latest = phaseEntries.at(-1);
-  const currentPhase = latest?.phaseComplete === true
-    ? latest.nextPhase
-    : latest?.phase ?? latest?.nextPhase;
-  return {
-    entries: phaseEntries,
-    completedPhases,
-    currentPhase,
-    latest,
-  };
-}

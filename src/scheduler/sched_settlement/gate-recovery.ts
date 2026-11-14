@@ -1,4 +1,3 @@
-import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose confirmed recovery routes. Contract refusal receives only the campaign publisher.
 import { GateVerdict, RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
@@ -9,9 +8,9 @@ import { log } from '../sched_admission/shared.js';
 
 
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GateContract, loadGateContract } from './gate-contract.js';
+import { loadGateContract } from './gate-contract.js';
 import { readGateEvaluation } from './gate-verdict.js';
 import { projectGateVerdict, readGateVerdictDocument } from './gate-evidence.js';
 import { archiveRejectedGateRuntimeFacts, archivedGateRejections, gateArchiveCoordinate } from './gate-archives.js';
@@ -62,101 +61,6 @@ export function classifyGateRecoveryFact(
     ? 'repairable_failure'
     : 'unclassified_rejection';
   return { gateId, authoredVerdict, effectiveVerdict, rejectionKind };
-}
-
-/**
- * Return the non-passing entries from the same raw verdict selected by
- * readGateEvaluation. Undefined means that verdict supplied no structured
- * criterion map, so callers may fall back to admitted refs or the gate ID.
- */
-export function structuredFailingGateCriteria(
-  runDirPath: string,
-  stageId: string,
-): string[] | undefined {
-  const verdict = readGateVerdictDocument(runDirPath, stageId)?.value;
-  const rawCriteria = verdict?.criteria;
-  if (!rawCriteria || typeof rawCriteria !== 'object' || Array.isArray(rawCriteria)) return undefined;
-  const entries = Object.entries(rawCriteria as Record<string, unknown>);
-  if (entries.length === 0) return undefined;
-  return entries.flatMap(([criterionId, evidence]) => {
-    const status = evidence && typeof evidence === 'object' && !Array.isArray(evidence)
-      && typeof (evidence as Record<string, unknown>).status === 'string'
-      ? ((evidence as Record<string, unknown>).status as string).trim().toLowerCase()
-      : '';
-    return status === 'pass' || status === 'carried' ? [] : [criterionId];
-  });
-}
-
-export interface GateRetryDiagnosticArtifact {
-  file: string;
-  pass?: boolean;
-  parseError?: string;
-}
-
-export function gateRetryDiagnosticSnapshot(
-  allStages: StageConfig[],
-  state: StoreState,
-  projectDir: string,
-  runId: string,
-  runDirPath: string,
-  runtimeFacts: GateRuntimeFacts,
-): {
-  verdictArtifacts: GateRetryDiagnosticArtifact[];
-  gates: Array<{
-    id: string;
-    status?: string;
-    attempts: number;
-    effectiveVerdict: GateVerdict | null;
-    metricArtifact?: Record<string, unknown>;
-    metricParseError?: string;
-  }>;
-  contract: GateContract | null;
-} {
-  const verdictArtifacts: GateRetryDiagnosticArtifact[] = [];
-  let verdictFiles: string[] = [];
-  try {
-    verdictFiles = readdirSync(runRecordPath(runDirPath, '.'))
-      .filter((file) => /^verdict_.*\.json$/.test(file))
-      .sort();
-  } catch { /* run directory is expected to exist; retain an empty diagnostic on failure */ }
-  for (const file of verdictFiles) {
-    try {
-      const parsed = JSON.parse(readFileSync(runRecordPath(runDirPath, file), 'utf-8')) as Record<string, unknown>;
-      verdictArtifacts.push({ file, ...(typeof parsed.pass === 'boolean' ? { pass: parsed.pass } : {}) });
-    } catch (error) {
-      verdictArtifacts.push({ file, parseError: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
-  const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
-  const evaluations = new Map(runtimeFacts.evaluations.map((evaluation) => [evaluation.id, evaluation]));
-  const gates = uniqueGateStages(allStages).map((stage) => {
-    const status = state.stages[stage.id];
-    const metricPath = stageWorkPath(runDirPath, 'stages', stage.id, 'metric.json');
-    let metricArtifact: Record<string, unknown> | undefined;
-    let metricParseError: string | undefined;
-    if (existsSync(metricPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(metricPath, 'utf-8')) as Record<string, unknown>;
-        metricArtifact = Object.fromEntries([
-          'hasMetric', 'metric', 'value', 'score', 'higherIsBetter', 'threshold', 'pass',
-          'phaseComplete', 'phase_complete', 'nextPhase', 'next_phase',
-        ].flatMap((key) => key in parsed ? [[key, parsed[key]]] : []));
-      } catch (error) {
-        metricParseError = error instanceof Error ? error.message : String(error);
-      }
-    }
-    const evaluation = evaluations.get(stage.id);
-    return {
-      id: stage.id,
-      status: status?.status,
-      attempts: status?.attempts?.length ?? 0,
-      effectiveVerdict: evaluation?.effectiveVerdict ?? null,
-      ...(metricArtifact ? { metricArtifact } : {}),
-      ...(metricParseError ? { metricParseError } : {}),
-    };
-  });
-  return { verdictArtifacts, gates, contract };
 }
 
 export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): GateRuntimeFacts {
@@ -216,12 +120,6 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
   };
 }
 
-/** Check all is_gate stages. Preserve the established public result shape. */
-export function checkGates(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): { allPass: boolean; failedGateIds: string[] } {
-  const { allPass, failedGateIds } = collectGateRuntimeFacts(allStages, state, projectDir, runId);
-  return { allPass, failedGateIds };
-}
-
 /** Find ALL retry_to stages that reference any of the failed gate IDs */
 export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: string[]): StageConfig[] {
   const failedSet = new Set(failedGateIds);
@@ -251,18 +149,6 @@ export function findGateRecoveryStages(
 
   }
   return [...selected.values()];
-}
-
-export function gateIdsForRecoveryStages(
-  allStages: StageConfig[],
-  rejectedGateIds: readonly string[],
-  recoveryStages: readonly StageConfig[],
-): string[] {
-  return rejectedGateIds.filter((gateId) => recoveryStages.some((stage) => (
-    (stage.is_gate && stage.id === gateId)
-    || stage.retry_to?.includes(gateId)
-
-  )));
 }
 
 /** The authors whose results a gate reviews: its non-gate ancestors up to the nearest gates, which review the rest. */
