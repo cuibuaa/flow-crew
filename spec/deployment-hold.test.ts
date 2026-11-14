@@ -1,3 +1,4 @@
+import './test-support/unit-task-runtime.js';
 import { spawn } from 'node:child_process';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';

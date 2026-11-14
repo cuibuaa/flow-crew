@@ -1,3 +1,4 @@
+import { selectTaskRuntime, validateTaskRuntime, ExclusiveMigrationRequired } from './build-manifest.js';
 import { assertMeasuredSetupLaunch } from './ship-setup-record.js';
 import { parseBriefDeclarations } from './brief-declarations.js';
 import { gitAsync, rethrowGitNotAnswered } from './git-facts.js';
@@ -199,6 +200,14 @@ export class Orchestrator {
   private prepareRunBinding(task: TaskEntry): TaskEntry | undefined {
     try {
       assertTaskBriefAdmission(task);
+      if (!task.runtime) {
+        const bound = this.readBoundRun(task);
+        if (bound || task.started_at || task.launch > 1) {
+          throw new ExclusiveMigrationRequired('previously executed task has no frozen runtime');
+        }
+        task = this.registry.update(task.id, { runtime: selectTaskRuntime(this.cliPath, join(this.registry.baseDir, 'runtime')) });
+      }
+      validateTaskRuntime(task.runtime!, join(this.registry.baseDir, 'runtime'));
     } catch (err) {
       return this.failClosed(task, err instanceof Error ? err.message : String(err));
     }
@@ -244,9 +253,8 @@ export class Orchestrator {
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    // Clearing the producer timer does not close a sweep already awaiting a
-    // backend. Its owner must join that sweep before removing durable state.
-    await this.activeTick;
+    // The control process exits after its stop reply. In-flight I/O is not
+    // joined; durable launch/outbox evidence belongs to the successor.
   }
 
   /** Persist admission before launch work. The daemon queue resumes after a restart. */
@@ -473,7 +481,7 @@ export class Orchestrator {
       return authorized;
     };
     const queueRun = (task: TaskEntry, runId: string): void => {
-      this.registry.update(task.id, { status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
+      this.registry.update(task.id, { runtime: task.runtime, status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
         not_before: undefined, defer_reason: undefined, defer_kind: 'wait', notes: `Continuing deployment-held run ${runId}` });
     };
     for (const task of this.registry.list({ status: TASK_LIST_STATUS.ALL })) {
@@ -487,7 +495,12 @@ export class Orchestrator {
         buildCommand(task, this.cliPath);
         assertContinuationCompatible(task.projectDir, bound.runId);
         workflowContinuation(state, task.projectDir, bound.runId);
-        compatible.push({ task, runId: bound.runId });
+        // Bind legacy executions only under this current, validated hold.
+        // Queue persists the reference before either release; historical holds
+        // never authorize runtime selection at a later recovery entrance.
+        const runtime = task.runtime ?? selectTaskRuntime(this.cliPath, join(this.registry.baseDir, 'runtime'));
+        validateTaskRuntime(runtime, join(this.registry.baseDir, 'runtime'));
+        compatible.push({ task: { ...task, runtime }, runId: bound.runId });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const detail = `Task ${task.id} run ${bound.runId}: ${reason}`;
@@ -592,6 +605,13 @@ export class Orchestrator {
    * elapsed and its project is free; otherwise leave it queued.
    */
   private async tryLaunchQueued(task: TaskEntry): Promise<void> {
+    if (this.launchingTaskIds.has(task.id)) return;
+    this.launchingTaskIds.add(task.id);
+    try { await this.launchQueued(task); }
+    finally { this.launchingTaskIds.delete(task.id); }
+  }
+
+  private async launchQueued(task: TaskEntry): Promise<void> {
     if (hasLiveForegroundOwner(task)) return;
     if (deploymentHeld()) return;
     // The sweep's task snapshot may predate a concurrent register() status
@@ -599,8 +619,6 @@ export class Orchestrator {
     const current = this.registry.get(task.id);
     if (!current || (current.status !== TASK_STATUS.DEFERRED && current.status !== TASK_STATUS.PENDING)) return;
     task = current;
-    if (this.launchingTaskIds.has(task.id)) return;
-
     // A previous verdict cannot settle a request that has never launched.
     // Once launched, reconcile even during backoff so an out-of-band resume
     // can settle promptly without another launch.
@@ -726,12 +744,7 @@ export class Orchestrator {
       status: 'running', attempt, launch, launchBootId: readHostBootId(), systemd_unit: unit,
       started_at: this.now().toISOString(), not_before: undefined, defer_reason: undefined, defer_kind: undefined,
     });
-    this.launchingTaskIds.add(task.id);
-    try {
-      await this.launch(updated, unit, command);
-    } finally {
-      this.launchingTaskIds.delete(task.id);
-    }
+    await this.launch(updated, unit, command);
     // A concurrent cancellation waits for launchingTaskIds to clear and may
     // settle immediately after the finally block. Do not append a late
     // "running" tick after the registry already says cancelling/cancelled.
@@ -1695,6 +1708,7 @@ function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: 
 }
 
 export function buildCommand(task: TaskEntry, cliPath: string): string {
+  if (task.runtime) cliPath = validateTaskRuntime(task.runtime);
   const launch = task.launch_options ?? {};
   const userArgs = [
     ...(launch.adapter ? ['--adapter', launch.adapter] : []),

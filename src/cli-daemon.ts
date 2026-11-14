@@ -1,7 +1,7 @@
 import { projectRunLifecycle, readRunSnapshot } from './run-lifecycle.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { sweepRunScratch } from './invocation-scratch.js';
-import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine-fs.js';
+import { appendFileSync, closeSync, mkdirSync, openSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -45,9 +45,9 @@ import { inspectRunScheduler } from './run-lock.js';
 import { fcGlobalDir, readGlobalLockWaits } from './store.js';
 import { markDeploymentStopping, readDeploymentHold } from './deployment-hold.js';
 import { readRunIndexRecords } from './run-index.js';
-import { assertDistFresh, buildProjectRoot, pinBuildRuntime } from './build-manifest.js';
-import { processIsAlive } from './process-liveness.js';
-import { resolveRunStatus, taskDisplayStatus } from './lifecycle-status.js';
+import { assertDistFresh, assertBuildArtifactInventory, assertControlCompatibility, readBuildManifest, validateTaskRuntime, ExclusiveMigrationRequired, buildProjectRoot, pinBuildRuntime } from './build-manifest.js';
+import { processIsAlive, processStartToken, processLiveness, type ProcessStartToken, type ProcessLiveness } from './process-liveness.js';
+import { resolveRunStatus, taskDisplayStatus, isKnownTaskStatus } from './lifecycle-status.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, options?: RpcWaitOptions) => Promise<RpcResponse>;
 
@@ -58,6 +58,8 @@ export interface DaemonProcessControls {
   killProcess: (pid: number, signal: NodeJS.Signals) => void;
   delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   processAlive: (pid: number) => boolean;
+  processStart: (pid: number) => ProcessStartToken | undefined;
+  processState: (pid: number, start?: ProcessStartToken) => ProcessLiveness;
   build: (projectRoot: string) => Promise<void>;
 }
 
@@ -97,6 +99,8 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
       killProcess: (pid, signal) => process.kill(pid, signal),
       delay,
       processAlive: processIsAlive,
+      processStart: processStartToken,
+      processState: processLiveness,
       build: (root) => buildDeployment(root, stdout, stderr),
       ...opts.controls,
     };
@@ -342,12 +346,8 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     if (req.cmd === 'status') return { ...orchestrator.status(), ...rpcIdentity(identity) };
     if (req.cmd === 'stop') {
       await orchestrator.stop();
-      setTimeout(() => {
-        server.close(() => {
-          rmSync(socketPath, { force: true });
-          process.exit(0);
-        });
-      }, 10);
+      // onResponse retires this process after flushing the stop reply.
+      // server.close callbacks can wait on other RPCs indefinitely.
       return { ok: true };
     }
     throw Object.assign(new Error('unknown command'), { code: 'RPC_UNKNOWN_COMMAND' });
@@ -356,6 +356,11 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   const server = await startRpcServer(socketPath, handler, {
     onHandlerError: createDaemonRpcErrorLogger(logPath),
     onResponse: (req, response) => {
+      if (req.cmd === 'stop') {
+        server.close();
+        setImmediate(() => process.exit(0));
+        return;
+      }
       if ((req.cmd === 'register' && 'acknowledgement' in response) || req.cmd === 'hold' || req.cmd === 'continue') {
         setImmediate(() => orchestrator.requestTick());
       }
@@ -429,6 +434,63 @@ async function deployDaemon(
   parsed: ReturnType<typeof parseCommandArgs>, socketPath: string, logPath: string, distDir: string,
   stdout: NodeJS.WriteStream, stderr: NodeJS.WriteStream, controls: DaemonProcessControls,
 ): Promise<number> {
+  // An operator-requested hold selects the existing exclusive migration path.
+  const hold = readDeploymentHold();
+  if (hold && !hold.releasedAt) return deployExclusive(parsed, socketPath, logPath, distDir, stdout, stderr, controls);
+  let step = 'preflight';
+  try {
+    if (parsed.flags.has('--force')) throw new Error('Deployment cannot bypass safety checks with --force');
+    if (checkRestartSafety(dirname(socketPath), false, stderr, 'restart') !== 0) throw new ExclusiveMigrationRequired('daemon restart safety check refused; resolve unsafe registry records before migration');
+    const previous = await verifiedDaemonStatus(socketPath, controls);
+    const identity = readDaemonIdentity(socketPath)!;
+    const projectRoot = buildProjectRoot(distDir);
+    if (!identity.distDir || buildProjectRoot(identity.distDir) !== projectRoot) {
+      throw new ExclusiveMigrationRequired('old control has no attested deployment runtime binding');
+    }
+    const oldManifest = readBuildManifest(identity.distDir);
+    assertControlCompatibility(oldManifest);
+    assertBuildArtifactInventory(identity.distDir, oldManifest!);
+    if (computeBuildFingerprint(identity.distDir).hash !== previous.build) throw new Error('Old daemon runtime was modified');
+    for (const task of new TaskRegistry({ baseDir: dirname(socketPath) }).list({ status: TASK_LIST_STATUS.ALL })) {
+      if (task.runtime) {
+        validateTaskRuntime(task.runtime, join(dirname(socketPath), 'runtime'));
+      } else if (!isKnownTaskStatus(task.status) || (isActiveTaskStatus(task.status)
+          && (task.started_at || task.run_id || task.launch > 1 || task.status !== TASK_STATUS.PENDING))) {
+        throw new ExclusiveMigrationRequired(`task ${task.id} has no frozen runtime`);
+      }
+    }
+    step = 'build';
+    stdout.write(`Building deployment checkout ${projectRoot} while control serves\n`);
+    await controls.build(projectRoot);
+    const manifest = assertDistFresh(projectRoot, distDir);
+    assertControlCompatibility(oldManifest, manifest);
+    // Prepare every byte before retiring control, including dependency roots.
+    const preparedRuntime = pinBuildRuntime(distDir, join(dirname(socketPath), 'runtime'));
+    validateTaskRuntime({ generation: manifest.generation, cliPath: join(preparedRuntime, 'cli.js') });
+    const expectedBuild = computeBuildFingerprint(distDir).hash;
+    const current = await verifiedDaemonStatus(socketPath, controls);
+    if (current.pid !== previous.pid || current.startedAt !== previous.startedAt) throw new Error('Daemon changed during build');
+    step = 'replace';
+    const started = await stopOwnedDaemonAndStart(socketPath, logPath, previous.pid, controls);
+    step = 'verify';
+    if ((started.pid === previous.pid && started.startedAt === previous.startedAt)
+        || started.build !== expectedBuild
+        || assertDistFresh(projectRoot, distDir).generation !== manifest.generation
+        || await reportDaemonStatus(socketPath, distDir, stdout, controls) !== 0) {
+      throw new Error('New daemon identity/build generation could not be verified');
+    }
+    stdout.write(`generation: ${manifest.generation}\nDeployment complete; task owners continue.\n`);
+    return 0;
+  } catch (error) {
+    stderr.write(`DEPLOY STOPPED at ${step}: ${errorMessage(error)}.\n`);
+    return rpcErrorExitCode(error);
+  }
+}
+
+async function deployExclusive(
+  parsed: ReturnType<typeof parseCommandArgs>, socketPath: string, logPath: string, distDir: string,
+  stdout: NodeJS.WriteStream, stderr: NodeJS.WriteStream, controls: DaemonProcessControls,
+): Promise<number> {
   let step = 'hold';
   const projectRoot = buildProjectRoot(distDir);
   const priorHold = readDeploymentHold();
@@ -449,11 +511,12 @@ async function deployDaemon(
     if (identity.distDir ? buildProjectRoot(identity.distDir) !== projectRoot : identity.build.hash !== computeBuildFingerprint(distDir).hash) {
       throw new Error('Cannot bind the held daemon to this deployment checkout');
     }
+    const previousStart = requiredProcessStart(previous.pid, controls);
     step = 'stop';
     markDeploymentStopping(hold);
     stopRequested = true;
     await controls.sendRpc(socketPath, { cmd: 'stop' });
-    await waitForOwnerRelease(socketPath, previous.pid, controls);
+    await waitForOwnerRelease(socketPath, previous.pid, previousStart, controls);
     step = 'build';
     stdout.write(`Building deployment checkout ${projectRoot}\n`);
     await controls.build(projectRoot);
@@ -738,26 +801,35 @@ async function stopOwnedDaemonAndStart(
   previousPid: number,
   controls: DaemonProcessControls,
 ): Promise<DaemonStatusRpcResponse> {
+  const previousStart = requiredProcessStart(previousPid, controls);
   try {
     await controls.sendRpc(socketPath, { cmd: 'stop' });
   } catch {
-    // A response can be lost after delivery. Socket ownership below is the
-    // authoritative stop result; no cmdline inference is involved.
+    // A response can be lost after delivery. The common startup fence proves
+    // exact process death and socket release; no cmdline inference is involved.
   }
 
-  await waitForOwnerRelease(socketPath, previousPid, controls);
-  return startDetachedAndWait(socketPath, logPath, controls);
+  return startDetachedAndWait(socketPath, logPath, controls, { pid: previousPid, processStart: previousStart });
+}
+
+function requiredProcessStart(pid: number, controls: DaemonProcessControls): ProcessStartToken {
+  const start = controls.processStart(pid);
+  if (!start) throw new Error('Cannot establish old daemon process start identity; refusing replacement');
+  return start;
 }
 
 async function waitForOwnerRelease(
   socketPath: string,
   expectedPid: number,
+  expectedStart: ProcessStartToken | undefined,
   controls: DaemonProcessControls,
 ): Promise<void> {
   for (;;) {
     const owner = controls.findSocketOwnerPid(socketPath);
-    if (owner === undefined) return;
-    if (owner !== expectedPid) {
+    const state = controls.processState(expectedPid, expectedStart);
+    if (owner === undefined && state === 'dead') return;
+    if (state === 'unknown') throw new Error('Old daemon process exit is unobservable; refusing replacement');
+    if (owner !== undefined && owner !== expectedPid) {
       throw new Error(`Socket ${socketPath} changed ownership from pid=${expectedPid} to pid=${owner}; refusing restart`);
     }
     await controls.delay(100);
@@ -768,7 +840,14 @@ async function startDetachedAndWait(
   socketPath: string,
   logPath: string,
   controls: DaemonProcessControls,
+  previous: Pick<DaemonIdentity, 'pid' | 'processStart'> | undefined = readDaemonIdentity(socketPath),
 ): Promise<DaemonStatusRpcResponse> {
+  if (previous) {
+    // Legacy metadata has no token: observe the current identity conservatively.
+    // Neither listener absence nor child readiness proves old control has died.
+    await waitForOwnerRelease(socketPath, previous.pid,
+      previous.processStart ?? controls.processStart(previous.pid), controls);
+  }
   const child = controls.spawnDaemon(socketPath, logPath);
   let ready = false;
   let childExited = false;

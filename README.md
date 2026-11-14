@@ -38,7 +38,8 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
   `incomplete` means insufficient completion. `failed` and
   `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
   `cancelled` records an explicit stop.
-- **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
+- **Interruptible work.** `daemon deploy` replaces compatible control beside live tasks;
+  explicit `daemon hold` parks work at settled groups for exclusive migration;
   `daemon continue` resumes compatible runs with completed stages, plan, history and remaining budget.
   `task cancel` stops work. Explicit `task resume` continues compatible cancelled, failed or incomplete work after settlement.
   `task retry` requests another launch attempt,
@@ -125,7 +126,7 @@ flowcrew task show <numeric-id>
 ```
 
 `start` runs the dashboard at `http://localhost:3000/` by default; use another terminal for `watch` and `status`.
-Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
+Use `daemon deploy` for compatible control replacement, and explicit `daemon hold` / `daemon continue` for the [exclusive migration procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
 `task resume` (and Dashboard Resume) explicitly continues compatible cancelled, failed or incomplete work,
 preserving completed work and remaining budget. Cancellation stays cancelled until explicit continuation; retry starts fresh after settlement.
 After launch, stages continue under the brief and report unavailable resources at wrap-up. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).

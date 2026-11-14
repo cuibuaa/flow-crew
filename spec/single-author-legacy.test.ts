@@ -1,3 +1,4 @@
+import { selectTaskRuntime } from '../src/build-manifest.js';
 import { createHash } from 'node:crypto';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
@@ -105,6 +106,9 @@ describe('single-author admission and historical competition records', () => {
     writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Retained work inspected.',
       criteria: { criterion_acceptance_criteria_1_b3246557: { status: 'pass', evidence: 'The retained predecessor and new work both completed.' } }, audit_findings: { version: 1, findings: [] } }) }));
     const cli = join(import.meta.dirname, '../dist/cli.js');
+    new TaskRegistry({baseDir:fcGlobalDir()}).create({projectDir:project,run_id:created.runId,brief_text:legacyBrief,
+      brief_admission:readRunState(project,created.runId).briefAdmission,status:'cancelled',
+      runtime:selectTaskRuntime(cli,join(fcGlobalDir(),'runtime'))});
     execFileSync(process.execPath, [cli, 'quick', '--existing-run-id', created.runId, '--project', project,
       '--adapter', 'mock', '--no-campaign', '--acknowledge-brief-warnings'], {
       cwd: project, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures },

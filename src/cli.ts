@@ -30,9 +30,49 @@ const bootstrapName = commandName(bootstrapArgs);
 const bootstrapHelp = !bootstrapArgs.length || bootstrapArgs.some(arg => arg === '--help' || arg === '-h')
   ? commandUsage(bootstrapName) || undefined
   : undefined;
+// Re-enter through the frozen physical module graph before loading configuration,
+// adapters or scheduler code. No new argv/env transport is needed.
+let executionEntry: string | undefined;
+let executionRefused = false;
+if (!bootstrapHelp && bootstrapArgs[0] === 'quick') {
+  try {
+    const parsed = parseCommandArgs('quick', bootstrapArgs);
+    if (!parsed.flags.has('--background')) {
+      const { join, dirname } = await import('node:path');
+      const { TaskRegistry, TASK_LIST_STATUS } = await import('./task-registry.js');
+      const { fcGlobalDir, runsRoot } = await import('./store.js');
+      const { existsSync } = await import('./engine-fs.js');
+      const { selectTaskRuntime, validateTaskRuntime, ExclusiveMigrationRequired } = await import('./build-manifest.js');
+      const runId = parsed.values.get('--existing-run-id');
+      const bound = runId ? new TaskRegistry().list({ status: TASK_LIST_STATUS.ALL }).find(task => task.run_id === runId) : undefined;
+      if (bound?.runtime) executionEntry = validateTaskRuntime(bound.runtime, join(fcGlobalDir(), 'runtime'));
+      else {
+        if (runId && existsSync(runRecordPath(join(runsRoot(), runId), 'run.json'))) {
+          throw new ExclusiveMigrationRequired('existing execution has no frozen runtime reference');
+        }
+        const { fileURLToPath } = await import('node:url');
+        const cliPath = import.meta.url.endsWith('.ts')
+          ? fileURLToPath(new URL('../dist/cli.js', import.meta.url)) : join(import.meta.dirname, 'cli.js');
+        executionEntry = selectTaskRuntime(cliPath, join(fcGlobalDir(), 'runtime')).cliPath;
+      }
+      if (dirname(executionEntry) === import.meta.dirname) executionEntry = undefined;
+    }
+  } catch (error) {
+    console.error(error instanceof CliUsageError
+      ? error.message[0].toUpperCase() + error.message.slice(1)
+      : error instanceof Error ? error.message : String(error));
+    process.exitCode = EXIT_CODE.failed;
+    executionRefused = true;
+  }
+}
 // A status surface invokes this path repeatedly. Keep it ahead of the orchestration imports so
 // rendering does not pay to initialize the scheduler, dashboard, YAML, and adapter modules.
-if (bootstrapHelp !== undefined) {
+if (executionRefused) {
+  // Typed refusal above leaves all execution owners and records untouched.
+} else if (executionEntry) {
+  const { pathToFileURL } = await import('node:url');
+  await import(pathToFileURL(executionEntry).href);
+} else if (bootstrapHelp !== undefined) {
   process.stdout.write(`${bootstrapHelp}\n`);
   process.exitCode = EXIT_CODE.completed;
 } else if (bootstrapArgs[0] === 'fc_tasks') {
@@ -1254,11 +1294,13 @@ async function cmdQuick(preview = false) {
       foregroundOwner: { pid: process.pid, processStart: processStartToken(process.pid) },
       launcher, status: 'running', completed_at: undefined,
     });
-  } else if (launcher && !boundTask) {
+  } else if (!boundTask) {
     const { reserveRun } = await import('./store.js');
     const { processStartToken } = await import('./run-lock.js');
     existingRunId ??= reserveRun(projectDir).runId;
+    const { selectTaskRuntime } = await import('./build-manifest.js');
     foregroundTask = registry.create({
+      runtime: selectTaskRuntime(join(import.meta.dirname, 'cli.js'), join(registry.baseDir, 'runtime')),
       launcher, foregroundOwner: { pid: process.pid, processStart: processStartToken(process.pid) },
       kind: 'quick', name: extractTaskTitle(task) || 'Quick task', brief_text: task,
       brief_admission: briefAdmission, projectDir, run_id: existingRunId, status: 'running', launch_options: launchOptions,

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
-import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
+import { createDaemonIdentity, findUnixSocketOwnerPid, readDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
+import { processLiveness, processStartToken } from '../src/process-liveness.js';
 import { DaemonUnavailableError, sendRpc, type DaemonStatusRpcResponse } from '../src/orchestrator-rpc.js';
 
 describe('daemon start owns and verifies its child', () => {
@@ -35,8 +36,9 @@ describe('daemon start owns and verifies its child', () => {
         if (!spawned) throw new DaemonUnavailableError();
         return status;
       }),
-      findSocketOwnerPid: () => identity.pid,
+      findSocketOwnerPid: () => spawned ? identity.pid : undefined,
       spawnDaemon: vi.fn(() => { spawned = true; return { pid: identity.pid, exited }; }),
+      processStart: () => ({kind:'linux',value:'1'}), processState: () => 'dead',
       processAlive: () => true,
       killProcess: vi.fn(() => exit('SIGKILL')),
       delay: vi.fn(async () => {}),
@@ -45,7 +47,7 @@ describe('daemon start owns and verifies its child', () => {
     const start = () => cmdDaemon(['daemon', 'start', '--socket', socket], {
       distDir: dist, stdout: stream as never, stderr: stream as never, controls,
     });
-    return { controls, start, status, identity, socket, exit, output: () => output };
+    return { controls, start, status, identity, socket, exit, spawned: () => spawned, output: () => output };
   }
 
   it('waits beyond forty 100ms polls for its child to initialize', async () => {
@@ -59,6 +61,57 @@ describe('daemon start owns and verifies its child', () => {
     expect(f.controls.delay).toHaveBeenCalledTimes(45);
     expect(f.output()).toContain(`daemon started at ${f.socket}`);
     expect(f.controls.killProcess).not.toHaveBeenCalled();
+  });
+
+  it('persists the kernel identity of control for later startup fences', () => {
+    const f = fixture();
+    const identity = createDaemonIdentity({ socketPath: f.socket, distDir: join(root, 'dist') });
+    expect(identity.processStart).toEqual(processStartToken(process.pid));
+    expect(identity.processStart).toBeDefined();
+    writeDaemonIdentity(f.socket, identity);
+    expect(readDaemonIdentity(f.socket)?.processStart).toEqual(identity.processStart);
+  });
+
+  it.each(['first', 'dead', 'reused', 'legacy dead'] as const)('still starts with %s recorded ownership', async state => {
+    const f = fixture();
+    const current = processStartToken(process.pid)!;
+    const recorded = { ...current, value: current.kind === 'linux'
+      ? (BigInt(current.value) + 1n).toString() : `${current.value} previous` };
+    if (state === 'first') rmSync(join(root, 'daemon.json'));
+    else if (state !== 'legacy dead') writeDaemonIdentity(f.socket, {
+      ...f.identity, pid: state === 'reused' ? process.pid : f.identity.pid, processStart: recorded,
+    });
+    if (state === 'reused') {
+      expect(processLiveness(process.pid)).toBe('alive');
+      expect(findUnixSocketOwnerPid(f.socket, { platform: 'darwin' })).toBeUndefined();
+    }
+    if (state === 'first' || state === 'reused') {
+      const spawn = f.controls.spawnDaemon;
+      f.controls.spawnDaemon = vi.fn((...args) => {
+        writeDaemonIdentity(f.socket, f.identity);
+        return spawn(...args);
+      });
+    }
+    f.controls.processStart = vi.fn(() => state === 'reused' ? current : undefined);
+    f.controls.processState = vi.fn((pid, start) => {
+      if (state !== 'legacy dead') expect(start).toEqual(recorded);
+      // Reuse is death of the recorded identity, even with a live numeric PID.
+      return state === 'reused' ? processLiveness(pid, start) : 'dead';
+    });
+    expect(await f.start(), f.output()).toBe(0);
+    expect(f.controls.spawnDaemon).toHaveBeenCalledOnce();
+    if (state === 'first') expect(f.controls.processState).not.toHaveBeenCalled();
+    else expect(f.controls.processState).toHaveBeenCalledOnce();
+    if (state === 'reused') expect(f.controls.processStart).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unobservable recorded process before spawning', async () => {
+    const f = fixture();
+    f.controls.processStart = () => undefined;
+    f.controls.processState = () => 'unknown';
+    expect(await f.start()).toBe(1);
+    expect(f.controls.spawnDaemon).not.toHaveBeenCalled();
+    expect(f.output()).toContain('exit is unobservable');
   });
 
   it('preserves a live replacement published when failed initialization releases the socket', async () => {
@@ -120,7 +173,7 @@ describe('daemon start owns and verifies its child', () => {
     const received = deferred<Socket>();
     const closed = deferred<void>();
     f.controls.sendRpc = sendRpc;
-    f.controls.findSocketOwnerPid = () => f.identity.pid;
+    f.controls.findSocketOwnerPid = () => server?.listening ? f.identity.pid : undefined;
     f.controls.spawnDaemon = () => {
       server = net.createServer(peer => {
         peers.add(peer);
@@ -193,7 +246,7 @@ describe('daemon start owns and verifies its child', () => {
     const competitor = f.identity.pid + 1;
     writeDaemonIdentity(f.socket, { ...f.identity, pid: competitor });
     f.status.pid = competitor;
-    f.controls.findSocketOwnerPid = () => competitor;
+    f.controls.findSocketOwnerPid = () => f.spawned() ? competitor : undefined;
     expect(await f.start()).toBe(1);
     expect(f.output()).toContain('different child');
     expect(f.controls.killProcess).toHaveBeenCalledExactlyOnceWith(f.identity.pid, 'SIGKILL');
@@ -202,6 +255,7 @@ describe('daemon start owns and verifies its child', () => {
   it('accepts an existing daemon only when RPC, owner and persisted identity agree', async () => {
     const f = fixture();
     f.controls.sendRpc = async () => f.status;
+    f.controls.findSocketOwnerPid = () => f.identity.pid;
     expect(await f.start()).toBe(0);
     expect(f.output()).toContain('already running');
     expect(f.controls.spawnDaemon).not.toHaveBeenCalled();
@@ -210,6 +264,7 @@ describe('daemon start owns and verifies its child', () => {
   it.each(['socket owner', 'persisted identity'] as const)('refuses an already-running claim with a different %s', async mismatch => {
     const f = fixture();
     f.controls.sendRpc = async () => f.status;
+    f.controls.findSocketOwnerPid = () => f.identity.pid;
     if (mismatch === 'socket owner') f.controls.findSocketOwnerPid = () => f.identity.pid + 1;
     else writeDaemonIdentity(f.socket, { ...f.identity, pid: f.identity.pid + 1 });
     expect(await f.start()).toBe(1);

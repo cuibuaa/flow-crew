@@ -1,3 +1,4 @@
+import { selectTaskRuntime } from '../src/build-manifest.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -103,7 +104,7 @@ it.each([true, false])(
     const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
     const ledgerBeforeCancel = readFileSync(ledgerPath, 'utf8');
     const registry = new TaskRegistry({ baseDir: fixture.root });
-    const task = registry.create({ projectDir: fixture.project, brief_text: brief, brief_admission: admission,
+    const task = registry.create({ runtime:selectTaskRuntime(distCli,join(fixture.root,'runtime')), projectDir: fixture.project, brief_text: brief, brief_admission: admission,
       run_id: run.runId, status: 'deferred', launch_args: ['--adapter', 'mock', '--no-campaign'],
     });
     registry.update(task.id, { not_before: '2099-01-01T00:00:00.000Z', defer_kind: 'wait' });

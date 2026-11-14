@@ -1,12 +1,99 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { cpSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 export const BUILD_MANIFEST_FILENAME = '.flowcrew-build-manifest.json';
 export const BUILD_MANIFEST_VERSION = 1;
+// Release declaration: change this value whenever coexistence is not bilateral.
+export const CONTROL_COMPATIBILITY = 'shared-store-v1';
+const runtimeResources = ['package.json', 'package-lock.json', 'config', 'node_modules', 'skills', 'guide', 'examples'];
+
+export class ExclusiveMigrationRequired extends Error {
+  readonly code = 'EXCLUSIVE_MIGRATION_REQUIRED';
+  constructor(detail: string) {
+    super(`EXCLUSIVE_MIGRATION_REQUIRED: ${detail}. Use daemon hold, daemon hold-status, daemon deploy, then daemon continue for exclusive migration (same FC_HOME and socket).`);
+  }
+}
+
+export interface TaskRuntimeReference { generation: string; cliPath: string }
+
+/** Missing/foreign declarations are readable, never implicit coexistence authority. */
+export function assertControlCompatibility(...manifests: Array<BuildManifest | undefined>): void {
+  if (manifests.some(manifest => manifest?.controlCompatibility !== CONTROL_COMPATIBILITY)) {
+    throw new ExclusiveMigrationRequired('build compatibility is absent or unsupported');
+  }
+}
+
+function retainedResource(root: string, path: string): boolean {
+  const name = portableRelative(root, path);
+  return !['node_modules/.cache', 'node_modules/.vite', 'node_modules/.vite-temp']
+    .some(cache => name === cache || name.startsWith(`${cache}/`));
+}
+
+function resourceRecords(root: string): BuildFileRecord[] {
+  const files: string[] = [];
+  const walk = (path: string, ancestors: Set<string>): void => {
+    if (!retainedResource(root, path)) return;
+    const physical = realpathSync(path);
+    const stat = statSync(path);
+    if (stat.isFile()) files.push(path);
+    else if (stat.isDirectory()) {
+      if (ancestors.has(physical)) throw new Error(`Cyclic runtime resource: ${path}`);
+      const next = new Set([...ancestors, physical]);
+      for (const name of readdirSync(path)) walk(join(path, name), next);
+    } else throw new Error(`Nonregular runtime resource: ${path}`);
+  };
+  for (const resource of runtimeResources) {
+    const path = join(root, resource);
+    if (existsSync(path)) walk(path, new Set());
+  }
+  return files.map(path => hashFile(path, root)).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function assertRuntimeResources(root: string, manifest: BuildManifest): void {
+  const expected = manifest.inputs.files.filter(record => runtimeResources.some(resource =>
+    record.path === resource || record.path.startsWith(`${resource}/`)));
+  assertArtifactRecords(resourceRecords(root), expected, 'Runtime resources');
+}
+
+/** Runtime references can name only an attested physical generation, never public dist. */
+export function validateTaskRuntime(reference: TaskRuntimeReference, runtimeRoot?: string): string {
+  if (!reference || typeof reference.generation !== 'string' || !/^[a-f0-9]{64}$/.test(reference.generation)
+      || typeof reference.cliPath !== 'string' || !isAbsolute(reference.cliPath)
+      || resolve(reference.cliPath) !== reference.cliPath
+      || !reference.cliPath.endsWith(`/.cache/build-generations/${reference.generation}/dist/cli.js`)) {
+    throw new ExclusiveMigrationRequired('task runtime reference is invalid');
+  }
+  try {
+    if (runtimeRoot && reference.cliPath !== join(prospectivePhysicalPath(runtimeRoot), '.cache', 'build-generations', reference.generation, 'dist', 'cli.js')) {
+      throw new Error('runtime reference is outside this task store');
+    }
+    if (realpathSync(reference.cliPath) !== reference.cliPath) throw new Error('runtime path is not physical');
+    const dist = dirname(reference.cliPath);
+    const manifest = readBuildManifest(dist);
+    if (!manifest || manifest.generation !== reference.generation) throw new Error('runtime generation is absent or different');
+    assertBuildArtifactInventory(dist, manifest);
+    assertRuntimeResources(dirname(dist), manifest);
+    assertControlCompatibility(manifest);
+    return reference.cliPath;
+  } catch (error) {
+    throw new ExclusiveMigrationRequired(`task runtime unavailable or modified: ${String(error)}`);
+  }
+}
+
+export function selectTaskRuntime(cliPath: string, runtimeRoot: string): TaskRuntimeReference {
+  const dist = realpathSync(dirname(cliPath));
+  const manifest = readBuildManifest(dist);
+  if (!manifest) throw new ExclusiveMigrationRequired('task build has no manifest');
+  const runtime = dist.endsWith(`/.cache/build-generations/${manifest.generation}/dist`)
+    ? dist : pinBuildRuntime(dist, runtimeRoot);
+  const reference = { generation: manifest.generation, cliPath: join(runtime, 'cli.js') };
+  validateTaskRuntime(reference);
+  return reference;
+}
 
 export interface BuildFileRecord {
   path: string;
@@ -17,6 +104,8 @@ export interface BuildFileRecord {
 export interface BuildManifest {
   version: typeof BUILD_MANIFEST_VERSION;
   generation: string;
+  /** Release-declared bilateral shared-store/control compatibility; absent on legacy builds. */
+  controlCompatibility?: string;
   builtAt: string;
   inputs: {
     algorithm: 'sha256';
@@ -108,6 +197,7 @@ function assertArtifactRecords(actual: BuildFileRecord[], expected: BuildFileRec
 
 export function assertBuildArtifactInventory(distDir: string, manifest: BuildManifest): NonNullable<BuildManifest['artifacts']> {
   const physicalDist = realpathSync(distDir);
+  if (digestRecords(manifest.inputs.files) !== manifest.inputs.hash) throw new Error('Build input inventory digest is invalid');
   const backend = collectBuildArtifacts(physicalDist, true);
   const ui = collectBuildArtifacts(join(physicalDist, '..', 'ui', 'dist'));
   const backendByPath = new Map(backend.map((record) => [record.path, record]));
@@ -131,7 +221,7 @@ export function assertBuildArtifactInventory(distDir: string, manifest: BuildMan
   assertArtifactRecords(ui, manifest.artifacts?.ui ?? manifest.ui?.outputs ?? [], 'UI');
   if (manifest.uiPresence === 'required' && !manifest.ui) throw new Error('UI presence requires UI outputs');
   if (manifest.uiPresence === 'absent' && (manifest.ui || ui.length)) throw new Error('UI absence attestation conflicts with served outputs');
-  if (generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts) !== manifest.generation) {
+  if (generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts, manifest.controlCompatibility) !== manifest.generation) {
     throw new Error('dist manifest generation digest is invalid');
   }
   return { backend, ui };
@@ -161,8 +251,9 @@ export function collectBuildInputRecords(projectRoot: string): BuildFileRecord[]
       if (existsSync(path)) paths.push(path);
     }
   }
+  for (const record of resourceRecords(root)) paths.push(join(root, record.path));
   for (const directory of directories.slice(1)) paths.push(...collectRegularFiles(directory, () => true));
-  return paths
+  return [...new Set(paths)]
     .map((path) => hashFile(path, root))
     .sort((left, right) => left.path.localeCompare(right.path));
 }
@@ -229,10 +320,11 @@ export function createBuildManifest(
   }
   const uiPresence = ui ? 'required' : 'absent';
   const artifacts = { backend: outputs, ui: ui?.outputs ?? [] };
-  const generation = generationDigest(inputs.hash, outputs, ui, uiPresence, artifacts);
+  const generation = generationDigest(inputs.hash, outputs, ui, uiPresence, artifacts, CONTROL_COMPATIBILITY);
   return {
     version: BUILD_MANIFEST_VERSION,
     generation,
+    controlCompatibility: CONTROL_COMPATIBILITY,
     builtAt: options.builtAt ?? new Date().toISOString(),
     inputs,
     outputs,
@@ -243,11 +335,12 @@ export function createBuildManifest(
 }
 
 function generationDigest(inputs: string, outputs: BuildFileRecord[], ui?: BuildManifest['ui'],
-  uiPresence?: BuildManifest['uiPresence'], artifacts?: BuildManifest['artifacts']): string {
+  uiPresence?: BuildManifest['uiPresence'], artifacts?: BuildManifest['artifacts'], controlCompatibility?: string): string {
   return createHash('sha256').update(`${inputs}\n${digestRecords(outputs)}`
     + (ui ? `\nui:${digestRecords(ui.outputs)}` : '')
     + (uiPresence ? `\nui-presence:${uiPresence}` : '')
-    + (artifacts ? `\nartifacts:${digestRecords(artifacts.backend)}:${digestRecords(artifacts.ui)}` : '')).digest('hex');
+    + (artifacts ? `\nartifacts:${digestRecords(artifacts.backend)}:${digestRecords(artifacts.ui)}` : '')
+    + (controlCompatibility !== undefined ? `\ncontrol-compatibility:${controlCompatibility}` : '')).digest('hex');
 }
 
 function isFileRecord(value: unknown): value is BuildFileRecord {
@@ -268,6 +361,7 @@ export function isBuildManifest(value: unknown): value is BuildManifest {
   if (!value || typeof value !== 'object') return false;
   const manifest = value as Partial<BuildManifest>;
   return manifest.version === BUILD_MANIFEST_VERSION
+    && (manifest.controlCompatibility === undefined || typeof manifest.controlCompatibility === 'string')
     && typeof manifest.generation === 'string'
     && /^[a-f0-9]{64}$/.test(manifest.generation)
     && typeof manifest.builtAt === 'string'
@@ -368,7 +462,7 @@ function validateManifestForPublication(
   } else if (existsSync(join(projectRoot, 'ui', 'package.json'))) {
     throw new Error('Refusing to publish backend-only identity for a UI checkout');
   }
-  const generation = generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts);
+  const generation = generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, manifest.uiPresence, manifest.artifacts, manifest.controlCompatibility);
   if (generation !== manifest.generation) {
     throw new Error('Refusing to publish a manifest with an invalid generation digest');
   }
@@ -467,7 +561,7 @@ function copyBuildPayload(dist: string, ui: string | undefined, target: string, 
   assertBuildArtifactInventory(join(target, 'dist'), manifest);
 }
 
-/** Pin only a daemon's runtime. Rebuilds never publish into this owner. */
+/** Pin engine bytes and resource/dependency roots for control and task consumers. */
 export function pinBuildRuntime(distDir: string, runtimeRoot: string): string {
   distDir = realpathSync(distDir);
   ensurePrivateBuildStaging(runtimeRoot, [distDir, join(distDir, '..', 'ui', 'dist')]);
@@ -494,23 +588,21 @@ function publishRuntimeGeneration(options: PublishBuildOptions & {
   const previous = existsSync(distDir) ? realpathSync(distDir) : undefined;
   mkdirSync(generations, { recursive: true });
   try {
-    copyBuildPayload(stagedDistDir, stagedUiDir, temporary, manifest);
-    for (const resource of ['package.json', 'config']) {
-      const source = join(projectRoot, resource);
-      if (existsSync(source)) cpSync(source, join(temporary, resource), { recursive: true });
-    }
-    for (const resource of ['node_modules', 'skills', 'guide', 'examples']) {
-      const source = join(projectRoot, resource);
-      if (existsSync(source)) symlinkSync(source, join(temporary, resource));
-    }
-    symlinkSync(projectRoot, join(temporary, '.project-root'));
-    options.onPhase?.('generation_prepared', manifest.generation);
     if (existsSync(generationRoot)) {
-      // An identical rebuild reuses the immutable bytes; modified generations
-      // are refused rather than silently repaired under a running process.
       assertBuildArtifactInventory(join(generationRoot, 'dist'), manifest);
+      assertRuntimeResources(generationRoot, manifest);
       if (join(generationRoot, 'dist') === previous) return manifest;
-    } else renameSync(temporary, generationRoot);
+    } else {
+      copyBuildPayload(stagedDistDir, stagedUiDir, temporary, manifest);
+      for (const resource of runtimeResources) {
+        const source = join(projectRoot, resource);
+        if (existsSync(source)) cpSync(source, join(temporary, resource), { recursive: true, dereference: true, filter: source => retainedResource(projectRoot, source) });
+      }
+      assertRuntimeResources(temporary, manifest);
+      symlinkSync(projectRoot, join(temporary, '.project-root'));
+      options.onPhase?.('generation_prepared', manifest.generation);
+      renameSync(temporary, generationRoot);
+    }
     symlinkSync(generationRoot, nextLink);
     // Initial conversion requires the old daemon to be stopped. Afterwards
     // both stable public links follow the same atomically selected generation.
@@ -526,10 +618,6 @@ function publishRuntimeGeneration(options: PublishBuildOptions & {
     }
     renameSync(nextLink, selected);
     options.onPhase?.('manifest_committed', manifest.generation);
-    for (const entry of readdirSync(generations)) {
-      const root = join(generations, entry);
-      if (root !== generationRoot && join(root, 'dist') !== previous) rmSync(root, { recursive: true, force: true });
-    }
     return manifest;
   } finally {
     rmSync(nextLink, { force: true });

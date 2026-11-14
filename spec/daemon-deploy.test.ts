@@ -1,10 +1,11 @@
 import './test-support/policy-runtime.js';
+import { reattestCompatibility } from './test-support/manifest-compatibility.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
-import { BUILD_MANIFEST_FILENAME, createBuildManifest, expectedBuildOutputs } from '../src/build-manifest.js';
+import { BUILD_MANIFEST_FILENAME, createBuildManifest, expectedBuildOutputs, pinBuildRuntime } from '../src/build-manifest.js';
 import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
 import { markDeploymentStopping, readDeploymentHold, releaseDeploymentHold, requestDeploymentHold } from '../src/deployment-hold.js';
 import { DaemonUnavailableError, RpcOutcomeUnknownError, type DaemonStatusRpcResponse, type RpcResponse } from '../src/orchestrator-rpc.js';
@@ -30,7 +31,7 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-function fixture() {
+function fixture(exclusive = true) {
   const project = join(scratch, 'checkout');
   const dist = join(project, 'dist');
   const socket = join(fcGlobalDir(), 'daemon.sock');
@@ -48,10 +49,11 @@ function fixture() {
     return manifest;
   };
   publish(1);
+  const oldDist = pinBuildRuntime(dist, join(fcGlobalDir(), 'runtime'));
   const f = {
     project, dist, socket, publish,
     owner: oldPid as number | undefined,
-    identity: createDaemonIdentity({ socketPath: socket, distDir: dist, pid: oldPid, startedAt: oldStartedAt }),
+    identity: createDaemonIdentity({ socketPath: socket, distDir: oldDist, pid: oldPid, startedAt: oldStartedAt }),
     events: [] as string[],
     output: '', error: '',
     pendingHold: 0,
@@ -90,10 +92,12 @@ function fixture() {
     },
     findSocketOwnerPid: () => f.owner,
     processAlive: () => false,
+    processStart: () => ({ kind: 'linux', value: '1' }),
+    processState: () => f.owner === oldPid ? 'alive' : 'dead',
     build: async (target) => {
       f.events.push('build');
       expect(target).toBe(project);
-      expect(f.owner).toBeUndefined();
+      expect(f.owner).toBe(exclusive ? undefined : oldPid);
       expect(readDeploymentHold()?.releasedAt).toBeUndefined();
       if (f.failBuild) throw new Error('fixture compiler failure');
       publish(2);
@@ -111,11 +115,14 @@ function fixture() {
     killProcess: () => { throw new Error('Deployment must not signal a consumer'); },
     delay: async () => { f.events.push('delay'); f.onDelay(); },
   };
-  const run = (timeout = 1000) => cmdDaemon(['daemon', 'deploy', '--socket', socket, '--timeout-ms', String(timeout)], {
+  const run = (timeout = 1000) => {
+    if (exclusive) requestDeploymentHold();
+    return cmdDaemon(['daemon', 'deploy', '--socket', socket, '--timeout-ms', String(timeout)], {
     distDir: dist, controls,
     stdout: { write: (text: string) => { f.output += text; } } as never,
     stderr: { write: (text: string) => { f.error += text; } } as never,
   });
+  };
   return Object.assign(f, { run, controls });
 }
 
@@ -129,7 +136,49 @@ function expectHeldFailure(f: ReturnType<typeof fixture>, step: string) {
   expect(f.events).not.toContain('rpc:continue');
 }
 
-describe('daemon deployment through the durable hold', () => {
+describe('explicit migration through the durable hold', () => {
+  it.each(['standalone start', 'exclusive recovery'] as const)('%s fences startup on recorded old-process death after listener release', async entrance => {
+    const f = fixture();
+    f.owner = undefined; // stop closed its listener, but control has not exited.
+    markDeploymentStopping(requestDeploymentHold());
+    let alive = true;
+    let observed!: () => void;
+    const checked = new Promise<'checked'>(done => { observed = () => done('checked'); });
+    let spawned!: () => void;
+    const launched = new Promise<'spawned'>(done => { spawned = () => done('spawned'); });
+    let release!: () => void;
+    const barrier = new Promise<void>(done => { release = done; });
+    const observations: unknown[] = [];
+    f.controls.processState = (pid, start) => {
+      observations.push([pid, start]);
+      observed();
+      return alive ? 'alive' : 'dead';
+    };
+    f.controls.delay = async () => { await barrier; };
+    const spawn = f.controls.spawnDaemon;
+    f.controls.spawnDaemon = (...args) => {
+      spawned();
+      return spawn(...args);
+    };
+    const pending = entrance === 'exclusive recovery' ? f.run() : cmdDaemon(['daemon', 'start', '--socket', f.socket], {
+      distDir: f.dist, controls: f.controls,
+      stdout: { write: (text: string) => { f.output += text; } } as never,
+      stderr: { write: (text: string) => { f.error += text; } } as never,
+    });
+    try {
+      // A spawn event loses immediately; no elapsed observation grants a pass.
+      expect(await Promise.race([checked, launched, pending.then(() => 'settled')])).toBe('checked');
+      expect(observations).toEqual([[oldPid, { kind: 'linux', value: '1' }]]);
+      expect(f.events).not.toContain('spawn');
+    } finally {
+      alive = false;
+      release();
+      await pending;
+    }
+    expect(await pending, f.error).toBe(0);
+    expect(f.events).toContain('spawn');
+  });
+
   it('holds, retires, builds, proves the new identity/generation, then continues', async () => {
     const f = fixture();
     expect(await f.run(), f.error).toBe(0);
@@ -363,3 +412,128 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
 }
+
+
+describe('compatible deployment beside live work', () => {
+  it('builds while old control serves, then replaces without hold or continue', async () => {
+    const f = fixture(false);
+    expect(await f.run(), f.error).toBe(0);
+    expect(f.events.indexOf('build')).toBeLessThan(f.events.indexOf('rpc:stop'));
+    expect(f.events).not.toContain('rpc:hold');
+    expect(f.events).not.toContain('rpc:continue');
+    expect(readDeploymentHold()).toBeUndefined();
+    expect(f.output).toContain('FRESH:');
+  });
+
+  it('refuses a tampered retained target runtime before stopping old control', async () => {
+    const f=fixture(false);
+    f.onBuild=()=>{
+      const runtime=pinBuildRuntime(f.dist,join(fcGlobalDir(),'runtime'));
+      const manifestPath=join(runtime,BUILD_MANIFEST_FILENAME);
+      const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
+      manifest.controlCompatibility='tampered';
+      writeFileSync(manifestPath,JSON.stringify(manifest));
+    };
+    expect(await f.run()).toBe(1);
+    expect(f.error).toContain('EXCLUSIVE_MIGRATION_REQUIRED');
+    expect(f.events).not.toContain('rpc:stop');
+    expect(f.owner).toBe(oldPid);
+  });
+
+  it('a failed compatible build leaves the old control serving', async () => {
+    const f = fixture(false); f.failBuild = true;
+    expect(await f.run()).toBe(1);
+    expect(f.owner).toBe(oldPid);
+    expect(f.events).not.toContain('rpc:stop');
+    expect(f.events).not.toContain('spawn');
+    expect(readDeploymentHold()).toBeUndefined();
+  });
+
+  it('does not authorize a new owner from listener absence while old process lives', async () => {
+    const f = fixture(false);
+    let alive = true;
+    f.controls.processState = () => alive ? 'alive' : 'dead';
+    f.onDelay = () => {
+      expect(f.events).not.toContain('spawn');
+      expect(f.owner).toBeUndefined();
+      alive = false;
+    };
+    expect(await f.run(), f.error).toBe(0);
+    expect(f.events).toContain('delay');
+  });
+
+  it('unknown process identity refuses replacement', async () => {
+    const f = fixture(false); f.controls.processStart = () => undefined;
+    expect(await f.run()).toBe(1);
+    expect(f.events).not.toContain('rpc:stop');
+    expect(f.owner).toBe(oldPid);
+  });
+
+  it('a lost stop reply uses exact old process death, without replaying work', async () => {
+    const f = fixture(false); const send = f.controls.sendRpc;
+    f.controls.sendRpc = async (...args) => {
+      const response = await send(...args);
+      if (args[1].cmd === 'stop') throw new RpcOutcomeUnknownError('lost reply');
+      return response;
+    };
+    expect(await f.run(), f.error).toBe(0);
+    expect(f.events.filter(event => event === 'rpc:stop')).toHaveLength(1);
+  });
+
+  it.each([{status:'running'}, {status:'pending',launch:2}])('a legacy %j record without execution binding gets a typed migration refusal', async record => {
+    const f=fixture(false);
+    writeFileSync(join(fcGlobalDir(),'tasks.jsonl'),JSON.stringify({id:1,projectDir:f.project,...record})+'\n');
+    expect(await f.run()).toBe(1);
+    expect(f.error).toContain('EXCLUSIVE_MIGRATION_REQUIRED');
+    expect(f.error).toContain('hold-status');
+    expect(f.events).not.toContain('build');
+    expect(f.events).not.toContain('rpc:stop');
+  });
+
+  it('old task records remain listable but require explicit migration', async () => {
+    const f = fixture(false);
+    writeFileSync(join(fcGlobalDir(), 'tasks.jsonl'), JSON.stringify({ id: 1, status: 'running', projectDir: f.project, run_id: 'bound' }) + '\n');
+    expect(await f.run()).toBe(1);
+    expect(f.error).toContain('EXCLUSIVE_MIGRATION_REQUIRED');
+    expect(f.error).toContain('hold-status');
+    expect(f.events).not.toContain('build');
+    expect(f.events).not.toContain('rpc:stop');
+  });
+});
+
+
+it.each([undefined,'foreign-release','unknown'])('ordinary deploy refuses attested compatibility %s before stopping old control', async compatibility=>{
+  const f=fixture(false);
+  f.onBuild=()=>{
+    const path=join(f.dist,BUILD_MANIFEST_FILENAME);
+    const manifest=JSON.parse(readFileSync(path,'utf8'));
+    writeFileSync(path,JSON.stringify(reattestCompatibility(manifest,compatibility)));
+  };
+  expect(await f.run()).toBe(1);
+  expect(f.error).toContain('EXCLUSIVE_MIGRATION_REQUIRED');
+  for (const command of ['hold','hold-status','continue']) expect(f.error).toContain(command);
+  expect(f.owner).toBe(oldPid);
+  expect(f.events).not.toContain('rpc:stop');
+  expect(f.events).not.toContain('spawn');
+});
+
+it('serves terminal legacy task records without granting them execution compatibility', async()=>{
+  const f=fixture(false);
+  writeFileSync(join(fcGlobalDir(),'tasks.jsonl'),JSON.stringify({id:1,status:'done',projectDir:f.project,run_id:'historic',started_at:oldStartedAt})+'\n');
+  expect(await f.run(),f.error).toBe(0);
+});
+
+
+it.each([undefined,'foreign-release','unknown'])('old control manifest compatibility %s is readable but refuses ordinary replacement', async compatibility=>{
+  const f=fixture(false), dist=f.identity.distDir!;
+  const path=join(dist,BUILD_MANIFEST_FILENAME);
+  writeFileSync(path,JSON.stringify(reattestCompatibility(JSON.parse(readFileSync(path,'utf8')),compatibility)));
+  f.identity=createDaemonIdentity({socketPath:f.socket,distDir:dist,pid:oldPid,startedAt:oldStartedAt});
+  writeDaemonIdentity(f.socket,f.identity);
+  expect(await f.run()).toBe(1);
+  expect(f.error).toContain('EXCLUSIVE_MIGRATION_REQUIRED');
+  expect(f.error).toContain('hold-status');
+  expect(f.events).not.toContain('build');
+  expect(f.events).not.toContain('rpc:stop');
+  expect(f.owner).toBe(oldPid);
+});

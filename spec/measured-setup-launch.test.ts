@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import './test-support/unit-task-runtime.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

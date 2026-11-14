@@ -32,7 +32,8 @@ function fixtureGeneration(manifest: BuildManifest): string {
   return createHash('sha256').update(`${manifest.inputs.hash}\n${recordsDigest(manifest.outputs)}`
     + (manifest.ui ? `\nui:${recordsDigest(manifest.ui.outputs)}` : '')
     + `\nui-presence:${manifest.uiPresence}`
-    + `\nartifacts:${recordsDigest(manifest.artifacts!.backend)}:${recordsDigest(manifest.artifacts!.ui)}`).digest('hex');
+    + `\nartifacts:${recordsDigest(manifest.artifacts!.backend)}:${recordsDigest(manifest.artifacts!.ui)}`
+    + (manifest.controlCompatibility !== undefined ? `\ncontrol-compatibility:${manifest.controlCompatibility}` : '')).digest('hex');
 }
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -139,7 +140,7 @@ describe('one backend and UI build identity', () => {
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('incomplete or modified backend generation');
   });
 
-  it('pins complete generations and retains exactly the current and previous runtime', () => {
+  it('pins complete generations and retains every runtime until explicit cleanup', () => {
     const f = fixture();
     const runtimeRoot = join(dirname(f.root), 'daemon/runtime');
     const publishAndPin = (value: number) => {
@@ -158,8 +159,8 @@ describe('one backend and UI build identity', () => {
     const generations = join(runtimeRoot, '.cache/build-generations');
     expect(readdirSync(generations).sort()).toEqual([first.manifest.generation, second.manifest.generation].sort());
     const third = publishAndPin(3);
-    expect(readdirSync(generations).sort()).toEqual([second.manifest.generation, third.manifest.generation].sort());
-    expect(existsSync(first.runtime)).toBe(false);
+    expect(readdirSync(generations).sort()).toEqual([first.manifest.generation, second.manifest.generation, third.manifest.generation].sort());
+    expect(existsSync(first.runtime)).toBe(true);
     expect(readFileSync(join(second.runtime, 'entry.js'), 'utf8')).toContain('value = 2');
   });
 

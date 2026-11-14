@@ -34,6 +34,10 @@ beforeEach(() => {
   setFcGlobalDir(join(root, 'control'));
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
   runDir = join(root, 'control', 'runs', created.runId);
+  // Keep the project below the fixture Git fence, but give socket aliases the
+  // already admitted shorter parent rather than another invocation prefix.
+  const adapterScratchParent=dirname(tmpdir());
+  for (const name of ['TMPDIR','TMP','TEMP']) vi.stubEnv(name,adapterScratchParent);
   vi.stubEnv('HOME', join(root, 'home'));
   vi.stubEnv('USERPROFILE', join(root, 'home'));
   vi.stubEnv('CODEX_HOME', join(root, 'source'));

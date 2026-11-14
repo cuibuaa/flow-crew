@@ -1,3 +1,5 @@
+import { selectTaskRuntime } from '../src/build-manifest.js';
+import { TaskRegistry } from '../src/task-registry.js';
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawnSync } from 'node:child_process';
@@ -83,6 +85,8 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
       state.status = 'failed'; state.currentIteration = 1; state.maxIterations = 1; state.maxRetries = 0;
       state.taskDescription = brief; state.briefAdmission = admission; state.completedAt = new Date().toISOString();
     });
+    new TaskRegistry({baseDir:isolated.fcHome}).create({projectDir:project,run_id:created.runId,brief_text:brief,
+      brief_admission:admission,status:'failed',runtime:selectTaskRuntime(join(repositoryRoot,'dist/cli.js'),join(isolated.fcHome,'runtime'))});
     const before = readRunState(project, created.runId);
     const roles = join(project, 'config/agents'); mkdirSync(roles, { recursive: true });
     writeFileSync(join(roles, 'coder.yaml'), 'name: coder\ndescription: fixture\nmodel: default\nreasoning_effort: low\ntools: []\nprompt: fixture\n');

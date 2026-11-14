@@ -1,4 +1,5 @@
 import { mockEntryPlan } from './test-support/planner-entry.js';
+import { validateTaskRuntime } from '../src/build-manifest.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -143,9 +144,11 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
   const tasks = registry.list({ status: 'all' });
   expect(tasks).toHaveLength(1);
   const task = tasks[0];
+  expect(validateTaskRuntime(task.runtime!,join(engine,'runtime'))).toBe(task.runtime!.cliPath);
+  expect(task.runtime!.cliPath).toContain(`/.cache/build-generations/${task.runtime!.generation}/dist/cli.js`);
   expect(task).toMatchObject({ status: 'done', foregroundOwner: { pid: child.pid }, launcher: { frontend, sessionId: 'own-session' } });
   const run = JSON.parse(readFileSync(runRecordPath(join(engine, 'runs', task.run_id!), 'run.json'), 'utf8'));
-  expect(run).toMatchObject({ status: 'complete', engineCheckpoint: { pid: child.pid } });
+  expect(run).toMatchObject({ status: 'complete', engineCheckpoint: { pid: child.pid, generation:task.runtime!.generation } });
   const entries = publicTaskEntries(readTaskLedger(ledger, 'own-session'));
   expect(entries).toHaveLength(1);
   expect(entries[0]).toMatchObject({ status: 'in_progress', flowcrewTaskId: task.id });

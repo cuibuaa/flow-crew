@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import './test-support/unit-task-runtime.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

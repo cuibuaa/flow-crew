@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import './test-support/unit-task-runtime.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

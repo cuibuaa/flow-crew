@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 59 -->
+<!-- flowcrew-skill-revision: 62 -->
 
 # Ship a conversation to FlowCrew
 
@@ -248,3 +248,27 @@ chooses the experiments and exploration and owns the verdict; no preliminary dec
 
 Scheduler retry context contains recorded facts and admission reports. The run-wide admission
 refusal budget survives replanning and resume; operator guidance retains its addressed delivery.
+
+
+## Control deployment
+
+Ordinary `daemon deploy` builds and pins a declared compatible runtime while old
+control serves, then replaces only control after proving exact old-process exit.
+Live tasks retain their process, attempt, admitted plan and frozen engine runtime,
+including recovery. A failed build leaves old control serving. Status FRESH proves
+control identity, not that surviving tasks loaded the new engine.
+
+Missing, different or unknown manifest compatibility and old unpinned task records
+require explicit exclusive migration: `daemon hold`, `daemon hold-status`, then
+`daemon deploy` with that hold active and continuation checks intact. First rollout
+and rollback to a build without the declaration require that procedure. A hold
+provides exclusivity, not automatic record conversion. Validated continuation
+stores a legacy run's first reference before
+releasing its current active hold; historical releases never authorize selection
+during recovery. Interrupted continuation retains the stored reference.
+Unregistered foreground runs without a runtime reference refuse with
+`EXCLUSIVE_MIGRATION_REQUIRED` after continue and need a separately supported migration.
+Keep every referenced runtime, including newer task runtimes after rollback; cleanup is manual and must
+exclude selected, live, unknown, recoverable and shim/child references. External
+Node/provider tools and project commands remain outside the engine snapshot.
+See [operations](../guide/operations.md#deploy-while-tasks-are-in-flight).

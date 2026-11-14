@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import './test-support/unit-task-runtime.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import * as bootFacts from '../src/checkpoint-liveness.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1245,7 +1246,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(registry.readRecentTicks(task.id).some((l) => l.includes('adopted live unit'))).toBe(true);
   });
 
-  it('joins an owned backend sweep before stop resolves, so teardown has no late writer', async () => {
+  it('stops control without joining an owned backend sweep', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
     let entered!: () => void, release!: () => void;
     const entering = new Promise<void>(resolve => { entered = resolve; });
@@ -1259,8 +1260,8 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     await entering;
     let stopped = false;
     const stopping = orchestrator.stop().then(() => { stopped = true; });
-    await Promise.resolve();
-    expect(stopped).toBe(false);
+    await stopping;
+    expect(stopped).toBe(true);
     release();
     await Promise.all([tick, stopping]);
     expect(registry.get(task.id)?.status).toBe('running');

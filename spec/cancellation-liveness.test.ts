@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import './test-support/unit-task-runtime.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';

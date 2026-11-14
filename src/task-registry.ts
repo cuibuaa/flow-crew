@@ -1,3 +1,4 @@
+import type { TaskRuntimeReference } from './build-manifest.js';
 import type { EndingCause } from './attempt-ending.js';
 import { createHash } from 'node:crypto';
 import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeSync } from './engine-fs.js';
@@ -72,6 +73,8 @@ export function normalizeTaskEntry(raw: TaskEntry & {
 export interface TaskEntry {
   /** Explicit launch-side address; never inherited from a daemon/worker. */
   launcher?: LaunchTarget;
+  /** Engine generation and physical entry frozen before the first execution. */
+  runtime?: TaskRuntimeReference;
   /** The foreground CLI owns execution and push until this exact process exits. */
   foregroundOwner?: { pid: number; processStart?: ProcessStartToken };
   id: number;
@@ -125,6 +128,7 @@ export function sessionTaskIndexPath(baseDir: string, launcher: Pick<LaunchTarge
 export interface TaskCreateInput {
   launcher?: LaunchTarget;
   foregroundOwner?: TaskEntry['foregroundOwner'];
+  runtime?: TaskRuntimeReference;
   name?: string;
   kind?: 'quick';
   brief_path?: string;
@@ -352,6 +356,7 @@ export class TaskRegistry {
       const entry: TaskEntry = normalizeTaskEntry({
         launcher: input.launcher,
         foregroundOwner: input.foregroundOwner,
+        runtime: input.runtime,
         id,
         name,
         kind: 'quick',
@@ -419,6 +424,9 @@ export class TaskRegistry {
       }
       const current = registry.tasks.get(id);
       if (!current) throw new Error(`Task not found: ${id}`);
+      if (current.runtime && Object.hasOwn(patch, 'runtime') && !isDeepStrictEqual(current.runtime, patch.runtime)) {
+        throw new Error('Task runtime is frozen at first execution');
+      }
       const next = this.externalizeInlineBrief({
         ...current,
         ...patch,

@@ -1,3 +1,4 @@
+import { selectTaskRuntime } from '../src/build-manifest.js';
 import './test-support/policy-runtime.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
 import { runRecordPath } from '../src/run-layout.js';
@@ -298,7 +299,7 @@ describe('durable daemon boundary', () => {
       registry,
       systemd,
       git: new NoopGit(),
-      cliPath: join(repositoryRoot, 'src', 'cli.ts'),
+      cliPath: join(repositoryRoot, 'dist', 'cli.js'),
       isProjectBusy: () => null,
     });
     await expect(orchestrator.register({ brief_text: 'unchecked prose', projectDir }))
@@ -587,6 +588,7 @@ describe('quick and operator entry behavior', () => {
       stages: {},
     }), 'utf-8');
 
+    bindExistingRuntime(isolated,runId,brief);
     const missing = runQuickSync(isolated, [
       'quick', '--existing-run-id', runId, '--project', isolated.project,
       '--adapter', 'mock',
@@ -712,6 +714,7 @@ describe('quick and operator entry behavior', () => {
       stages: {},
     }), 'utf-8');
 
+    bindExistingRuntime(isolated,runId,brief);
     const result = runQuickSync(isolated, [
       'quick',
       '--task', brief,
@@ -796,6 +799,12 @@ function cliFixture(): CliFixture {
   writeFileSync(stub, '#!/bin/sh\nexit 0\n', 'utf-8');
   chmodSync(stub, 0o755);
   return { root, home, fcHome, project, bin };
+}
+
+function bindExistingRuntime(isolated: CliFixture, runId: string, brief: string) {
+  new TaskRegistry({baseDir:isolated.fcHome}).create({projectDir:isolated.project,run_id:runId,brief_text:brief,
+    brief_admission:explicitAdmission(brief),status:'failed',
+    runtime:selectTaskRuntime(join(repositoryRoot,'dist/cli.js'),join(isolated.fcHome,'runtime'))});
 }
 
 function runQuickSync(isolated: CliFixture, quickArgs: string[]) {

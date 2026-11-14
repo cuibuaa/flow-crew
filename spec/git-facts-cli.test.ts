@@ -14,6 +14,13 @@ const fixture = vi.hoisted(() => ({
   pushes: [] as string[], backendCalls: 0, generated: undefined as WrittenBrief | undefined,
   setupExit: 1, emptySetup: false, setupCalls: [] as string[][], launches: [] as BriefAdmissionRecord[],
 }));
+// The CLI and scheduler are in-process policy stubs here. Keep the new runtime
+// boundary on that same module graph; native pinning has separate process tests.
+vi.mock('../src/build-manifest.js', async original => ({
+  ...await original<typeof import('../src/build-manifest.js')>(),
+  selectTaskRuntime: () => ({generation:'f'.repeat(64),cliPath:new URL('../src/cli.js',import.meta.url).pathname}),
+  validateTaskRuntime: (runtime: {cliPath:string}) => runtime.cliPath,
+}));
 vi.mock('node:child_process', async original => {
   const actual = await original<typeof import('node:child_process')>();
   return { ...actual,
@@ -142,6 +149,12 @@ it('foreground scheduler termination preserves the running task and never sends 
     stages: { work: { status: 'pending', retries: 0 } } }));
   writeFileSync(join(directory, 'engine', 'workflow.yaml'), stringify(workflow));
   writeFileSync(join(directory, 'engine', 'task_brief.md'), brief);
+  const {TaskRegistry: Registry}=await import('../src/task-registry.js');
+  new Registry().create({projectDir:project,run_id:'prior',status:'failed',brief_text:brief,
+    brief_admission:createBriefAdmission(inspectBrief(brief),{kind:'not_required'}),
+    runtime:{generation:'f'.repeat(64),cliPath:new URL('../src/cli.js',import.meta.url).pathname},
+    foregroundOwner:{pid:2147483647},launcher:{frontend:'codex',sessionId:'fixture',cwd:process.env.FLOWCREW_VITEST_ROOT!,
+      ledgerRoot:join(process.env.FLOWCREW_VITEST_ROOT!,'ledger')}});
   process.argv = [process.execPath, 'fixture-cli', 'quick', '--project', project, '--existing-run-id', 'prior',
     '--adapter', 'mock', '--no-campaign', '--acknowledge-brief-warnings'];
   fixture.git.answer = args => args[0] === 'diff' && args.includes('--binary')

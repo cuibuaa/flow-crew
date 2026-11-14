@@ -233,8 +233,8 @@ including frozen-input protection within an otherwise writable directory.
 
 Before deployment, prepare independent dependency files, review project topology
 and cache declarations, verify bridge prerequisites, and obtain the normal
-engine-owned build/test/lint validation. Use the existing deployment hold and
-generation procedure below; inspect a **new** run's capability and its launch
+engine-owned build/test/lint validation. Follow the compatible replacement or
+explicit migration procedure below, as declared by the release; inspect a **new** run's capability and its launch
 receipt afterward. The measurements and current validation limits are in the
 [write-grant report](../docs/write-grant/report.md).
 
@@ -328,7 +328,8 @@ available. Admission and restoration share the existing lock primitive, and laun
 release retains the last project owner. This fences delayed candidate writes without
 reintroducing research-report ordering or recovery publication.
 Explicit resume can continue safely settled work after ownership and compatibility checks.
-Use the deployment hold below to let current stage work settle normally before deployment.
+Use the explicit deployment hold below when migration requires stage settlement.
+Compatible control replacement needs no hold.
 
 Explicitly continue a registered task's cancelled, failed or incomplete run by task ID:
 
@@ -367,42 +368,51 @@ Sources: [historical inbox reader](../src/inbox.ts),
 
 ## Deploy while tasks are in flight
 
-**First upgrade across the RPC command/reply change (0.11.0):** use
-`daemon hold` (old CLI) → `daemon stop` (old CLI) → build → `daemon start`
-(new CLI) → `daemon continue` (new CLI). Run each as a separate invocation from
-the deployment checkout, using the same `FC_HOME` and socket throughout:
+Ordinary deployment builds and pins a declared compatible generation while the old
+control daemon serves. It then retires the exact old process, proves its PID/start
+identity has exited, starts the replacement and verifies FRESH/generation. Existing
+tasks keep their original supervised process, attempt, admitted plan and engine
+runtime. They do not park or re-admit work for this operation.
 
 ```bash
-flowcrew daemon hold       # old CLI: require exit 0 and ready: true
-flowcrew daemon stop       # old CLI: wait for old daemon/socket retirement
-npm run build              # daemon stopped; publishes the new CLI and daemon
-flowcrew daemon start      # new CLI: require verified startup
-flowcrew daemon continue   # new CLI: require released: true and no errors
-```
-
-Stop at any refusal or unknown outcome and inspect state before retrying. The old CLI's
-`daemon deploy` cannot read the new daemon's `{ok:true,result}` replies; renamed RPC
-commands have no compatibility aliases. New-client cancel requests to a still-running
-old daemon fail as not-found until restart. The durable hold remains active across the
-stop/build/start boundary. Once both CLI and daemon use the new protocol, use the regular
-`daemon deploy` procedure below.
-
-Use an engine with `daemon deploy` support for this procedure. Upgrading an older engine
-that lacks the command still requires retiring its consumers first. Select the same
-`FC_HOME` and daemon socket for every command. The hold is durable in that state root,
-survives daemon restart, and fences both registered launches and foreground schedulers.
-
-```bash
-flowcrew daemon deploy --timeout-ms 60000
+flowcrew daemon deploy
 flowcrew task show <task-id>
 ```
 
-Invoke the CLI from the authorised deployment checkout: its runtime location selects the
-build target, independently of the shell's current directory. Deployment requests a hold,
-waits for settlement, checks restart safety, stops the daemon, publishes a complete build
-and starts the new daemon. It proves the RPC identity, Unix socket owner, `daemon.json`
-and published generation agree before continuing held runs. `--timeout-ms` bounds the
-hold observation, including waiting for its RPC replies; without it the client waits until settlement. Reaching a declared limit returns JSON `status: "in-progress"`, code `RPC_IN_PROGRESS`, exit 5. The hold remains active and deployment does not stop the daemon, build, or release the fence. Inspect `hold-status` and retry with the same state/socket/checkout. The limit does not cancel stages or impose a build deadline.
+Use the CLI from the authorised deployment checkout and the same `FC_HOME` and
+socket throughout. A failed build leaves old control serving. `--force` cannot
+bypass safety. `--timeout-ms` applies only when an explicit hold has selected the
+exclusive migration path; it is not a successful-deploy or stage deadline.
+
+Compatibility is one release-declared, integrity-covered manifest value,
+`controlCompatibility`. Equal supported declarations permit coexistence; hashes
+and record ages do not. A missing, different or unknown declaration, an old task
+without its frozen runtime, or unavailable runtime bytes yields
+`EXCLUSIVE_MIGRATION_REQUIRED`. Status/listing still read legacy records. Known terminal legacy rows may be observed
+without execution; they do not authorize recovery on a new runtime. Never
+interpret a missing declaration as a compatible default.
+
+For first rollout from a build without this declaration, or an incompatible store
+change, use the existing exclusive migration procedure. With the old CLI, request
+`daemon hold` and require `ready: true` from `daemon hold-status`. The hold may wait
+for validation or settlement and never cancels a task to obtain readiness. Then
+use `daemon deploy` from the target checkout while that hold remains active; this
+selects the existing hold-based build/replace/continue transaction. Inspect every
+continuation refusal. For a CLI too old to understand the target RPC envelopes,
+use separate old-CLI `daemon hold` / `daemon hold-status` / `daemon stop`, prove old
+process and socket retirement, build, then new-CLI `daemon start` and `daemon continue`.
+Unknown stop or launch outcomes require ownership inspection, not blind replay.
+
+An incompatible release still needs an explicit record migration appropriate to
+that release. A hold provides exclusivity, not a converter. Frozen tasks retain
+their engine on recovery; do not release incompatible old engines beside a new
+writer. Finish/retire those consumers or carry out an independently reviewed
+migration before `continue`. A legacy unpinned run can acquire its first frozen
+reference only through validated continuation of a run parked under the current
+active hold. That continuation stores the reference before releasing the run or
+global fence. A historical released hold never authorizes runtime selection on
+recovery; interruption after queueing keeps the already stored reference for retry.
+Existing continuation, ledger, integrity and spent-budget checks remain mandatory.
 
 Startup preserves every existing socket path. A refused connection can indicate a socket
 left by a crash, but cannot authorize a later unlink while another starter may bind it.
@@ -413,18 +423,36 @@ that removal is safe. Normal graceful shutdown removes its owned socket.
 
 Builds publish real `dist/` and `ui/dist/` directories, including the hidden build
 manifest. Ordinary tar archives and npm packages therefore contain portable files.
-Daemon startup snapshots the attested backend/UI and configuration into
-`runtime/.cache/build-generations/<generation>` beside its socket, then loads the
-physical runtime path. Rebuilds only replace the checkout outputs; the daemon and
-its later imports, including scheduler children, keep that runtime. Current and
-previous daemon generations are retained. Before migrating a daemon started by
-an older release directly from the checkout, stop it once before rebuilding.
+Control and task execution snapshot attested backend/UI, configuration, dependencies
+and shipped resources into `runtime/.cache/build-generations/<generation>` beside
+the socket (foreground uses the existing state root). Dependency caches are excluded.
+Each task freezes `{generation, cliPath}` in its existing task record at first
+execution. Foreground, background and recovery use that physical path. Missing,
+altered or redirected runtime bytes refuse execution; deploying does not upgrade
+a live task's engine. External Node/provider installations, PATH commands chosen
+by models, and validation/project commands remain external dependencies.
 
-On failure the command reports its step and the durable hold state. Retry with the same
-`FC_HOME`, socket and checkout. If no daemon is listening, deploy starts the last published
-generation and settles the existing hold again before rebuilding. No transaction receipt or
-lock needs manual recovery. A lost continuation reply can mean the hold was already released;
-verify tasks before retrying. `deploy --force` refuses to bypass restart safety.
+Generations are retained indefinitely; deployment has no automatic collector.
+Manual deletion requires positive proof that a generation is neither selected by
+control nor referenced by any live, unknown or recoverable task, foreground owner,
+launch reservation, launch intent, shim or child process. An old/unreadable record
+or unobservable owner prevents that proof. Retained run/checkpoint provenance and
+supervision commands must also be inspected; absence from an active-task list is
+insufficient. Keep the complete generation, dependency and resource roots together.
+
+Rollback uses the same ordinary procedure only if both releases explicitly declare
+the same supported compatibility value and can read/write each other's records.
+Restore the previous checkout and build it, then deploy: tasks admitted under the
+newer build keep their newer frozen runtimes, including recovery. Never remove
+those runtimes as part of rollback. For an older build without the declaration, or
+a different shared-store contract, use exclusive migration and resolve all newer
+consumers and records first. A code rollback alone cannot reverse a store migration.
+
+With an active explicit hold, failures retain the durable recovery fence after
+stop intent. Retry with the same state/socket/checkout; deploy can start the last
+published generation to settle that hold. A lost continuation reply can mean the
+hold was already released; inspect before retrying. Ordinary replacement creates
+no hold and does not replay uncertain commands.
 
 Readiness observes active tasks and runs carrying this hold's id. Historical fixture tasks
 outside that set do not block deployment. Relevant units, schedulers and checkpoint-owned
@@ -448,7 +476,7 @@ There is no finite universal successful-hold bound: stage deadlines differ, grou
 several bounded attempts, and audit/validation cleanup may itself fail to settle. For a
 single running attempt, the wait includes its remaining immutable deadline, up to 5 seconds
 of termination grace, then owned command closure and settlement. Both `hold --timeout-ms N`
-and deploy's hold phase use the same caller-declared observation limit. There is no
+and explicit migration deploy's hold phase use the same caller-declared observation limit. There is no
 default RPC reply deadline. An open connection keeps waiting; a connection that closes
 after the request was written and before a valid answer yields unknown outcome (exit 2).
 Exit 5 leaves the fence active: current work continues to its normal boundary. Inspect `hold-status`, resolve any refusal,
@@ -468,8 +496,12 @@ prove owner/command fate and reconcile its ledger. A proven resumable interrupti
 the same hold without spending a task retry; its interrupted attempt remains in history
 and can restart after release. Unprovable recovery is reported and cannot launch work.
 Foreground runs without registered tasks also observe the fence. After `daemon continue`,
-continue those explicitly with `flowcrew quick --project <project-dir> --existing-run-id <run-id>`;
-the same compatibility and ownership checks apply before execution.
+those with a frozen runtime reference can continue explicitly with
+`flowcrew quick --project <project-dir> --existing-run-id <run-id>`; the same compatibility
+and ownership checks apply before execution. An old unregistered foreground run without
+a runtime reference is not bound by registry-only `daemon continue`: `quick` refuses with
+`EXCLUSIVE_MIGRATION_REQUIRED`. It needs a separately supported migration; repeating
+hold/deploy/continue does not bind it.
 
 `task show` displays the scheduler generation at actual start and each actual resume,
 with timestamp and PID. `run.json` retains the same `engineHistory`. Legacy runs may lack

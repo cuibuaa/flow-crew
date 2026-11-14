@@ -9,10 +9,10 @@ import { waitForPathEvent as daemonPublication } from './wait-for-path-event.js'
 
 /** Subscribe to each missing parent before watching the final publication.
  * Avoid recursive watches over the daemon's changing pinned runtime tree. */
-export async function daemonFile<T>(path: string, observe: () => T | undefined): Promise<T> {
+export async function daemonFile<T>(path: string, observe: () => T | undefined, signal?: AbortSignal): Promise<T> {
   const parent = dirname(path);
-  if (!existsSync(parent)) await daemonFile(parent, () => existsSync(parent) ? true : undefined);
-  return daemonPublication(parent, observe);
+  if (!existsSync(parent)) await daemonFile(parent, () => existsSync(parent) ? true : undefined, signal);
+  return daemonPublication(parent, observe, signal);
 }
 
 /** The production client waits on the connection; no fixture clock is needed. */

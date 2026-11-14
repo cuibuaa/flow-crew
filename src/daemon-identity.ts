@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync, readlinkSync, stat
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { readBuildManifest, collectBuildArtifacts, assertBuildArtifactInventory } from './build-manifest.js';
-import { processLiveness } from './process-liveness.js';
+import { processLiveness, processStartToken, type ProcessStartToken } from './process-liveness.js';
 
 export const DAEMON_METADATA_FILENAME = 'daemon.json';
 export const STALE_DAEMON_MESSAGE = 'STALE: dist is newer than the running daemon — its fixes are NOT loaded';
@@ -19,6 +19,8 @@ export interface DaemonBuildFingerprint {
 
 export interface DaemonIdentity {
   pid: number;
+  /** Kernel process identity; absent only in legacy/unobservable metadata. */
+  processStart?: ProcessStartToken;
   startedAt: string;
   socketPath: string;
   /** Exact deployed runtime root. Optional only for legacy metadata. */
@@ -142,9 +144,8 @@ export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint
   if ((existsSync(join(root, '..', 'ui', 'package.json')) || uiFiles.length > 0) && !manifest?.ui) {
     throw new Error('Cannot fingerprint served UI without a combined build manifest');
   }
-  if (manifest?.ui) {
-    hash.update(`ui-generation:${manifest.generation}:`);
-  }
+  if (manifest?.controlCompatibility !== undefined) hash.update(`generation:${manifest.generation}:`);
+  else if (manifest?.ui) hash.update(`ui-generation:${manifest.generation}:`);
   if (manifest?.uiPresence) hash.update(`ui-presence:${manifest.uiPresence}:`);
   for (const path of uiFiles.sort((a, b) => a.localeCompare(b))) {
     const name = `ui/dist/${relative(uiRoot, path).split(sep).join('/')}`;
@@ -173,6 +174,7 @@ export function createDaemonIdentity(input: {
   assertUnixSocketPath(input.socketPath);
   return {
     pid: input.pid ?? process.pid,
+    processStart: processStartToken(input.pid ?? process.pid),
     startedAt: input.startedAt ?? new Date().toISOString(),
     socketPath: resolve(input.socketPath),
     distDir: resolve(input.distDir),
@@ -221,7 +223,7 @@ function recordedDaemonPidIfAlive(socketPath: string, opts: SocketOwnerLookupOpt
   }
   const pid = identity?.pid;
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
-  return processLiveness(pid) === 'alive' ? pid : undefined;
+  return processLiveness(pid, identity?.processStart) === 'alive' ? pid : undefined;
 }
 
 /**
@@ -289,6 +291,9 @@ function isDaemonIdentity(value: unknown): value is DaemonIdentity {
   const identity = value as Partial<DaemonIdentity>;
   const build = identity.build as Partial<DaemonBuildFingerprint> | undefined;
   return Number.isInteger(identity.pid) && (identity.pid ?? 0) > 0
+    && (identity.processStart === undefined || (identity.processStart !== null
+      && ['linux', 'posix-lstart'].includes(identity.processStart.kind)
+      && typeof identity.processStart.value === 'string' && identity.processStart.value.length > 0))
     && typeof identity.startedAt === 'string' && Number.isFinite(Date.parse(identity.startedAt))
     && typeof identity.socketPath === 'string'
     && (identity.distDir === undefined

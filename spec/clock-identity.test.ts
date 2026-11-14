@@ -257,6 +257,7 @@ describe('restart and campaign relevance', () => {
     const controls: DaemonProcessControls = {
       sendRpc: vi.fn(async () => status), findSocketOwnerPid: () => owner,
       spawnDaemon: vi.fn(() => { owner = identity.pid; return { pid: identity.pid, exited: new Promise<string>(() => {}) }; }),
+      processStart: () => ({kind:'linux',value:'1'}), processState: () => owner === 123 ? 'alive' : 'dead',
       processAlive: () => true, killProcess: vi.fn(), build: vi.fn(),
       delay: vi.fn(async () => { entered.resolve(); await new Promise(resolve => setTimeout(resolve, 100)); }),
     };
