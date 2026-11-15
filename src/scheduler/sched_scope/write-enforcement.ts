@@ -15,9 +15,10 @@ export function settleProjectWrites(input: {
   const rollbackFailureReasons: Record<string, string> = {};
   const violations: Array<{ path: string; certainty: 'definite' | 'unverified'; kind: 'immutable_evidence_violation' | 'read_only_project_violation'; reason: string }> = [];
   const frozen = frozenChanges(input.projectDir, input.context.frozen);
-  const readOnlyAfter = input.readOnly ? projectContentMembers(input.projectDir) : {};
+  const readOnlyAfter = input.readOnly && input.context.readOnlyBefore ? projectContentMembers(input.projectDir) : {};
   const readOnly = input.readOnly && input.context.readOnlyBefore
-    ? changedContentMembers(input.context.readOnlyBefore, readOnlyAfter) : [];
+    ? changedContentMembers(input.context.readOnlyBefore, readOnlyAfter).filter(path =>
+      input.context.readOnlyBefore![path]?.state !== 'unavailable' || readOnlyAfter[path]?.state !== 'unavailable') : [];
   for (const path of new Set([...frozen, ...readOnly])) {
     if (!rawWrites.includes(path)) rawWrites.push(path);
     const taskFrozen = frozen.includes(path);
@@ -25,9 +26,6 @@ export function settleProjectWrites(input: {
     const after = taskFrozen ? readContentMemberIdentity(join(input.projectDir, path), input.projectDir) : readOnlyAfter[path];
     violations.push({ path, certainty: before?.state === 'unavailable' || after?.state === 'unavailable' ? 'unverified' : 'definite', kind: taskFrozen ? 'immutable_evidence_violation' : 'read_only_project_violation',
       reason: taskFrozen ? 'task-frozen evidence content changed or cannot be verified' : 'read-only project content changed or cannot be verified' });
-    // Read-only settlement never restores, including when the changed path is frozen.
-    if (taskFrozen && readOnly.includes(path)) violations.push({ path, certainty: violations.at(-1)!.certainty,
-      kind: 'read_only_project_violation', reason: 'read-only project content changed or cannot be verified' });
     if (!taskFrozen) continue;
     if (input.readOnly) {
       rollbackFailures.push(path); rollbackFailureReasons[path] = 'read-only settlement does not restore project content';

@@ -68,6 +68,14 @@ async function execute(script: string, options: { readOnly?: boolean; frozen?: s
   return { status, attempt, audit, runId, runDirPath };
 }
 const writeScript = (files: Record<string, string>) => `const fs=require('node:fs'),p=require('node:path');for(const [name,bytes] of Object.entries(${JSON.stringify(files)})){fs.mkdirSync(p.dirname(name),{recursive:true});fs.writeFileSync(name,bytes)};console.log('delivered');`;
+it('fails a readable project change by a read-only stage when the kernel grant is unavailable', async () => {
+  vi.spyOn(grantOwner, 'admitWriteGrant').mockReturnValue({ version: 1, capability: { kind: 'unavailable', reason: 'platform' }, sharedCaches: [] });
+  const result = await execute("require('node:fs').writeFileSync('src/a.ts','changed');console.log(JSON.stringify({pass:true,reason:'Reviewed.',criteria:{},audit_findings:{version:1,findings:[]}}))", { readOnly: true });
+  expect(result.attempt.writeGrantApplied).toBeUndefined();
+  expect(result.audit.violations).toContainEqual(expect.objectContaining({ path: 'src/a.ts', kind: 'read_only_project_violation' }));
+  expect(result.status.status).toBe('failed'); expect(result.attempt.endingCause).toBe('engine_void');
+  expect(readFileSync(join(project, 'src/a.ts'), 'utf8')).toBe('changed');
+});
 describe.each(cases)('$name reduced contract replay', fixture => {
   it('accepts the omitted paths, preserves output bytes and records an independent read-only check', async () => {
     const files = fixture.files as Record<string, string>;

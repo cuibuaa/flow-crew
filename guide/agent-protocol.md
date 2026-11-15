@@ -349,8 +349,9 @@ Inputs locate material; only evidence the task explicitly declares frozen is imm
 The run binds frozen member hashes and topology before children start and reuses them across retries/restart.
 Settlement fails changed frozen content. A tracked leaf is restored only from the run's pinned base Git
 object when its content matches the admitted digest. Dirty or untracked content is reported unrestored.
-Nothing is restored for a read-only stage's project change: the kernel denies it on capable hosts;
-elsewhere hash-only settlement detects and fails it. Read-only settlement never restores project bytes,
+The kernel grant denies read-only project writes; granted attempts need no project content comparison.
+Without the grant, hash-only settlement fails changes, excluding paths unreadable both before and after.
+Read-only settlement never restores project bytes,
 including frozen members. Other attempts restore frozen leaves only from matching pinned Git content.
 Exact task outputs retain precedence.
 Use private `$TMPDIR` scratch for isolated probes.

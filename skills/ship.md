@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 62 -->
+<!-- flowcrew-skill-revision: 63 -->
 
 # Ship a conversation to FlowCrew
 
@@ -125,7 +125,7 @@ target, base, new branch, research declarations, adapter, foreground/background,
 iteration bound read from engine configuration (`max_iterations`) and the brief's
 author-declared `stage_duration_ms`, or its absence. The engine supplies no duration
 default or earlier wrap-up cut. Do not hardcode defaults.
-Explain unattended shell authority: the admitted contract and stage kind grant writes, while planner scope lists are work-division notes. Read-only fallback detects project changes without restoring them; frozen restoration requires matching pinned-base Git content.
+Explain unattended shell authority: the admitted contract and stage kind grant writes, while planner scope lists are work-division notes. Granted read-only attempts need no project content comparison. Without the grant, settlement detects project changes without restoring them; paths unreadable both before and after are not change evidence. Frozen content is checked for every stage; restoration requires matching pinned-base Git content.
 On capable hosts, explain the [stage filesystem write grant](../guide/operations.md#stage-filesystem-write-grants):
 authors and repairs retain admitted output directories when returning a successor;
 Review gates receive no write grant for those directories.

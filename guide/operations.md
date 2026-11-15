@@ -117,8 +117,9 @@ plus their own stage workspace and contract-declared external outputs/caches. Op
 arrays are work-division notes; neither their presence nor syntax changes the grant. Gates and isolated
 decisions receive no project write grant, including additive project output or cache grants.
 Admitted shared caches outside the project remain available; overlapping cache roots still refuse.
-On hosts without a kernel grant, hash-only settlement detects read-only project changes and fails the
-attempt without restoration. Frozen changes fail too; only a pinned-base Git blob matching the admitted
+Granted attempts need no read-only project content comparison. Without a kernel grant, hash-only settlement
+fails read-only project changes without restoration; paths unreadable both before and after are not evidence
+of a change. Frozen content is checked for every stage; only a pinned-base Git blob matching the admitted
 digest can restore a tracked leaf. Untracked or dirty-at-admission content is reported unrestored.
 Exact shared run outputs still need existing inodes or declared directories; they do not grant siblings.
 Run artifacts must stay in the stage's permitted `work/` area.

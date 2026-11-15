@@ -1,6 +1,7 @@
 import { bindFrozenInputs, restoreFrozenInput } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { runRecordPath } from '../src/run-layout.js';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as writeGrant from '../src/write-grant.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ import { readRunEvents } from '../src/run-events.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
+const admitWriteGrant = writeGrant.admitWriteGrant;
 let root: string, project: string, directory: string, runId: string, previous: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'write-contract-'));
@@ -26,7 +28,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 
-  setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
+  vi.restoreAllMocks(); setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
 const stage = (id = 'author', scope: string[] = ['src/estimated.ts']) => StageConfigSchema.parse({ id, role: 'coder', scope });
 const role = { name: 'coder', description: 'Synthetic author', prompt: 'Complete the task.', tools: [], model: 'test', reasoning_effort: 'low' };
@@ -69,6 +71,7 @@ it('does not infer content changes from a reported write below an unchanged read
 });
 
 it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
+  vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => ({ kind: 'unavailable', reason: 'platform' })));
   write('.gitignore', 'operator.pipe\n');
   isolatedProjectCommand('mkfifo', ['operator.pipe'], project, root);
   git('init', '-q');
@@ -79,7 +82,7 @@ it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
     projectDir: project, context, readOnly: true,
     rawWrites: ['operator.pipe'], appliedWrites: ['operator.pipe'],
   });
-  expect(result.violations).toHaveLength(1);
+  expect(result.violations).toHaveLength(0);
   expect(result.rollbackFailures).toEqual([]);
   expect(result.rolledBackWrites).toEqual([]);
   expect(lstatSync(join(project, 'operator.pipe')).isFIFO()).toBe(true);
@@ -508,14 +511,16 @@ it('restores the original task-frozen bytes at two successive settlements', () =
   }
 });
 
-it('read-only fallback fails even tracked frozen changes without restoring any project bytes', () => {
+it.each(['unavailable', 'landlock'] as const)('fails read-only frozen changes without restoring project bytes (%s grant)', kind => {
+  vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => kind === 'landlock' ? { kind, abi: 3 } : { kind, reason: 'platform' }));
   write('frozen.txt', 'ORIGINAL'); commit();
   const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: ['arbitrary note'] });
   create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\n', [gate]);
   const context = createContentSettlementContext(project, [gate], runId);
+  expect(Boolean(context.readOnlyBefore)).toBe(kind === 'unavailable');
   write('frozen.txt', 'CHANGED');
   const result = settleProjectWrites({ projectDir: project, context, readOnly: true, rawWrites: [], appliedWrites: ['frozen.txt'] });
-  expect(result.violations.map(item => item.kind)).toEqual(['immutable_evidence_violation', 'read_only_project_violation']);
+  expect(result.violations.map(item => item.kind)).toEqual(['immutable_evidence_violation']);
   expect(result.rolledBackWrites).toEqual([]); expect(result.rollbackFailures).toEqual(['frozen.txt']);
   expect(readFileSync(join(project, 'frozen.txt'), 'utf8')).toBe('CHANGED');
 });

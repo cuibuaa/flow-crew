@@ -15,7 +15,7 @@ export function createScopeReconciler() {
     const attempt = status.attempts?.find(candidate => candidate.index === input.attemptIndex);
     if (!attempt) return { status, violation: false };
     const rawWrites = canonicalProjectWriteUnion(attempt.writes ?? []);
-    const enforcement = settleProjectWrites({ projectDir: input.projectDir, context: input.context,
+    const enforcement = settleProjectWrites({ projectDir: input.projectDir, context: attempt.writeGrantApplied ? { frozen: input.context.frozen } : input.context,
       rawWrites, appliedWrites: attempt.appliedWrites ?? null, readOnly: isReadOnlyStage(input.stage) });
     attempt.writes = canonicalProjectWriteUnion(rawWrites, enforcement.rawWrites);
     // Retain the existing non-retryable integrity disposition when forbidden

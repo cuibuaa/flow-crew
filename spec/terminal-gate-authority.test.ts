@@ -1,6 +1,6 @@
 import './test-support/policy-runtime.js';
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, lstatSync, utimesSync, symlinkSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, lstatSync, symlinkSync } from 'node:fs';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,8 +14,14 @@ import { createContentSettlementContext } from '../src/scheduler/sched_scope/fro
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createRun } from './test-support/create-run.js';
+import { execWithStdin } from '../src/adapters/base.js';
+import * as writeGrant from '../src/write-grant.js';
+const capability = writeGrant.queryWriteGrantCapability();
+const admitWriteGrant = writeGrant.admitWriteGrant;
 const previous=fcGlobalDir(), roots:string[]=[];
-afterEach(()=>{setFcGlobalDir(previous);for(const r of roots.splice(0))rmSync(r,{recursive:true,force:true})});
+// In-process mutations bypass the native launcher; exercise settlement's fallback explicitly.
+beforeEach(() => { vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => ({ kind: 'unavailable', reason: 'platform' }))); });
+afterEach(()=>{vi.restoreAllMocks();setFcGlobalDir(previous);for(const r of roots.splice(0))rmSync(r,{recursive:true,force:true})});
 it.each([
  {ignored:true,dispatched:false,initial:false},
  {ignored:true,dispatched:false,initial:true},
@@ -123,39 +129,54 @@ describe('reproduction 824', () => {
     expect(lstatSync(join(project, 'pipe')).isFIFO()).toBe(true);
   });
 
-  it('read-only retry preserves a preexisting ignored FIFO after a metadata-only touch', async () => {
+  it.each(['unavailable', 'kernel'] as const)('continues after a read-only review writes nothing beside ignored socket and FIFO (%s)', async grant => {
+    if (grant === 'kernel' && capability.kind !== 'landlock') return;
+    vi.mocked(writeGrant.admitWriteGrant).mockImplementation(path => admitWriteGrant(path, () => grant === 'kernel' ? capability : { kind: 'unavailable', reason: 'platform' }));
     setEngineDefaults({ stage_technical_retries: 1 });
     const root = mkdtempSync(join(tmpdir(), 'terminal-fifo-')); roots.push(root);
     const project = join(root, 'project'); mkdirSync(project); setFcGlobalDir(join(root, 'store'));
     isolatedProjectCommand('git', ['init', '-q'], project, root);
-    writeFileSync(join(project, '.gitignore'), 'operator.pipe\n');
-    isolatedProjectCommand('mkfifo', ['operator.pipe'], project, root);
+    writeFileSync(join(project, '.gitignore'), 'scratch/\n');
     const workflow = WorkflowConfigSchema.parse({ name: 'entry', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-      { id: 'author', role: 'coder', scope: ['result.md'] },
+      { id: 'author', role: 'coder', scope: ['draft.md'] },
       { id: 'gate', role: 'qa', is_gate: true, scope: [], depends_on: ['author'] },
-      { id: 'repair', role: 'coder', scope: ['result.md'], depends_on: ['gate'], retry_to: ['gate'] },
+      { id: 'repair', role: 'coder', scope: ['draft.md'], depends_on: ['gate'], retry_to: ['gate'] },
+      { id: 'publish', role: 'coder', scope: ['result.md'], depends_on: ['gate'] },
     ] });
     const adapter = new ScriptedAdapter({
-      author: { projectFiles: { 'result.md': 'authorized report' } },
+      author: { projectFiles: { 'draft.md': 'authorized report' } },
       gate: { runFiles: { 'verdict_gate.json': '{"pass":true,"reason":"Independently accepted report"}' } },
+      publish: { projectFiles: { 'result.md': 'authorized report' } },
     });
-    let reviews = 0;
     const original = adapter.run.bind(adapter);
     adapter.run = async (prompt, role, opts) => {
       const result = await original(prompt, role, opts);
-      if (opts.stageId === 'gate' && ++reviews === 1) {
-        utimesSync(join(project, 'operator.pipe'), new Date(), new Date());
-        return { ...result, writes: ['operator.pipe'], writeAttribution: 'structured' };
+      if (opts.stageId === 'author') {
+        mkdirSync(join(project, 'scratch'));
+        isolatedProjectCommand('mkfifo', ['scratch/pipe'], project, root);
+        // Closing a Unix socket leaves its filesystem entry, with no daemon to manage.
+        isolatedProjectCommand('/usr/bin/python3', ['-I', '-S', '-B', '-c',
+          "import socket; s=socket.socket(socket.AF_UNIX); s.bind('scratch/daemon.sock'); s.close()"], project, root);
+      }
+      if (opts.stageId === 'gate') {
+        const native = await execWithStdin(process.execPath, ['-e', `require('node:assert/strict').equal(require('node:fs').readFileSync('draft.md','utf8'),'authorized report');process.stdout.write(${JSON.stringify(result.output)})`], '',
+          { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
+        expect(Boolean(native.writeGrantApplied)).toBe(grant === 'kernel');
+        return { ...result, ...native };
       }
       return result;
     };
     const state = await runWorkflow(workflow, '', project, adapter, new Map(), undefined,
       join(import.meta.dirname, '../config/agents'), undefined,
       '---\nterminal_states:\n  complete: [result.md]\n---\nProduce and review the report without damaging project entries.\n', true);
-    expect(lstatSync(join(project, 'operator.pipe')).isFIFO()).toBe(true);
-    expect(state.stages.gate.attempts?.length).toBeGreaterThan(0);
-    expect(state.stages.gate.attempts![0].constraintAudit?.violationCount).toBeGreaterThan(0);
-    expect(state.status, state.failureReason).not.toBe('complete');
+    expect(lstatSync(join(project, 'scratch/pipe')).isFIFO()).toBe(true);
+    expect(lstatSync(join(project, 'scratch/daemon.sock')).isSocket()).toBe(true);
+    expect(state.stages.gate.attempts).toHaveLength(1);
+    expect(state.stages.gate.attempts![0].constraintAudit?.violationCount).toBe(0);
+    expect(state.stages.gate.attempts![0].writes).toEqual([]);
+    expect(state.stages.gate.attempts![0].endingCause).not.toBe('engine_void');
+    expect(state.stages.publish.status).toBe('complete');
+    expect(state.status, state.failureReason).toBe('complete');
     expect(readFileSync(join(project, 'result.md'), 'utf8')).toBe('authorized report');
   });
 
