@@ -26,7 +26,8 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
-import { beginAttemptEvidenceGeneration, runStage } from '../src/worker.js';
+import { beginAttemptEvidenceGeneration } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const stageId = 'acceptance_gate';
 const role: AgentConfig = {

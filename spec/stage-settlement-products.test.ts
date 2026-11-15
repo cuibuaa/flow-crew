@@ -8,7 +8,7 @@ import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 
 // The external-output boundary needs a fixture installation separate from the

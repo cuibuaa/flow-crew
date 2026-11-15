@@ -1,9 +1,9 @@
 import { mockEntryPlan } from './test-support/planner-entry.js';
 import { validateTaskRuntime } from '../src/build-manifest.js';
 import { runRecordPath } from '../src/run-layout.js';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -14,6 +14,8 @@ import { renderSessionProgress, sessionGate } from '../src/cli-session-push.js';
 import { SessionPush, renderPushEvent } from '../src/session-push.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
+import { daemonCommand } from './test-support/daemon-events.js';
+import { stagePolicyPreload } from './test-support/stage-filesystem.js';
 
 const packageRoot = join(import.meta.dirname, '..');
 const previousPath = process.env.PATH;
@@ -92,20 +94,25 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
     CODEX_HOME: join(root, 'home'), CLAUDE_CODE_MESSAGING_SOCKET: join(root, 'inbox.sock'),
     CODEX_APP_SERVER_SOCKET: join(root, 'metadata.sock'),
   };
+  // This fixture observes publication and normal shutdown, not power-loss
+  // durability. Reuse the policy filesystem/SQLite owners in native children.
+  const policy = join(root, 'policy.mjs');
+  writeFileSync(policy, stagePolicyPreload());
+  const cli = ['--import', policy, join(packageRoot, 'dist', 'cli.js')];
   // Git is exercised only by this Node fixture in its disposable repository,
   // with private user/engine homes, matching the other CLI integration probes.
   const runner = join(root, 'runner.mjs');
   writeFileSync(runner, [
     "import { spawnSync } from 'node:child_process';",
     'const [file, ...args] = process.argv.slice(2);',
-    "const result = spawnSync(file, args, { env: process.env, encoding: 'utf8', timeout: 5000 });",
+    "const result = spawnSync(file, args, { env: process.env, encoding: 'utf8' });",
     "process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || result.error?.message || '');",
     'process.exit(result.status ?? 1);',
   ].join('\n'));
   for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Fixture']]) {
-    const result = spawnSync(process.execPath, [runner, 'git', ...args], {
-      cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, encoding: 'utf8', timeout: 7500,
-    });
+    const result = await daemonCommand(spawn(process.execPath, [runner, 'git', ...args], {
+      cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'],
+    }));
     expect(result.status, result.stderr).toBe(0);
   }
   const setupPath = writeReadySetupRecord(project, brief, engine);
@@ -114,12 +121,15 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
   if (baseline === 'empty') { setup.validationBaseline.discovery.commands = []; setup.validationBaseline.results = []; }
   writeFileSync(setupPath, JSON.stringify(setup));
   if (baseline === 'red') {
-    const held = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(packageRoot, 'src', 'cli.ts'),
+    const held = await daemonCommand(spawn(process.execPath, [...cli,
       'quick', '-', '--project', project, '--adapter', 'mock', '--no-campaign'], {
-      cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, input: brief, encoding: 'utf8', timeout: 10_000 });
+      cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'] }), brief);
     expect(held.status, held.stderr).toBe(1);
     expect(held.stderr).toContain('setup_acknowledgement_required');
     expect(new TaskRegistry({ baseDir: engine }).list({ status: 'all' })).toHaveLength(0);
+    // The refusal already pinned this exact runtime. Re-enter its attested
+    // physical CLI without repeating the public-distribution bootstrap.
+    cli[cli.length - 1] = realpathSync(join(engine, 'runtime', 'dist', 'cli.js'));
   }
   const calls: any[] = [];
   const frames: string[] = [];
@@ -130,16 +140,12 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
   });
   servers.push(server);
   await new Promise<void>(resolve => server.listen(frontend === 'codex' ? env.CODEX_APP_SERVER_SOCKET : env.CLAUDE_CODE_MESSAGING_SOCKET, resolve));
-  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(packageRoot, 'src', 'cli.ts'),
+  const child = spawn(process.execPath, [...cli,
     'quick', '-', '--project', project, '--adapter', 'mock', '--no-campaign', ...(baseline === 'red' ? ['--acknowledge-brief-warnings'] : [])], {
-    cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 25_000,
+    cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'],
   });
-  let output = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
-  child.stdin.end(brief);
-  const code = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
-  expect(code, output).toBe(0);
+  const result = await daemonCommand(child, brief);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
   const registry = new TaskRegistry({ baseDir: engine });
   const tasks = registry.list({ status: 'all' });
   expect(tasks).toHaveLength(1);

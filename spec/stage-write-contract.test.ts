@@ -11,7 +11,7 @@ import { runStateContext } from '../src/run-state-access.js';
 import { readGateEvaluation } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
 beforeEach(() => {

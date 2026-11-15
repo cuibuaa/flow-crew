@@ -16,7 +16,7 @@ import {
   readStageStatus,
   setFcGlobalDir,
 } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const role: AgentConfig = {
   name: 'coder',

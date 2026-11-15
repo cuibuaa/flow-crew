@@ -15,6 +15,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { linuxProcessStartTimeTicks, processIsAlive } from '../src/process-liveness.js';
 import { fakeCodexHookRequest } from './test-support/fake-codex-hooks.mjs';
+import { daemonFile } from './test-support/daemon-events.js';
 
 const packageRoot = join(import.meta.dirname, '..');
 const integration = join(packageRoot, 'skills', 'session-integration.mjs');
@@ -48,7 +49,7 @@ function fixture() {
     "import { spawnSync } from 'node:child_process';",
     "import { readFileSync } from 'node:fs';",
     'const [file, ...args] = process.argv.slice(2);',
-    "const result = spawnSync(file, args, { env: process.env, input: readFileSync(0), encoding: 'utf8', timeout: 15000 });",
+    "const result = spawnSync(file, args, { env: process.env, input: readFileSync(0), encoding: 'utf8' });",
     "process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || result.error?.message || '');",
     'process.exit(result.status ?? 1);',
   ].join('\n'));
@@ -56,7 +57,7 @@ function fixture() {
 }
 function command(file: string, args: string[], env: NodeJS.ProcessEnv, input?: string) {
   return spawnSync(process.execPath, [join(env.HOME!, 'runner.mjs'), file, ...args], {
-    cwd: packageRoot, env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME }, input, encoding: 'utf8', timeout: 20_000,
+    cwd: packageRoot, env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME }, input, encoding: 'utf8',
   });
 }
 function integrate(action: string, frontend: string, root: string, env: NodeJS.ProcessEnv) {
@@ -142,7 +143,7 @@ describe('installer-owned front-end integration', () => {
     expect(observed.stdout).not.toContain('Readable task: wrap-up required.');
 
   });
-  it('an interrupted native hook loses coverage immediately and its worker retires without leaving a background process', async () => {
+  it('an interrupted native hook loses coverage immediately and its worker retires without leaving a background process', async ({ signal }) => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -152,28 +153,31 @@ describe('installer-owned front-end integration', () => {
     } });
     const push = new SessionPush(registry);
     const child = spawn(process.execPath, [join(root, 'hooks', 'flowcrew-session.mjs'), 'Wake'], {
-      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000,
+      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'],
     });
     const done = new Promise<void>((resolve, reject) => { child.on('error', reject); child.on('close', () => resolve()); });
     child.stdin.end(JSON.stringify({ session_id: 'own-session' }));
     let worker: number | undefined;
     try {
-      for (let i = 0; i < 500 && !hasClaudeWakeWaiter(push.root, 'own-session'); i++) await sleep(20);
+      const slot = sessionWaiterPath(push.root, 'own-session');
+      await daemonFile(slot, () => hasClaudeWakeWaiter(push.root, 'own-session') ? true : undefined, signal);
       expect(hasClaudeWakeWaiter(push.root, 'own-session')).toBe(true);
       const directory = join(push.root, 'waiters');
       worker = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), 'utf8')).pid;
       child.kill('SIGTERM'); // fake Claude's native timeout/session cancellation
       await done;
       expect(hasClaudeWakeWaiter(push.root, 'own-session')).toBe(false);
-      for (let i = 0; i < 100 && readdirSync(directory).length; i++) await sleep(20);
+      await daemonFile(slot, () => readdirSync(directory).length === 0 ? true : undefined, signal);
       expect(readdirSync(directory)).toEqual([]);
-      for (let i = 0; i < 100 && processIsAlive(worker!); i++) await sleep(20);
+      // The worker is a grandchild: Node cannot subscribe to its close event.
+      // Yield until this known PID retires, without a poll count or time verdict.
+      while (processIsAlive(worker!)) await new Promise<void>(resolve => setImmediate(resolve));
       expect(processIsAlive(worker!)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       await done;
       // The worker observes host death itself; no PID guessing or broad signals.
-      if (worker) for (let i = 0; i < 100 && processIsAlive(worker); i++) await sleep(20);
+      if (worker) while (processIsAlive(worker)) await new Promise<void>(resolve => setImmediate(resolve));
     }
   });
 

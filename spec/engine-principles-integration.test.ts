@@ -21,7 +21,7 @@ import { readHostBootId } from '../src/restart-recovery.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { cmdState } from '../src/run-state-access.js';
 import { startDashboard } from '../src/dashboard.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, updateRunState, writeStageStatus, type StoreState } from '../src/store.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';

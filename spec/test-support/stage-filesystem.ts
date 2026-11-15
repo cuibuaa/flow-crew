@@ -17,3 +17,19 @@ export function stageSqlite(sqlite: typeof import('node:sqlite')) {
     }
   } };
 }
+
+/** Native CLI policy fixtures retain real writes and transactions, without
+ * testing power-loss durability. Embed these closure-free owners so a native
+ * child needs no TypeScript loader or second policy implementation. */
+export function stagePolicyPreload(): string {
+  return `
+import fs from 'node:fs';
+import sqlite from 'node:sqlite';
+import { syncBuiltinESMExports } from 'node:module';
+const files = (${stageFileSystem.toString()})({ ...fs });
+fs.fsyncSync = files.fsyncSync;
+fs.writeFileSync = files.writeFileSync;
+sqlite.DatabaseSync = (${stageSqlite.toString()})({ ...sqlite }).DatabaseSync;
+syncBuiltinESMExports();
+`;
+}

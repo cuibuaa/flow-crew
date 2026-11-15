@@ -7,7 +7,7 @@ import { basename, join } from 'node:path';
 import { loadWorkflow, } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { type Adapter, type AgentConfig } from '../src/adapters/base.js';

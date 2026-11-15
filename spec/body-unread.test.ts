@@ -10,7 +10,7 @@ import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { admittedContract, createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
-import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
+import { runWorkflow } from './test-support/stage-deadline.js';
 import { fcGlobalDir, setFcGlobalDir, evaluateRealityGate } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';

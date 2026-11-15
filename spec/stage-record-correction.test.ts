@@ -275,10 +275,10 @@ describe('record correction uses the existing attempt', () => {
   });
 
   it.each([1, 2])('honors the original deadline when invocation %i exhausts it', async expirationInvocation => {
-    let elapsed = 0, calls = 0;
-    const started = Date.now(), invocations: RunOpts[] = [];
-    const clock = { monotonicNow: () => elapsed, wallNow: () => started + elapsed,
-      setTimer: (callback: () => void, delay: number) => setTimeout(callback, delay), clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer) };
+    let calls = 0;
+    const invocations: RunOpts[] = [];
+    const { clock, advanceTo } = manualClock();
+    const started = clock.wallNow();
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts); calls++;
       if (calls === 2) {
@@ -286,7 +286,7 @@ describe('record correction uses the existing attempt', () => {
         expect(opts.attemptStartedAt).toBe(invocations[0]?.attemptStartedAt);
         expect(prompt).toContain('remaining 9000 ms');
       }
-      elapsed = calls === expirationInvocation ? 10001 : 1000;
+      advanceTo(calls === expirationInvocation ? 10001 : 1000);
       return { output: calls === 1 ? malformed[0][1]() : JSON.stringify(rejected()), exitCode: 0, duration_ms: 1 };
     } };
     const result = await runStage(adapter, { ...options(), deadlineClock: clock });

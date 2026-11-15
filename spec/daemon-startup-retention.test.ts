@@ -9,23 +9,12 @@ import { expect, it } from 'vitest';
 import { cmdDaemon } from '../src/cli-daemon.js';
 import { sendRpc } from '../src/orchestrator-rpc.js';
 import { createInvocationScratch, retireRunScratch } from '../src/invocation-scratch.js';
+import { daemonClosed } from './test-support/daemon-events.js';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-function exitWithin(child: ChildProcess): Promise<void> {
+function exited(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const finish = (error?: Error) => {
-      clearTimeout(timer);
-      child.off('exit', exited);
-      child.off('error', failed);
-      if (error) reject(error); else resolve();
-    };
-    const exited = () => finish();
-    const failed = (error: Error) => finish(error);
-    const timer = setTimeout(() => finish(new Error('owned daemon child did not exit')), 5000);
-    child.once('exit', exited);
-    child.once('error', failed);
-  });
+  return daemonClosed(child);
 }
 
 it('listens FRESH on repeated starts without traversing retained terminal runs', async () => {
@@ -147,14 +136,14 @@ process.send({ kind: 'ready' });
       expect(readFileSync(runRecordPath(run, 'stages/done/build/attempt_1/payload.bin'), 'utf8')).toBe('disposable work');
       expect(readFileSync(runRecordPath(run, 'scratch/nested/invocation.bin'), 'utf8')).toBe('old invocation scratch');
       await sendRpc(socket, { cmd: 'stop' });
-      await exitWithin(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
+      await exited(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
       child = undefined;
     }
   } finally {
     writeFileSync(release, 'release');
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGKILL');
-      await exitWithin(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
+      await exited(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
     }
     retireRunScratch(missingRecord);
     retireRunScratch(deletedOwner);
@@ -242,7 +231,7 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
     expect(existsSync(entered), errors).toBe(true);
     expect(existsSync(socket), 'serve must reserve the socket before registry initialization').toBe(true);
     const duplicate = launch(duplicateEntered);
-    await exitWithin(duplicate);
+    await exited(duplicate);
     expect(duplicate.exitCode, errors).toBe(1);
     expect(errors).toContain('daemon socket already active');
     expect(existsSync(duplicateEntered), 'competing serve must not read storage').toBe(false);
@@ -253,12 +242,12 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
     expect(status).toMatchObject({ pid: children[0].pid, registry_tasks: 1 });
     expect(children.filter(child => child.exitCode === null && child.signalCode === null)).toHaveLength(1);
     await sendRpc(socket, { cmd: 'stop' });
-    await exitWithin(children[0]);
+    await exited(children[0]);
   } finally {
     writeFileSync(release, 'release');
     for (const child of children) {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      await exitWithin(child);
+      await exited(child);
     }
     if (pendingStart) await pendingStart;
     rmSync(root, { recursive: true, force: true });

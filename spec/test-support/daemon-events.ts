@@ -29,13 +29,17 @@ export function daemonClosed(child: ChildProcess): Promise<void> {
 
 /** Wait for close (including drained output), with runner-owned hang protection.
  * The caller starts the isolated probe; this only collects its result. */
-export async function daemonCommand(child: ChildProcess) {
-  child.stdin?.end();
+export async function daemonCommand(child: ChildProcess, input?: string) {
+  child.stdin?.end(input);
   let stdout = '', stderr = '';
   child.stdout!.on('data', chunk => { stdout += String(chunk); });
   child.stderr!.on('data', chunk => { stderr += String(chunk); });
-  onTestFinished(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  onTestFinished(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const closed = daemonClosed(child);
+      child.kill('SIGKILL');
+      await closed;
+    }
   });
   await daemonClosed(child);
   return { status: child.exitCode, signal: child.signalCode, stdout, stderr };

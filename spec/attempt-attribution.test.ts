@@ -12,7 +12,7 @@ import {
   readStageStatus, setFcGlobalDir, writeRunState,
 } from '../src/store.js';
 import { readRunEvents, recordStageOutcome } from '../src/run-events.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import {
   recordThrownStageAttempt,
 } from '../src/scheduler/sched_scope/stage-group.js';

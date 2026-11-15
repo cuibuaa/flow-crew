@@ -28,7 +28,7 @@ import {
   setFcGlobalDir,
   writeStageStatus,
 } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const role: AgentConfig = {

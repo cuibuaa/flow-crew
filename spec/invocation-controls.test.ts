@@ -12,7 +12,7 @@ import { requestStageCommandInterrupt } from '../src/command-interrupt.js';
 import { readEvidence } from '../src/evidence-ledger.js';
 import { processGroupIsAlive } from '../src/process-liveness.js';
 import { readRunEvents } from '../src/run-events.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { beginStageAttempt, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
 import { cmdEventsWithDeps } from '../src/cli-events.js';
@@ -33,8 +33,7 @@ function fixture() {
   const run = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['work']);
   return { run, options: { ...run, runDir: run.runDirPath, projectDir, stageId: 'work', role, dependsOn: [], retries: 0,
     promptTemplate: 'Complete the bounded work.', timeout_ms: 8_000,
-    deadlineClock: { monotonicNow: () => 0, wallNow: () => Date.now(),
-      setTimer: () => ({}) as ReturnType<typeof setTimeout>, clearTimer: () => {} }, artifactContract: fixtureArtifactContract('work') } };
+    artifactContract: fixtureArtifactContract('work') } };
 }
 
 describe('control reaches the invocation with verified retirement', () => {

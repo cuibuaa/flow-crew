@@ -12,7 +12,7 @@ import { readRunStateView } from '../src/run-state-view.js';
 import { recordStageOutcome } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 const freshUUID = '22222222-2222-4222-8222-222222222222';

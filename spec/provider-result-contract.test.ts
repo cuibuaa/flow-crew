@@ -16,7 +16,7 @@ import { readRunEvents } from '../src/run-events.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { decideStageRetry } from '../src/scheduler/sched_settlement/stage-execution.js';
 
 const message = 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.';

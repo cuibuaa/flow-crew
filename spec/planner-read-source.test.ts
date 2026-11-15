@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { ArtifactReadSchema, ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { createRun } from './test-support/create-run.js';
 import { runDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 
 describe('planner artifact contract matches admission', () => {

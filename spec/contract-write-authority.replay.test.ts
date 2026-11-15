@@ -8,7 +8,7 @@ import { createRun } from './test-support/create-run.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { runScopeSafeStageGroup } from '../src/scheduler/sched_loop/services.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { queryWriteGrantCapability } from '../src/write-grant.js';

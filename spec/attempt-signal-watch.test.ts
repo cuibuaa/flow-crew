@@ -7,7 +7,7 @@ import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { requestStageCommandInterrupt } from '../src/command-interrupt.js';
 import { readStageStatus, updateRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 

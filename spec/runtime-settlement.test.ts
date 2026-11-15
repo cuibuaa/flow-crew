@@ -4,7 +4,7 @@ import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { readStageLiveLogPath, stageLiveLogPath } from '../src/stage-live-log.js';
 import { appendEngineFile } from '../src/engine-integrity.js';
 import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';

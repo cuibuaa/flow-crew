@@ -13,7 +13,7 @@ import { createGitWorktree } from '../src/cli-ship-setup.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { fcGlobalDir, listRuns, readRunState, readStageStatus, setFcGlobalDir, updateOperationalRunStateAtPath, updateRunState, writeRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { createWatchState, pollWatch } from '../src/watch.js';

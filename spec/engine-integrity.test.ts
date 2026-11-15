@@ -16,7 +16,7 @@ import { queueOperatorGuidance, routePendingOperatorGuidanceToStage } from '../s
 import { appendTextRecord } from '../src/append-boundary.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { startSchedulerHeartbeat } from '../src/scheduler-heartbeat.js';
 import { writeSchedulerProcessIdentity, removeSchedulerProcessIdentity } from '../src/run-lock.js';
 import { spawn } from 'node:child_process';

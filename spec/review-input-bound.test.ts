@@ -15,7 +15,7 @@ import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, readStageStatus } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';

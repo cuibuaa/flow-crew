@@ -9,7 +9,7 @@ import { writeSession } from '../src/adapter-session.js';
 import { NativeUsageAccumulator, normalizeNativeUsage, sumInvocationUsage } from '../src/invocation-usage.js';
 import { createRun } from './test-support/create-run.js';
 import { completedStageAttemptStatus, fcGlobalDir, interruptedStageStatus, readStageStatus, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const usage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 80, cache_creation_input_tokens: 20 };
 const modelUsage = { 'fixture-model': { inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 80, cacheCreationInputTokens: 20, costUSD: 0.003 } };

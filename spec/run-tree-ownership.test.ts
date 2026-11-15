@@ -13,7 +13,7 @@ import { withEngineIntegrity } from '../src/engine-integrity.js';
 import * as engineFs from '../src/engine-fs.js';
 import { engineDirectory, stageWorkPath, runRecordPath, pathInTree } from '../src/run-layout.js';
 import { buildStagePrompt } from '../src/handoff.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fcGlobalDir, setFcGlobalDir, runsRoot } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 

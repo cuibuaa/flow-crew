@@ -29,7 +29,8 @@ import {
   readStageStatus,
   setFcGlobalDir,
 } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
+import { daemonFile } from './test-support/daemon-events.js';
 import { manualResearchClock } from './test-support/research-clock.js';
 
 const CLEANUP_TRIALS = 1;
@@ -61,12 +62,8 @@ interface CleanupObservation {
   settlementElapsedMs: number;
 }
 
-async function waitForFile(path: string, timeoutMs: number): Promise<void> {
-  const deadline = performance.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (performance.now() >= deadline) throw new Error(`fixture did not become ready: ${path}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+async function waitForFile(path: string): Promise<void> {
+  await daemonFile(path, () => existsSync(path) ? true : undefined);
 }
 
 function fixturePid(path: string): number | undefined {
@@ -138,7 +135,7 @@ async function runCleanupTrial(
     : execWithStdin(process.execPath, args, '', opts);
 
   try {
-    await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
+    await waitForFile(readyPath);
     controller?.abort('stage_abort');
     const result = await awaitBounded(
       execution,
@@ -544,7 +541,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
             FC_HOME: stateRoot,
           },
         });
-        await waitForFile(readyPath, 1_000);
+        await waitForFile(readyPath);
         atomicWrite(runRecordPath(created.runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
           version: 1,
           stageId,
@@ -628,7 +625,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
         env: { HOME: root, FC_HOME: join(root, 'fc-home') },
         onChild: (handles) => { hardKill = handles.kill; },
       });
-      await waitForFile(readyPath, 1_000);
+      await waitForFile(readyPath);
       if (!hardKill) throw new Error('post-result hard-kill handle was not supplied');
       hardKill();
       const hardResult = await awaitBounded(hardExecution, 2_000);
@@ -663,7 +660,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
         cwd: root, timeout_ms: 10_000, execution, abortSignal: controller.signal,
         onStdout: (text, activity) => activity?.feed(text),
       });
-      await waitForFile(readyPath, 5_000);
+      await waitForFile(readyPath);
       expect(JSON.parse(readFileSync(activityPath, 'utf8')).streamClosed).toBe(false);
       const scratch = JSON.parse(readFileSync(scratchPath, 'utf8'));
       expect(scratch).toMatchObject({ tmp: scratch.path, temp: scratch.path });

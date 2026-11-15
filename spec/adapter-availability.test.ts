@@ -1,7 +1,8 @@
 import { mockEntryPlan } from './test-support/planner-entry.js';
+import { pinBuildRuntime } from '../src/build-manifest.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -16,7 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   ADAPTER_INSTALL_HINT,
   findExecutableOnPath,
@@ -25,9 +26,20 @@ import {
 } from '../src/adapters/availability.js';
 import { normalizeAdapterName } from '../src/adapters/loader.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
+import { daemonCommand } from './test-support/daemon-events.js';
+import { stagePolicyPreload } from './test-support/stage-filesystem.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const fixtureRoots: string[] = [];
+let runtimeRoot: string;
+let cliPath: string;
+// Adapter/write-policy cases share immutable engine bytes, not mutable task state.
+// Cold public bootstrap is covered by quick-foreground; keep it out of each case.
+beforeAll(() => {
+  runtimeRoot = mkdtempSync(join(tmpdir(), 'fc-adapter-runtime-'));
+  cliPath = join(pinBuildRuntime(join(repositoryRoot, 'dist'), runtimeRoot), 'cli.js');
+});
+afterAll(() => { if (runtimeRoot) rmSync(runtimeRoot, { recursive: true, force: true }); });
 
 interface CliFixture {
   root: string;
@@ -70,9 +82,12 @@ function runCli(
   cliArgs: string[],
   extraEnv: Record<string, string> = {},
 ) {
-  return spawnSync(
+  // These adapter/write-policy probes observe normal shutdown, not crash durability.
+  const policy = join(fixture.root, 'policy.mjs');
+  writeFileSync(policy, stagePolicyPreload());
+  return daemonCommand(spawn(
     process.execPath,
-    [join(repositoryRoot, 'dist', 'cli.js'), ...cliArgs],
+    ['--import', policy, cliPath, ...cliArgs],
     {
       cwd: repositoryRoot,
       env: {
@@ -84,11 +99,9 @@ function runCli(
         NO_COLOR: '1',
         ...extraEnv,
       },
-      encoding: 'utf-8',
-      timeout: 20_000,
-      maxBuffer: 4 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe'],
     },
-  );
+  ));
 }
 
 function structuredBrief(): string {
@@ -249,21 +262,21 @@ describe('adapter resolution matrix', () => {
 });
 
 describe('CLI adapter behavior', () => {
-  it.each(['--supervise', '--no-supervise'])('refuses removed quick flag %s before launch', (flag) => {
+  it.each(['--supervise', '--no-supervise'])('refuses removed quick flag %s before launch', async (flag) => {
     const fixture = cliFixture();
-    const result = runCli(fixture, ['quick', '--project', fixture.project, flag, '--task', structuredBrief()]);
+    const result = await runCli(fixture, ['quick', '--project', fixture.project, flag, '--task', structuredBrief()]);
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain(`Unknown quick option: ${flag}`);
     expect(readdirSync(fixture.fcHome)).toEqual([]);
     expect(readdirSync(fixture.project)).toEqual([]);
   });
 
-  it.each(['codex', 'claude'] as const)('selects the only installed %s CLI at runtime', (adapter) => {
+  it.each(['codex', 'claude'] as const)('selects the only installed %s CLI at runtime', async (adapter) => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'auto');
     installCommand(fixture, adapter);
 
-    const result = quickUntilWorkflowLookup(fixture);
+    const result = await quickUntilWorkflowLookup(fixture);
 
     expect(result.status).toBe(1); // Missing planner proposal fails admission and uses the existing retry.
     expect(`${result.stdout}${result.stderr}`).toContain('failed');
@@ -272,11 +285,11 @@ describe('CLI adapter behavior', () => {
     expect(`${result.stdout}${result.stderr}`).toContain(`only installed CLI, ${adapter}`);
   });
 
-  it('fails nonzero with both correct install commands when no CLI is installed', () => {
+  it('fails nonzero with both correct install commands when no CLI is installed', async () => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'auto');
 
-    const result = quickUntilWorkflowLookup(fixture);
+    const result = await quickUntilWorkflowLookup(fixture);
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.status).toBe(1);
@@ -285,12 +298,12 @@ describe('CLI adapter behavior', () => {
     expect(output).not.toContain('@anthropic/claude-code');
   });
 
-  it('leaves ignored project defaults byte-identical during launch', () => {
+  it('leaves ignored project defaults byte-identical during launch', async () => {
     const fixture = cliFixture();
     const defaultsPath = writeAdapterConfig(fixture, 'codex');
     const before = { content: readFileSync(defaultsPath, 'utf-8'), mtimeMs: statSync(defaultsPath).mtimeMs };
 
-    const result = quickUntilWorkflowLookup(fixture);
+    const result = await quickUntilWorkflowLookup(fixture);
 
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain('@anthropic-ai/claude-code');
@@ -298,27 +311,27 @@ describe('CLI adapter behavior', () => {
     expect(statSync(defaultsPath).mtimeMs).toBe(before.mtimeMs);
   });
 
-  it('ignores a legacy project adapter setting when choosing an installed CLI', () => {
+  it('ignores a legacy project adapter setting when choosing an installed CLI', async () => {
     const fixture = cliFixture();
     const defaultsPath = writeAdapterConfig(fixture, 'retired-backend');
     installCommand(fixture, 'codex');
     const before = readFileSync(defaultsPath, 'utf-8');
 
-    const result = quickUntilWorkflowLookup(fixture);
+    const result = await quickUntilWorkflowLookup(fixture);
 
     expect(`${result.stdout}${result.stderr}`).toContain('Adapter resolution: codex');
     expect(`${result.stdout}${result.stderr}`).toContain('only installed CLI');
     expect(readFileSync(defaultsPath, 'utf-8')).toBe(before);
   });
 
-  it('keeps ordinary doctor completely read-only and rejects a PATH entry from another checkout', () => {
+  it('keeps ordinary doctor completely read-only and rejects a PATH entry from another checkout', async () => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'auto');
     mkdirSync(join(fixture.project, 'config', 'agents'), { recursive: true });
     installCommand(fixture, 'flowcrew');
     const before = projectSnapshot(fixture.project);
 
-    const result = runCli(fixture, ['doctor']);
+    const result = await runCli(fixture, ['doctor']);
     const output = `${result.stdout}${result.stderr}`;
 
     expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
@@ -329,13 +342,13 @@ describe('CLI adapter behavior', () => {
     expect(output).not.toMatch(/✅\s+flowcrew CLI:/);
   });
 
-  it('recognizes this linked CLI without an external which command', () => {
+  it('recognizes this linked CLI without an external which command', async () => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'auto');
     mkdirSync(join(fixture.project, 'config', 'agents'), { recursive: true });
-    symlinkSync(join(repositoryRoot, 'dist', 'cli.js'), join(fixture.bin, 'flowcrew'));
+    symlinkSync(cliPath, join(fixture.bin, 'flowcrew'));
 
-    const result = runCli(fixture, ['doctor']);
+    const result = await runCli(fixture, ['doctor']);
     const output = `${result.stdout}${result.stderr}`;
 
     expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
@@ -344,12 +357,12 @@ describe('CLI adapter behavior', () => {
     expect(output).toContain('Process supervision: portable Node shim');
   });
 
-  it('reports engine adapter state without changing project configuration', () => {
+  it('reports engine adapter state without changing project configuration', async () => {
     const fixture = cliFixture();
     const defaultsPath = writeAdapterConfig(fixture, 'retired-backend');
     installCommand(fixture, 'claude');
     const before = readFileSync(defaultsPath, 'utf-8');
-    const readOnly = runCli(fixture, ['adapter']);
+    const readOnly = await runCli(fixture, ['adapter']);
     expect(readOnly.status).toBe(0);
     expect(readOnly.stdout).toContain('Current adapter: auto');
     expect(readOnly.stdout).toContain('Installed adapters: claude');
@@ -357,10 +370,10 @@ describe('CLI adapter behavior', () => {
     expect(readFileSync(defaultsPath, 'utf-8')).toBe(before);
   });
 
-  it.each([false, true])('initializes skills and global state without copying engine configuration (installed CLIs=%s)', installed => {
+  it.each([false, true])('initializes skills and global state without copying engine configuration (installed CLIs=%s)', async installed => {
     const fixture = cliFixture();
     if (installed) { installCommand(fixture, 'codex'); installCommand(fixture, 'claude'); }
-    const result = runCli(fixture, ['init']);
+    const result = await runCli(fixture, ['init']);
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(join(fixture.project, '.fc'))).toBe(false);
     expect(existsSync(join(fixture.project, '.gitignore'))).toBe(false);
@@ -370,18 +383,18 @@ describe('CLI adapter behavior', () => {
     }
   });
 
-  it('leaves existing local run records and gitignore intact during explicit init', () => {
+  it('leaves existing local run records and gitignore intact during explicit init', async () => {
     const fixture = cliFixture();
     mkdirSync(join(fixture.project, '.fc', 'runs'), { recursive: true });
     writeFileSync(join(fixture.project, '.fc', 'runs', 'user.txt'), 'User state');
     writeFileSync(join(fixture.project, '.gitignore'), 'build/\n');
     const before = projectSnapshot(join(fixture.project, '.fc'));
-    expect(runCli(fixture, ['init']).status).toBe(0);
+    expect((await runCli(fixture, ['init'])).status).toBe(0);
     expect(projectSnapshot(join(fixture.project, '.fc'))).toEqual(before);
     expect(readFileSync(join(fixture.project, '.gitignore'), 'utf8')).toBe('build/\n');
   });
 
-  it.each([false, true])('launches foreground quick without project writes (existing brief=%s)', existingBrief => {
+  it.each([false, true])('launches foreground quick without project writes (existing brief=%s)', async existingBrief => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'mock');
     const mockDir = join(fixture.root, 'mock');
@@ -399,12 +412,12 @@ describe('CLI adapter behavior', () => {
     }
     const before = projectSnapshot(fixture.project);
     writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
-    const result = runCli(fixture, [
+    const result = await runCli(fixture, [
       'quick', '--project', fixture.project, '--adapter', 'mock',       '--no-campaign', '--task', brief,
     ], { MOCK_FIXTURE_DIR: mockDir });
     const output = `${result.stdout}${result.stderr}`;
 
-    expect(result.status).toBe(1);
+    expect(result.status, JSON.stringify({ signal: result.signal, output })).toBe(1);
     expect(output, output).toContain('implement: failed');
     expect(output).toContain('Failure reason:');
     expect(output).toContain('Failed stage implement:');
@@ -415,18 +428,18 @@ describe('CLI adapter behavior', () => {
     expect(readFileSync(runRecordPath(join(fixture.fcHome, 'runs', runs[0]), 'task_brief.md'), 'utf8')).toBe(brief);
   });
 
-  it('gives body headings no preflight declaration authority', () => {
+  it('gives body headings no preflight declaration authority', async () => {
     const fixture = cliFixture();
     const malformedPath = join(fixture.root, 'malformed.md');
     const absentPath = join(fixture.root, 'absent.md');
     writeFileSync(malformedPath, `${structuredBrief()}\n## Reality checks\nchecks:\n  - name: broken\n    type: file-exists-nonempty\n     params: { paths: [x] }\n`, 'utf-8');
     writeFileSync(absentPath, structuredBrief(), 'utf-8');
 
-    const malformed = runCli(fixture, ['rehearse', malformedPath, '--static-only']);
+    const malformed = await runCli(fixture, ['rehearse', malformedPath, '--static-only']);
     expect(malformed.status).toBe(0);
     expect(malformed.stdout).toContain('✅ Contract ready');
 
-    const absent = runCli(fixture, ['rehearse', absentPath, '--static-only']);
+    const absent = await runCli(fixture, ['rehearse', absentPath, '--static-only']);
     expect(absent.status).toBe(0);
     expect(absent.stdout).toContain('✅ Contract ready');
   });

@@ -10,7 +10,7 @@ import { StageConfigSchema, parseAgent } from '../src/scheduler/sched_admission/
 import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { appendProjectWriteContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 
 const agents = resolve(import.meta.dirname, '..', 'config', 'agents');

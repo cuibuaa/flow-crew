@@ -13,7 +13,7 @@ import { StageConfigSchema } from '../src/scheduler/sched_admission/configuratio
 import { createContentSettlementContext } from '../src/scheduler/sched_scope/frozen-inputs.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { appendEngineFile } from '../src/engine-integrity.js';

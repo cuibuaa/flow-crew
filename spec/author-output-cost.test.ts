@@ -9,7 +9,7 @@ import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, wri
 import { generateRunSummary } from './test-support/run-summary.js';
 
 
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 
 const record = () => ({ status: 'delivered', summary: 'Delivered the requested report.',
   checks: [{ command: 'node check.mjs', exit_code: 0, evidence: 'checks/stdout.txt' }], caveats: [], remaining_work: [] });

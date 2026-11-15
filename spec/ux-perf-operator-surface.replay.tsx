@@ -18,7 +18,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cmdShipPreflightWithDeps } from '../src/cli-ship-preflight.js';
 import { startRpcServer, type RpcResponse } from '../src/orchestrator-rpc.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import RunDetail from '../ui/src/components/RunDetail';

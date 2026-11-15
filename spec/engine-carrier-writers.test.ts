@@ -14,7 +14,7 @@ import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { execWithStdin, type Adapter, type AgentConfig } from '../src/adapters/base.js';
 
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';

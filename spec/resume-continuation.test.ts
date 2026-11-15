@@ -9,7 +9,7 @@ import { normalizeStageContracts, WorkflowConfigSchema } from '../src/scheduler.
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 

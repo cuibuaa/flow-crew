@@ -7,9 +7,9 @@ import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import * as inputOwner from '../src/adapter-input.js';
 import { DeclarationRefusal } from '../src/brief-declarations.js';
 import { loadEngineDefaults } from '../src/config.js';
-import { runStage, type StageOpts } from '../src/worker.js';
+import { type StageOpts } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { stageRecordSchema } from '../src/handoff.js';
-import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { fcGlobalDir, listRuns, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
@@ -44,16 +44,6 @@ beforeEach(() => {
 });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
 
-function clock() {
-  let elapsed = 0;
-  const started = Date.parse('2030-01-01T00:00:00.000Z');
-  const timers = new Map<object, { at: number; callback: () => void }>();
-  const value: AttemptDeadlineClock = { monotonicNow: () => elapsed, wallNow: () => started + elapsed,
-    setTimer(callback, delay) { const timer = {}; timers.set(timer, { at: elapsed + delay, callback }); return timer as ReturnType<typeof setTimeout>; },
-    clearTimer(timer) { timers.delete(timer); } };
-  return { value, advanceTo(at: number) { elapsed = at; for (const [id, timer] of [...timers]) if (timer.at <= at) { timers.delete(id); timer.callback(); } } };
-}
-
 describe('the single adapter input owner', () => {
   it.each(['codex', 'claude', undefined])('sends the exact fitting input and refuses before capture (%s)', async sessionKind => {
     const limit = inputOwner.adapterInputLimit({ sessionKind });
@@ -84,7 +74,7 @@ type SendingPath = typeof paths[number];
 
 async function worker(path: SendingPath, limit = 500_000, capturesInvocationInput = false) {
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work'], `---\ninput_limit_chars: ${limit}\n---\n`);
-  const time = clock(), seen: Array<{ prompt: string; system: string }> = [];
+  const seen: Array<{ prompt: string; system: string }> = [];
   const adapter: Adapter = { sessionKind: 'codex', capturesInvocationInput, async run(prompt, agent, opts) {
     seen.push({ prompt, system: agent.prompt });
     if (capturesInvocationInput) opts.onInvocationInput?.({ userPrompt: prompt, systemPrompt: agent.prompt });
@@ -97,7 +87,7 @@ async function worker(path: SendingPath, limit = 500_000, capturesInvocationInpu
       exitCode: opts.abortSignal?.aborted ? 137 : path === 'gate' ? 1 : 0, duration_ms: 1 };
   } };
   const options: StageOpts = { ...created, runDir: created.runDirPath, projectDir: project, stageId: 'work', role,
-    dependsOn: [], promptTemplate: 'P'.repeat(100_000), timeout_ms: 10_000, deadlineClock: time.value, retries: 0,
+    dependsOn: [], promptTemplate: 'P'.repeat(100_000), timeout_ms: 10_000, retries: 0,
     artifactContract: contract, technicalRetry: { delaysMs: [0, 0] },
     isGate: path === 'gate', dynamicDispatch: path === 'planner',
     outputSchema: path === 'correction' ? stageRecordSchema({}) : undefined,

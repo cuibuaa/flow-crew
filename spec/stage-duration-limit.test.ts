@@ -14,9 +14,9 @@ import { executeOrdinaryStage } from '../src/scheduler/sched_loop/ordinary-stage
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { stageRecordSchema } from '../src/handoff.js';
-import { runStage } from '../src/worker.js';
+import { runStage, stationaryStageClock as clock } from './test-support/stage-deadline.js';
 import * as deadline from '../src/attempt-deadline.js';
-import { createTechnicalRetryBudgetState, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { createTechnicalRetryBudgetState } from '../src/attempt-deadline.js';
 import { isRetryableAdapterFailure } from '../src/adapters/failure.js';
 import { createRun } from './test-support/create-run.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -46,10 +46,6 @@ beforeEach(() => {
 });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
 
-function clock(): AttemptDeadlineClock {
-  return { monotonicNow: () => 0, wallNow: () => Date.parse('2030-01-01T00:00:00Z'),
-    setTimer: () => ({} as ReturnType<typeof setTimeout>), clearTimer: () => {} };
-}
 function workflow(extra: Record<string, unknown> = {}) {
   return WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations: 2, max_retries: 0 },
     stages: [{ id: 'work', role: 'fixture', scope: [], artifact_contract: contract, ...extra }] });

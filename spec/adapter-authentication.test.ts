@@ -15,7 +15,7 @@ import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';

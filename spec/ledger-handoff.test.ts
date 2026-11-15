@@ -15,7 +15,8 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
-import { runStage } from '../src/worker.js';
+import { runStage } from './test-support/stage-deadline.js';
+import { manualResearchClock } from './test-support/research-clock.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -77,12 +78,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     await runStage({ async run() { return { output: delivered('EXACT_OWN_PREDECESSOR'), exitCode: 1, duration_ms: 1 }; } }, options);
     const predecessor = readEvidence(created.runDirPath).find(entry => entry.kind === 'attempt');
     writeFileSync(join(project, 'value.txt'), 'INITIAL_VALUE\n');
-    let elapsed = 0;
-    const epoch = Date.now();
-    const timers = new Map<object, { at: number; fn: () => void }>();
-    const clock = { monotonicNow: () => elapsed, wallNow: () => epoch + elapsed,
-      setTimer(fn: () => void, delay: number) { const timer = {}; timers.set(timer, { at: elapsed + delay, fn }); return timer; },
-      clearTimer(timer: object) { timers.delete(timer); } };
+    const { clock, timers } = manualResearchClock();
     const calls: Array<{ user: string; opts: RunOpts }> = [];
     const adapter: Adapter = { async run(user, _role, opts) {
       calls.push({ user, opts });
@@ -210,17 +206,15 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
     const guidance = appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: 'Preserve the required greeting.', knownStageIds: ['work'] });
     const calls: Array<{ user: string; opts: RunOpts }> = [];
-    let elapsedOffset = 0;
-    const clock = { monotonicNow: () => Date.now() + elapsedOffset, wallNow: () => Date.now() + elapsedOffset,
-      setTimer: (fn: () => void, delay: number) => setTimeout(fn, delay), clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer) };
+    const time = manualResearchClock();
     const first = delivered('OWN_PREDECESSOR_RECORD', kind === 'continuation' ? ['Deliver the greeting.'] : []);
     const adapter: Adapter = { async run(user, _role, opts) {
       calls.push({ user, opts });
-      if (kind === 'continuation' && opts.attemptIndex === 1) elapsedOffset = 70_000;
+      if (kind === 'continuation' && opts.attemptIndex === 1) time.advanceTo(70_000);
       return { output: opts.attemptIndex === 1 ? first : delivered('Complete.'), exitCode: kind === 'retry' && opts.attemptIndex === 1 ? 1 : 0, duration_ms: 1, sessionId: uuid };
     } };
     const opts = { stageId: 'work', role: { name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'Unique role contract.' }, dependsOn: [], promptTemplate: 'Deliver the greeting.',
-      timeout_ms: 60_000, deadlineClock: clock, projectDir: project, runId: created.runId, runDir: created.runDirPath, retries: 0,
+      timeout_ms: 60_000, deadlineClock: time.clock, projectDir: project, runId: created.runId, runDir: created.runDirPath, retries: 0,
       artifactContract: fixtureArtifactContract('work'), outputSchema: HANDOFF_SCHEMA };
     const firstResult = await runStage(adapter, opts);
     if (kind === 'continuation') expect(firstResult.continuation?.reason).toBe('stage_budget');
