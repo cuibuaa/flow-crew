@@ -127,7 +127,7 @@ describe('single-author admission and historical competition records', () => {
     for (const name of ['coder', 'qa'])
       writeFileSync(join(roles, `${name}.yaml`), `name: ${name}\nprompt: Fixture.\ntools: []\n`);
     const calls: string[] = [];
-    const result = await runWorkflow(workflow, stringify(workflow), project, { async run(prompt, _role, opts) { calls.push(opts.stageId); expect(prompt).toContain('every authoring stage runs one author'); expect(prompt).toContain('Requests in brief text or frontmatter for competing candidates run as single-author work under this notice'); return completed(opts, 'Complete.'); } }, new Map(), undefined, roles, undefined, brief);
+    const result = await runWorkflow(workflow, stringify(workflow), project, { async run(prompt, _role, opts) { calls.push(opts.stageId); expect(prompt.includes('every authoring stage runs one author'), 'P07 single-author notice audience').toBe(opts.stageId === 'work'); if (opts.stageId === 'work') expect(prompt).toContain('Requests in brief text or frontmatter for competing candidates run as single-author work under this notice'); return completed(opts, 'Complete.'); } }, new Map(), undefined, roles, undefined, brief);
     expect(result.status, result.failureReason).toBe('complete');
     expect(calls).toEqual(['work', 'review']);
     expect(readRunEvents(project, result.runId).find(event => event.type === 'execution_notice')?.detail).toContain('every authoring stage runs one author');

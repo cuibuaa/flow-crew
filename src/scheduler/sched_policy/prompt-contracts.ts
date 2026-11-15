@@ -15,7 +15,7 @@ and evidence. Pass only when all meet their acceptance lines. Disclose missing o
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
 sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use only the invocation's private $TMPDIR. Target repairs belong to an author.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use their own stage workspace or the invocation's private $TMPDIR. Target repairs belong to an author.
 
 ## Run-directory safety
 The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result. Stage outputs, evidence, probes and model homes belong under work/. Put run-rooted artifact declarations under work/; requests/ and control/ are engine API locations, not stage output locations.

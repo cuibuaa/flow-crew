@@ -450,8 +450,8 @@ promises that a model will obey. Keep the detailed contract above authoritative.
   declared reads; identify the writers of substantive evidence. Treat `min_wall_minutes` at or
   below 10 as an anti-instant-quit guard only.
   Reason: a clock or an early terminal file cannot prove that downstream verification happened.
-- Require preflight, rehearsal and setup to agree on declared output inventory and intended
-  existing-content authority before launch.
+- Review the declared output inventory and intended existing-content authority during
+  exact-byte rehearsal; setup checks the materialized target before launch.
   Reason: an occupied path does not become safe merely because it is the requested output name.
 - Declare intended inputs in frontmatter `inputs:`; prose paths are references only.
   Use structured entries with `frozen: true` for evidence that must remain unchanged.

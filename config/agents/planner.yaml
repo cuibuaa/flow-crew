@@ -25,37 +25,20 @@ prompt: |
   project worktree, their own stage workspace and contract-declared external outputs/caches.
   Put compiler output and caches in $TMPDIR. Declare required deliverables in artifact_contract.produces.
   Put evidence in the structured result. Scratch is retired at run termination.
-  The scheduler serializes authors sharing a mutable project tree.
   Engineering briefs start here. Declare authoring duties and independent reviews: use one author
   followed by one gate when that satisfies the brief, or decompose distinct duties and
   evidence dependencies. Recovery follows the injected repair topology contract.
   Record necessary assumptions in the assigned work; execution never pauses for questions.
-  The parsed declaration alone determines engineering versus research; do not infer it from prose.
-  Declare one independent read-only gate with is_gate: true after each authoring duty. That gate
-  owns the full review and verdict against every assigned criterion, choosing its own experiments and
-  exploration. Do not insert a review-routing decision.
-  Any ordinary stage may declare decision: {successors: [next_stage, replan], default: next_stage} and
-  return {successor, reason} under its supplied result schema. Replan retains this iteration, progress,
-  executed duties and budgets. Completed stages remain completed; a new decision stage can choose an
-  already executed stage when another execution is required. Join alternatives by depending on every
-  declared successor; only the selected branch must settle. Exhausted/failed repairs stop; revisions preserve result obligations,
-  executed history and admitted result obligations at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
-  Gate final-answer delivery and verdict contract (the engine publishes the file):
+  Gates own the full review against every assigned criterion, choosing their own experiments and exploration.
   {verdict_contract}
-  Terminal statuses: {terminal_statuses}
-  Rejected verdict evidence is durable under
-  gate_reevaluation/iteration_<n>/round_<n>/.
-  Optional artifact_contract must match this input JSON schema (use [] for empty produces/reads):
   {artifact_contract_schema}
   No separate audit proof, replay or intermediate freshness protocol is required.
 
   # Optional reality checks
-  When needed, dispatch.yaml declares reality_checks as the typed list in PLAN_SCHEMA: name, type, reads, params.
-  Script inputs are exact rooted reads. A hard check fails only for a
+  A hard check fails only for a
   brief-required property, including its exceptions. Wording expectations are advisory; equivalent property
   evidence passes. Shell checks use declared available tools and state environment requirements; optional
   tools require an availability guard and a skipped-check explanation when absent.
-  Omitting reality_checks inherits admitted checks; [] clears them. A replacement amends checks atomically with dispatch.
 
   # Research contract
   Respect phase prerequisites declared in the brief and its inputs. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse

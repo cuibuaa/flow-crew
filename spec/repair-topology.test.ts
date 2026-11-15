@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { PLAN_SCHEMA, renderPlanInterface } from '../src/plan-interface.js';
 import { REPAIR_TOPOLOGY_EXAMPLE } from '../src/repair-topology.js';
@@ -48,6 +49,35 @@ describe('engine-owned repair topology', () => {
     const count = stages.length;
     expect(admit(stages).errors).toEqual([]);
     expect(stages).toHaveLength(count);
+  });
+
+  it('P03 gives planner field mechanics one schema owner while keeping admission and independent judgement', () => {
+    const planner = parse(readFileSync(join(import.meta.dirname, '../config/agents/planner.yaml'), 'utf8')).prompt as string;
+    for (const duplicate of [
+      'decision: {successors:', 'return {successor, reason}', 'is_gate: true',
+      'Terminal statuses:', 'gate_reevaluation/iteration_', 'use [] for empty produces/reads',
+      'name, type, reads, params', 'Omitting reality_checks inherits admitted checks',
+    ]) expect(planner, `planner-field-schema-owner: ${duplicate}`).not.toContain(duplicate);
+    expect(planner, 'independent-review judgement').toContain('choosing their own experiments and exploration');
+    expect(planner, 'property-equivalence judgement').toContain('equivalent property');
+    for (const contract of ['{verdict_contract}', '{artifact_contract_schema}', '{project_contract}']) {
+      expect(planner, 'output-schema contracts retained').toContain(contract);
+    }
+    const illegal = structuredClone(REPAIR_TOPOLOGY_EXAMPLE);
+    Object.assign(illegal.stages[1], { retry_to: ['author'] });
+    const rejected = admit(illegal.stages.map(parseDispatchedStageConfig));
+    expect(rejected.errors, 'gate-return-edge admission catch').toContainEqual(expect.objectContaining({
+      code: 'stage_retry_to', stageId: 'review', message: expect.stringContaining('gate stages cannot declare retry_to'),
+    }));
+  });
+
+  it('P11 leaves full validation with the engine while preserving targeted author checks', () => {
+    const planner = parse(readFileSync(join(import.meta.dirname, '../config/agents/planner.yaml'), 'utf8')).prompt as string;
+    const coder = parse(readFileSync(join(import.meta.dirname, '../config/agents/coder.yaml'), 'utf8')).prompt as string;
+    expect(planner, 'targeted author verification stays assigned').toContain('Implementation includes targeted author verification');
+    expect(planner, 'no source-owned full-suite author task').not.toMatch(/(?:run|verify[^.]*with)[^.]*full[- ]suite/i);
+    expect(coder.replace(/\s+/g, ' '), 'engine owns configured validation').toContain('The engine runs configured validation after settlement');
+    expect(coder.replace(/\s+/g, ' '), 'author full-suite duplication remains prohibited').toContain('Do not run the full suite');
   });
 
   it('admits the canonical planner-facing example through real admission', () => {

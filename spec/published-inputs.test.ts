@@ -10,7 +10,8 @@ import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { appendProjectWriteContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 
 import { applyBasePrompt, inspectDispatchAdmission, loadBasePrompt, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig } from '../src/scheduler.js';
-import { buildStagePrompt } from '../src/handoff.js';
+import { FINDING_POLICY_TEXT, validateFindingVerdict } from '../src/scoped-audit-repair.js';
+import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema, buildStagePrompt } from '../src/handoff.js';
 import { parseChecksFromMarkdown, parseRealityChecks, runAllChecks } from '../src/reality-gate/index.js';
 import { parseBriefDeclarations } from '../src/brief-declarations.js';
 import { parseBriefFrontmatterDocument } from '../src/brief-frontmatter.js';
@@ -70,6 +71,43 @@ describe('published declaration inputs', () => {
           expect(loaded.prompt, file).toContain('Examples do not exclude equivalent property evidence');
         }
       }
+    } finally { owned.cleanup(); }
+  });
+
+  it('P02 gives every reviewer one finding-policy owner and still refuses unconfirmed rejection', () => {
+    const owned = fixture();
+    try {
+      for (const role of ['qa', 'doc_reviewer', 'paper_reviewer', 'ai_detector']) {
+        const prompt = buildStagePrompt({ dependsOn: [], promptTemplate: 'Review the changed output.',
+          projectDir: owned.project, runDir: owned.run, runId: 'fixture', role, isGate: true,
+          outputSchema: stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] }) }, '');
+        expect(prompt.split(FINDING_POLICY_TEXT), `${role}: single finding-policy owner`).toHaveLength(2);
+        expect(prompt, `${role}: duplicate reproduction procedure`).not.toContain('## Reproduced findings and validation');
+      }
+      expect(validateFindingVerdict({ pass: false, criteria: { criterion: { status: 'fail' } },
+        audit_findings: { version: 1, findings: [{ id: 'defect', class: 'criterion_unmet', paths: ['output.txt'],
+          reason: 'Missing required content.', criterion_ids: ['criterion'], invalidates_plan: false,
+          repair_role: 'coder', reproduction: null }] } }, ['criterion']), 'unconfirmed rejecting finding still refused')
+        .toContain('FINDING_REPRODUCTION_REQUIRED');
+    } finally { owned.cleanup(); }
+  });
+
+  it('P04 routes environment-gap advice by the supplied result schema and retains its required blocks', () => {
+    const owned = fixture();
+    try {
+      const opts = { dependsOn: [], promptTemplate: 'Check the assigned output.',
+        projectDir: owned.project, runDir: owned.run, runId: 'fixture' };
+      for (const outputSchema of [undefined, stageRecordSchema({ isGate: true }),
+        { type: 'object' as const, properties: { summary: { type: 'string' as const } } }]) {
+        expect(buildStagePrompt({ ...opts, outputSchema }, ''), 'schema without environment_gap gets no gap advice')
+          .not.toContain('## Environment gaps');
+      }
+      expect(buildStagePrompt({ ...opts, outputSchema: HANDOFF_SCHEMA }, ''), 'author schema retains gap advice')
+        .toContain('## Environment gaps');
+      const gap = { status: 'environment_gap', summary: 'Capability unavailable.', caveats: [], remaining_work: [] };
+      expect(() => parseStageRecord(JSON.stringify(gap), HANDOFF_SCHEMA), 'gap must declare blocked work').toThrow('blocks');
+      expect(parseStageRecord(JSON.stringify({ ...gap, blocks: null }), HANDOFF_SCHEMA), 'unknown blocked work remains valid')
+        .toMatchObject({ blocks: null });
     } finally { owned.cleanup(); }
   });
 

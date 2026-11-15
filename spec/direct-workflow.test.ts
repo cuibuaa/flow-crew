@@ -93,6 +93,13 @@ describe('direct workflow', () => {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }
       expect(call.user).toContain('Work-division note (scope)');
+      expect(call.user, 'P10 worker supplies a workspace locator without a competing probe rule').not.toContain('Put probes and evidence here');
+      expect(call.system, 'P10 scratch rule matches the workspace and temporary write grants')
+        .toContain("disposable probes use their own stage workspace or the invocation's private $TMPDIR");
+      expect(call.system, 'P10 project write boundary remains closed for gates').toContain('Gates have no project write grant');
+      expect(call.user.includes('Execution model: every authoring stage runs one author.'),
+        'P07 execution notice applies to author and repair, not independent review').toBe(call.id !== 'review');
+      expect(call.user.includes('## Environment gaps'), 'P04 worker forwards the active schema').toBe(call.id !== 'review');
       expect(call.user, 'P09 worker execution clock owns the allowance').not.toContain('Stage budget:');
       expect(call.user.split('# Execution clock'), 'P09 one current execution clock').toHaveLength(2);
       expect(call.user, 'P09 truthful undeclared clock').toContain('has no declared duration allowance');

@@ -627,7 +627,8 @@ process.stdin.resume(); process.stdin.on('end', () => {
     if (!supported()) return;
     const path = join(directory, 'work', 'dispatch.yaml');
     const contract = { ...artifacts, produces: [{ id: 'dispatch', root: 'run' as const, path: 'work/dispatch.yaml', kind: 'file' as const, nonempty: true }] };
-    const adapter: Adapter = { sessionKind: 'local', async run(_prompt, _role, opts) {
+    const adapter: Adapter = { sessionKind: 'local', async run(prompt, _role, opts) {
+      expect(prompt, 'P07 dynamic planner is not an authoring audience').not.toContain('Execution model:');
       return execWithStdin(process.execPath, ['-e', `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(path)},'{"stages":[]}'); let code; try {fs.writeFileSync(${JSON.stringify(join(directory,'work','sibling'))},'bad');}catch(error){code=error.code;} console.log(JSON.stringify({status:'delivered',summary:code,caveats:[],remaining_work:[],blocks:null}));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
     } };
     const result = await runStage(adapter, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId, runDir: directory,
@@ -635,6 +636,26 @@ process.stdin.resume(); process.stdin.on('end', () => {
     expect(result.exitCode, result.output).toBe(0);
     expect(JSON.parse(result.output).summary).toBe('EACCES');
     expect(readFileSync(path, 'utf8')).toBe('{"stages":[]}');
+  });
+
+  it('P10 permits reviewer probes in its workspace and private scratch while refusing project writes', async () => {
+    if (!supported()) return;
+    const probe = join(directory, 'work', 'stages', 'left', 'probe');
+    const agent: Adapter = { sessionKind: 'local', async run(_prompt, _role, opts) {
+      return execWithStdin(process.execPath, ['-e', `const fs=require('node:fs'),path=require('node:path');
+fs.writeFileSync(${JSON.stringify(probe)},'workspace probe');
+fs.writeFileSync(path.join(process.env.TMPDIR,'probe'),'temporary probe');
+let code;try{fs.writeFileSync(${JSON.stringify(join(project,'forbidden'))},'bad');}catch(error){code=error.code;}
+console.log(JSON.stringify({pass:true,reason:code,criteria:{},audit_findings:{version:1,findings:[]}}));`], '',
+        { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
+    } };
+    const result = await runStage(agent, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId,
+      runDir: directory, retries: 0, timeout_ms: 60_000, artifactContract: artifacts, isGate: true,
+      outputSchema: stageRecordSchema({ isGate: true }) });
+    expect(result.exitCode, 'workspace and private scratch grants permit both probes').toBe(0);
+    expect(JSON.parse(result.output).reason, 'read-only project rule still fires').toBe('EACCES');
+    expect(readFileSync(probe, 'utf8')).toBe('workspace probe');
+    expect(existsSync(join(project,'forbidden'))).toBe(false);
   });
 
   it('keeps an engine-published verdict outside the agent grant while publishing its typed result', async () => {

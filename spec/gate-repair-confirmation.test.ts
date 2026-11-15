@@ -17,7 +17,7 @@ import { validateSettledTree } from '../src/scheduler/sched_settlement/gate-vali
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { appendEvidence, captureProjectTree, readEvidence, type EvidenceEntry } from '../src/evidence-ledger.js';
-import { assessFindings, type AuditFinding } from '../src/scoped-audit-repair.js';
+import { FINDING_POLICY_TEXT, assessFindings, type AuditFinding } from '../src/scoped-audit-repair.js';
 import { stageFixtureCommand } from './test-support/stage-command.js';
 import * as validation from '../src/project-validation.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
@@ -380,13 +380,17 @@ describe('repair requires a reviewer reproduction', () => {
     expect(assessFindings([finding('no', 1)], [command], { ...gate, treeHash: 'new' }).confirmed).toEqual([]);
   });
 
-  it('renders the reviewer reproduction contract; grounding is checked after schema parsing', async () => {
+  it('renders one finding policy and the invocation endpoint; grounding is checked after schema parsing', async () => {
     const value = await workflow('unconfirmed');
     const prompt = buildStagePrompt({ projectDir: value.project, runDir: value.directory, runId: value.final.runId,
       dependsOn: [], promptTemplate: 'Independent reviewer', isGate: true, stageId: 'review' });
-    for (const text of ['must cite its reproduction record', 'integer sequence in evidence-ledger.jsonl', 'native shell tool',
-      'structured exit code, output digest and tree hash', 'explicit absolute cwd and shell', 'engine-recorded command endpoint', 'returns record.sequence',
-      'Keep the project read-only', 'run your own experiments']) expect(prompt).toContain(text);
+    expect(prompt.split(FINDING_POLICY_TEXT), 'P02 single finding-policy owner').toHaveLength(2);
+    expect(prompt, 'P02 removed duplicate procedure').not.toContain('## Reproduced findings and validation');
+    const invocation = value.calls.find(call => call.stage === 'review')!.prompt;
+    for (const text of ['## Engine-recorded command', 'native shell tool', 'record.sequence',
+      '"cwd":', '"shell":', 'engine-recorded reproduction']) {
+      expect(invocation, 'invocation endpoint retains reproducible command context').toContain(text);
+    }
     const legacy = { pass: false, reason: 'legacy', criteria: {}, audit_findings: { version: 1, findings: [finding('legacy')] },
       repairability: { version: 1, disposition: 'repairable', evidence: 'legacy evidence' } };
     expect(parseStageRecord(JSON.stringify(legacy), stageRecordSchema({ isGate: true }))).toEqual(legacy);

@@ -28,10 +28,11 @@ describe('planner artifact contract matches admission', () => {
       });
       expect(result.exitCode).toBe(0);
       expect(received).not.toContain('{artifact_contract_schema}');
-      const description = received.match(/Optional artifact_contract must match this input JSON schema[^\n]*\n([^\n]+)/)?.[1];
+      const expected = z.toJSONSchema(ArtifactContractSchema, { io: 'input' });
+      const description = received.split('\n').find(line => line === JSON.stringify(expected));
       expect(description, 'planner must receive the generated artifact_contract input schema').toBeDefined();
       const schema = JSON.parse(description!);
-      expect(schema).toEqual(z.toJSONSchema(ArtifactContractSchema, { io: 'input' }));
+      expect(schema).toEqual(expected);
       const { $schema, ...readSchema } = z.toJSONSchema(ArtifactReadSchema, { io: 'input' });
       expect(schema.properties.reads.items).toEqual(readSchema);
       expect(schema.required).toEqual(['version', 'produces', 'reads']);

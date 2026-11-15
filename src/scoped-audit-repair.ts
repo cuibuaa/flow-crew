@@ -58,7 +58,7 @@ export function auditFindingsJsonSchema(refs: string[], pass = false): import('.
 }
 export const FINDING_POLICY_TEXT = 'Choose each finding class:\n'
   + Object.entries(FINDING_CLASSES).map(([name, policy]) => `- ${name} (${policy.rejects ? 'rejecting' : 'advisory'}): ${policy.description}`).join('\n')
-  + '\nDo not invent task requirements. Only rejecting findings make pass=false; pass=true may include advisory findings. A rejection must contain a rejecting finding. Advisory findings are retained for the operator and never become repair obligations. Every rejecting finding rests on a named brief criterion or a reproduced base/changed difference. Independent evidence is required; the author’s word alone is not proof.';
+  + '\nDo not invent task requirements. Only rejecting findings make pass=false; pass=true may include advisory findings. A rejection must contain a rejecting finding. Advisory findings are retained for the operator and never become repair obligations. Every rejecting finding rests on a named brief criterion or a reproduced base/changed difference. Independent evidence is required; the author’s word alone is not proof. Read configured validation from the engine record: do not rerun it or request a base suite, and unfinished validation is not a rejection. A reproduction command exits 0 when the defect is absent and nonzero when present.';
 
 /** Validate model declarations; never derive a class or override pass from text. */
 export function validateFindingVerdict(record: Record<string, unknown>, refs: string[],

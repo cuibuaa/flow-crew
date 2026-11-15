@@ -104,7 +104,7 @@ describe('nothing waits for a person after launch', () => {
     expect(state.status, state.failureReason).toBe('complete');
     expect(state.research).toBeUndefined();
     expect(fixture.calls).toEqual(['plan', 'implement', 'review']);
-    expect(fixture.prompts[0]).toContain('parsed declaration alone');
+    expect(fixture.prompts[0], 'planner still receives the executable plan contract').toContain('executable JSON schema');
     expect(fixture.prompts[0]).not.toContain('missing_author_facts');
     expect(state.decisionGraph?.records[0].outcome).toBe('chosen');
   });

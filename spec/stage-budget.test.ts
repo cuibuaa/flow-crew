@@ -708,7 +708,8 @@ describe('retained contracts under declared allowances', () => {
     expect(result.stages.work.attempts?.[0].continuation).toMatchObject({ forced: true });
     expect(result.stages.work.continuation).toBeUndefined();
     expect(result.stages.review.timeout?.budgetMs).toBe(budget);
-    expect(prompts.at(-1)).toContain('Independent gates have their own stage budgets');
+    expect(prompts.at(-1), 'P07 independent gate omits author execution notice').not.toContain('Independent gates have their own stage budgets');
+    expect(prompts.at(-1), 'independent gate retains its actual execution clock').toContain('# Execution clock');
   });
   it('B10 repeated declared expiries exhaust iterations without growing budgets or reporting a stage failure', async () => {
     const { roles, workflow } = workflowFixture(2);

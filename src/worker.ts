@@ -282,6 +282,7 @@ export async function runStage(
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
     isGate: opts.isGate,
+    outputSchema: opts.outputSchema,
     criterionRefs: opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
@@ -503,7 +504,8 @@ export async function runStage(
   }
   if (opts.artifactContract) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
-  prompt += `\n\nStage workspace: ${stageWorkPath(opts.runDir, 'stages', opts.stageId)}. Put probes and evidence here. The engine tree ${runRecordPath(opts.runDir, '.')} and the root run.json/events.jsonl are read-only. Run artifact paths must be inside work/.\n\n${SINGLE_AUTHOR_NOTICE}`;
+  prompt += `\n\nStage workspace: ${stageWorkPath(opts.runDir, 'stages', opts.stageId)}. The engine tree ${runRecordPath(opts.runDir, '.')} and the root run.json/events.jsonl are read-only. Run artifact paths must be inside work/.`;
+  if (!opts.isGate && !opts.dynamicDispatch && opts.role.name !== 'planner') prompt += `\n\n${SINGLE_AUTHOR_NOTICE}`;
   const historicalCandidates = readdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
   if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => runRecordPath(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
   // A declared run product may belong to later work, but an available product

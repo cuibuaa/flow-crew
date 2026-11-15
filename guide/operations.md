@@ -41,7 +41,8 @@ Sources: [lifecycle vocabulary](../src/lifecycle-status.ts), [task registry](../
 
 `ship-preflight` gathers prior-run/campaign/input/output/build facts and discovers validation
 commands. It runs no project build, test or lint.
-Exit zero means collection completed, not that launch is ready.
+Exit zero means collection completed, not that launch is ready. This optional inspection
+surface need not precede the ship recipe's exact-byte rehearsal; setup and launch own admission.
 
 `ship-setup` requires the exact brief, source project, base, new branch and target. It checks
 source/base inputs, creates or proves the reusable managed worktree, materializes missing

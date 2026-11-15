@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { briefDeclarationFailures, createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
+import { verifyBriefAdmission } from '../src/brief-admission.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const read = (path: string) => readFileSync(join(repositoryRoot, path), 'utf-8');
@@ -81,6 +83,22 @@ describe('ship skill semantic contract', () => {
     expect(ship).toContain('Do not treat the original `/ship` request or an earlier “ship it” as');
   });
 
+  it('A03 keeps one authoring check while exact-digest and declaration admission still catch defects', () => {
+    // A small authored task takes the same recipe as a large one; its launch
+    // prelude must not mandate two duplicate preflight collections.
+    const beforeSetup = section(ship, '## Gather facts', '## Set up');
+    const commands = [...beforeSetup.matchAll(/^flowcrew (.+)$/gm)].map(([, command]) => command);
+    expect(commands, 'A03 single authoring-check owner').toEqual(['rehearse docs/task_brief.md']);
+    expect(compact(beforeSetup), 'A03 the no-brief preflight stays: no later step surfaces prior-run facts').toContain('before drafting, run `flowcrew ship-preflight` from the source project');
+    expectInOrder(beforeSetup, ['complete findings', 'Start this exact brief digest', 'Wait for a new explicit answer']);
+    const brief = '---\ncriteria: [{id: C1, text: Add a greeting command}]\n---\nDeliver the greeting command.\n';
+    expect(briefDeclarationFailures(brief), 'A03 valid brief needs no extra preflight').toEqual([]);
+    const admission = createBriefAdmission(inspectBrief(brief), { kind: 'not_required' });
+    expect(verifyBriefAdmission(brief + 'Changed setting.\n', admission).status, 'A03 changed bytes still refuse').toBe('digest_mismatch');
+    const invalid = '---\nunknown_launch_field: true\n---\nDeliver the greeting command.\n';
+    expect(briefDeclarationFailures(invalid).map(finding => finding.code), 'A03 malformed declaration still refuses').toEqual(['frontmatter_invalid']);
+  });
+
   it('requires explicit input declarations and persistent launch wrap-up bookkeeping', () => {
     const draft = compact(section(ship, '## Gather facts', '## Rehearse'));
     expect(draft).toContain('frontmatter `inputs:` array');
@@ -137,7 +155,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '65', digest: '117450fb33a2' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '66', digest: 'f87d7fe7d410' });
   });
 
   it('documents declared command allowances and the unfinished handoff', () => {

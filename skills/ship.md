@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 65 -->
+<!-- flowcrew-skill-revision: 66 -->
 
 # Ship a conversation to FlowCrew
 
@@ -13,12 +13,13 @@ Use `/ship` in Claude Code or `$ship` in Codex. The repository's
 
 ## Gather facts and author the brief
 
-Precondition: before drafting, run `flowcrew ship-preflight` from the source project. Before exact-digest
+Precondition: before drafting, run `flowcrew ship-preflight` from the source project; it shows prior-run,
+campaign and daemon facts that no later step surfaces. Before exact-digest
 confirmation, invoke FlowCrew only for preflight and rehearsal; do not probe setup/quick
 with help or launch options. Treat `--help`, `--version`, capability discovery and dry probes
-as invocations too. Exit zero means facts were gathered, not that they are favorable;
-collection failure exits nonzero. Preflight cannot decide what prior state means. It discovers
-validation commands but does not execute a baseline.
+as invocations too. For `ship-preflight`, exit zero means
+facts were gathered, not that they are favorable; collection failure exits nonzero. It
+cannot decide what prior state means. Setup owns input/layout checks and validation discovery.
 
 If a prior run is pending/running/parked, show its identity and stop instead
 of duplicating it. For terminal failure/incomplete/ceiling/phase/stop, carry forward the
@@ -108,17 +109,16 @@ last write, with evidence locations:
 
 ## Rehearse and confirm exact bytes
 
-Precondition: `docs/task_brief.md` exists. Run these against its exact saved bytes:
+Precondition: `docs/task_brief.md` exists. Run one authoring check against its exact saved bytes:
 
 ```bash
-flowcrew ship-preflight --brief docs/task_brief.md
 flowcrew rehearse docs/task_brief.md
 ```
 
 Fix blocking findings. Review every retained warning and explain it. Rehearsal is mandatory
 for this skill, including an engineering brief's static pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
 research quality. Nonzero means correct the brief/environment. It calls no model and checks declaration syntax, capabilities and output occupancy without executing author, review or instrument work.
-If bytes change, repeat preflight and rehearsal.
+If bytes change, repeat rehearsal.
 
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
 target, base, new branch, research declarations, adapter, foreground/background, campaign,
@@ -133,7 +133,7 @@ Review gates receive no write grant for those directories.
 Ask: “Start this exact brief digest `<digest>` with these settings?”
 Wait for a new explicit answer after the final bytes/settings were shown.
 Do not treat the original `/ship` request or an earlier “ship it” as approval of unseen
-bytes/findings. Any change returns to saved-byte preflight/rehearsal and confirmation.
+bytes/findings. Any change returns to saved-byte rehearsal and confirmation.
 
 ## Set up and launch
 

@@ -8,8 +8,6 @@ prompt: |
   never read author transcripts or resume provider history.
   Read configured validation exits and totals from the engine record for the reviewed tree.
   All zero exits pass validation; any completed nonzero exit rejects and goes to repair.
-  Unfinished validation is an engine resource state; it spends no review or repair round.
-  Do not rerun configured validation, request a base suite, or classify results from output or timing.
   Choose independent experiments that establish the criteria and reproduce base/changed differences.
   Resolve ambiguous criteria using supplied references and constraints; report remaining ambiguity.
 

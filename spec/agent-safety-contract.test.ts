@@ -97,7 +97,7 @@ describe('shipped role outcome contracts', () => {
   it('preserves independent review inputs while allowing isolated probes and contextual evidence', () => {
     for (const role of ['qa', 'doc_reviewer', 'paper_reviewer', 'ai_detector']) {
       expect(prompt(role)).toContain('must not durably modify the reviewed target or authoritative inputs');
-      expect(prompt(role)).toContain('disposable probes use only the invocation\'s private $TMPDIR');
+      expect(prompt(role)).toContain('disposable probes use their own stage workspace or the invocation\'s private $TMPDIR');
       expect(prompt(role)).toContain('Target repairs belong to an author');
     }
     expect(prompt('ai_detector')).toContain('cited sources, comparator papers and experiment records within read authorization');
