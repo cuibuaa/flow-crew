@@ -712,7 +712,7 @@ it.each([
     undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed ?? []).toHaveLength(sameGap ? 1 : 0);
   expect(calls).toEqual(sameGap ? ['done', 'work', 'review'] : ['done', 'work', 'review', 'repair', 'review']);
-  expect(result.status, result.failureReason).toBe('incomplete');
+  expect(result.status, result.failureReason).toBe(sameGap ? 'incomplete' : 'complete');
   expect(result.stages.repair.attempts ?? []).toHaveLength(sameGap ? 0 : 1);
   if (sameGap) expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
   const fact = readEvidence(runDir(project, result.runId)).find(entry => entry.kind === 'attempt' && entry.stageId === 'work');

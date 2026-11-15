@@ -6,8 +6,6 @@ import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeFileSync } from '../../engine-fs.js';
 import { engineValidation } from '../../engine-validation.js';
-import { loadEngineDefaults } from '../../config.js';
-import { repairReproductionClosed } from '../../scoped-audit-repair.js';
 import { confirmedRepairFindings } from './gate-archives.js';
 import { runProcessAbortSignal } from '../../adapters/base.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
@@ -154,14 +152,11 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
     if (!await validate()) return false;
     const stage = state.planControl?.stages.find(stage => stage.id === author.stageId);
     const findings = stage?.retry_to && state.gateRetryRound ? confirmedRepairFindings(base, stage.retry_to, state.gateRetryRound) : [];
-    const attempts = plan?.limits?.attempts ?? loadEngineDefaults().validation_attempts;
-    while (findings.length && !control.signal.aborted) {
-      const ledger = readEvidence(base), before = captureProjectTree(projectDir, briefAt(base), base);
-      const finding = findings.find(finding => finding.record.context
-        && !repairReproductionClosed(finding.record.sequence, ledger, before.hash)
-        && ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence
-          && entry.sequence > author.sequence).length < attempts);
-      if (!finding) break;
+    for (const finding of findings) {
+      if (control.signal.aborted) break;
+      if (!finding.record.context || readEvidence(base).some(entry => entry.kind === 'command'
+        && entry.reproductionOf === finding.record.sequence && entry.sequence > author.sequence)) continue;
+      const before = captureProjectTree(projectDir, briefAt(base), base);
       const replay = await runProjectCommand({ role: 'test', command: finding.record.context!.shell,
         args: ['-c', finding.record.command!], display: finding.record.command!, cwd: finding.record.context!.cwd, runDir: base,
         timeoutMs: finding.record.timeoutMs, abortSignal: control.signal });
@@ -170,7 +165,7 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
         outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
         treeHash: before.hash, treeAfterHash: captureProjectTree(projectDir, briefAt(base), base).hash, reproductionOf: finding.record.sequence });
     }
-    // An opaque closure may write; bind its final tree before releasing review.
+    // A replay may write; bind its final tree before releasing review.
     return await validate();
   } finally {
     clearInterval(timer);

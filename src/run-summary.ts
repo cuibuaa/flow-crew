@@ -289,7 +289,7 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
     for (const finding of findings?.unconfirmed ?? []) sections.push(`- ${id}: unconfirmed observation ${finding.id}: ${finding.reason}; no repair requested.`);
   }
   for (const record of readEvidence(runDir)) if (record.kind === 'command' && record.reproductionOf !== undefined) {
-    sections.push(`- Repair closure ledger #${record.sequence} replays #${record.reproductionOf}: ${record.exitCode === 0 && record.treeHash && record.treeHash === record.treeAfterHash ? 'passed' : 'not closed'}; exit ${record.exitCode}; tree ${record.treeHash}; output digest ${record.outputDigest}.`);
+    sections.push(`- Repair replay ledger #${record.sequence} replays #${record.reproductionOf}: exit ${record.exitCode}; unfinished ${record.unfinished === true}; tree ${record.treeHash} -> ${record.treeAfterHash}; output digest ${record.outputDigest}.`);
   }
   const ids = new Set([...Object.keys(state.stages),
     ...(state.stageEvidence ?? []).map(entry => entry.stageId),

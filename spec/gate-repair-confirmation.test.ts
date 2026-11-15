@@ -14,7 +14,6 @@ import { runDir, writeStageStatus, readRunState, writeRunState } from '../src/st
 import { createRun } from './test-support/create-run.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { validateSettledTree } from '../src/scheduler/sched_settlement/gate-validation.js';
-import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { appendEvidence, captureProjectTree, readEvidence, type EvidenceEntry } from '../src/evidence-ledger.js';
 import { FINDING_POLICY_TEXT, assessFindings, type AuditFinding } from '../src/scoped-audit-repair.js';
@@ -32,27 +31,27 @@ const finding = (id: string, reproduction?: number | null): AuditFinding => ({ i
   reason: 'Value must be repaired', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder',
   ...(reproduction === undefined ? {} : { reproduction }) });
 
-async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRepair = false, observeAfterRepair = false, needsValidationPreparation = false, variant?: 'long' | 'cwd' | 'bash' | 'unknown' | 'recorded', route?: [string, string, string?]) {
+async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRepair = false, observeAfterRepair = false, needsValidationPreparation: boolean | 'failure' = false, variant?: 'long' | 'cwd' | 'bash' | 'unknown' | 'recorded' | 'stale' | 'reject-again', route?: [string, string, string?]) {
   const root = mkdtempSync(join(tmpdir(), 'confirmed-gate-')); roots.push(root);
   const project = join(root, 'project'); mkdirSync(project);
   // The reviewer receives a complete readable patch.
   isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, project);
   const calls: Array<{ stage: string; prompt: string }> = [];
-  let review = 0;
+  let review = 0, repairs = 0;
   const dependency = mkdtempSync(join(tmpdir(), 'closure-dependency-')); roots.push(dependency);
   const marker = join(dependency, 'ready');
   if (needsValidationPreparation) {
     declareValidation(project, { test: { command: 'npm', args: ['run', 'test'] } });
-    writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager: 'npm@10.9.7', scripts: { test: 'fixture-check' } }));
+    writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager: 'npm@10.9.7', scripts: { test: needsValidationPreparation === 'failure' ? 'fixture-check-failure' : 'fixture-check' } }));
     vi.spyOn(validation, 'runValidationCommand').mockImplementation(request => {
       if (readFileSync(join(project, 'docs/value.txt'), 'utf8') === 'repaired') writeFileSync(marker, 'ready');
-      return { exitCode: 0, stdout: 'Configured fixture passed' };
+      return { exitCode: needsValidationPreparation === 'failure' && readFileSync(join(project, 'docs/value.txt'), 'utf8') === 'repaired' ? 7 : 0, stdout: 'Configured fixture result' };
     });
   }
   const condition = `require('node:fs').readFileSync('${variant === 'cwd' ? 'value.txt' : 'docs/value.txt'}','utf8')==='repaired'`
     + (needsValidationPreparation ? ` && require('node:fs').existsSync(${JSON.stringify(marker)})` : '');
-  const command = variant === 'recorded' ? '[[ "$(cat value.txt)" == repaired ]]' : variant === 'bash' ? '[[ "$(cat docs/value.txt)" == repaired ]]'
+  const command = variant === 'stale' ? `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`const source=require('node:fs').readFileSync('docs/value.txt','utf8');if(source!=='bad')throw Error('Probe expects original source identity');process.exit(${condition}?0:1)`)}` : variant === 'recorded' ? '[[ "$(cat value.txt)" == repaired ]]' : variant === 'bash' ? '[[ "$(cat docs/value.txt)" == repaired ]]'
     : (variant === 'long' ? 'true' + ' '.repeat(510) + '; ' : '') + `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${condition}?0:1)`)}`;
   const context = { cwd: variant === 'cwd' || variant === 'recorded' ? join(project, 'docs') : project,
     shell: variant === 'bash' || variant === 'recorded' ? '/bin/bash' : '/bin/sh' };
@@ -66,7 +65,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
       return result({ successor: 'review', reason: 'Review independent later output' }, ['docs/other.txt']);
     }
     if (opts.stageId === 'review') {
-      const first = ++review === 1 || mode === 'unconfirmed' || variant === 'unknown';
+      const first = ++review === 1 || variant === 'reject-again' && review === 2 || mode === 'unconfirmed' || variant === 'unknown';
       let sequence: number | undefined;
       if ((first || route?.length === 3 && review === 3) && mode === 'mixed') {
         const tracker = new CommandActivityTracker({ runDir: opts.runDir, stageId: opts.stageId, attemptIndex: 1,
@@ -97,7 +96,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
         ...(mode === 'observation' || corrected || !first ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'reviewed value' } }) });
     }
     mkdirSync(join(project, 'docs'), { recursive: true });
-    writeFileSync(join(project, 'docs/value.txt'), opts.stageId === (route ? 'repair' : 'repair_review') && !failedRepair ? 'repaired' : 'bad');
+    writeFileSync(join(project, 'docs/value.txt'), opts.stageId === (route ? 'repair' : 'repair_review') && !failedRepair && (variant !== 'reject-again' || ++repairs > 1) ? 'repaired' : 'bad');
     if (route && opts.stageId === 'repair') return result({ successor: 'review', reason: 'Reassess the repaired value' }, ['docs/value.txt']);
     return result({ status: 'delivered', summary: 'Value delivered', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
@@ -162,7 +161,7 @@ describe('repair requires a reviewer reproduction', () => {
   });
   it.each(['long', 'cwd', 'bash'] as const)('replays the complete engine-recorded command in its context (%s)', async variant => {
     const value = await workflow('mixed', variant !== 'bash', false, false, variant);
-    expect(value.final.status).toBe(variant === 'bash' ? 'complete' : 'incomplete');
+    expect(value.final.status).toBe('complete');
     expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;
@@ -217,36 +216,45 @@ describe('repair requires a reviewer reproduction', () => {
     expect(closure.sequence).toBeGreaterThan(configured[1].sequence);
   });
 
-  it('does not close a finding when the repair reproduction still fails, even if the next model verdict passes', async () => {
-    const value = await workflow('mixed', true);
+  it('completes after a stale reviewer probe fails replay but re-review and declared validation pass', async () => {
+    const value = await workflow('mixed', false, false, true, 'stale');
     expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
-    expect(value.final.status).toBe('incomplete');
-    expect(value.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
-    expect(value.final.stages.review.gate?.reason).toContain('Repair reproduction remains open');
-    expect(value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)).toMatchObject({ exitCode: 1 });
+    const validations = value.ledger.filter(entry => entry.kind === 'validation');
+    expect(validations).toHaveLength(2);
+    expect(validations.every(entry => entry.pass && entry.executions.at(-1)?.commands.every(command => command.exitCode === 0))).toBe(true);
+    const replay = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)!;
+    expect(replay).toMatchObject({ exitCode: 1, commandId: 'closure-confirmed' });
+    expect(readFileSync(join(value.project, 'docs/value.txt'), 'utf8')).toBe('repaired');
+    expect(value.final.status).toBe('complete');
+    expect(value.final.stages.review.gate?.pass).toBe(true);
+    const facts = JSON.parse(value.calls.filter(call => call.stage === 'review')[1].prompt.split('Ledger facts:\n')[1].split('\n')[0]).facts;
+    expect(facts.find((fact: { sequence: number }) => fact.sequence === replay.sequence)).toMatchObject({
+      kind: 'command', commandId: 'closure-confirmed', reproductionOf: expect.any(Number), exitCode: 1,
+      treeHash: expect.any(String), treeAfterHash: expect.any(String) });
   });
 
-  it('does not let observation-only acceptance bypass an open repair reproduction', async () => {
+  it('accepts advisory findings after repair even when the replay fails', async () => {
     const value = await workflow('mixed', true, true);
-    expect(value.final.status).toBe('incomplete');
-    expect(value.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
+    expect(value.final.status).toBe('complete');
+    expect(value.final.stages.review.gate).toMatchObject({ pass: true });
     expect(value.final.stages.review.gate?.findings?.advisory?.[0].id).toBe('observation_after_repair');
   });
 
-  it('retains reproduction closure across repeated independent reviews', { timeout: 60_000 }, async () => {
-    const first = 'review', second = 'review';
-    for (const failedRepair of [true, false]) {
-      const value = await workflow('mixed', failedRepair, false, false, 'recorded', [first, second]);
-      expect(value.calls.map(call => call.stage)).toEqual(['plan', 'implement', first, 'repair', second]);
-      expect(value.final.status).toBe(failedRepair ? 'incomplete' : 'complete');
-      expect(value.final.stages[second].gate?.pass).toBe(!failedRepair);
-      expect(value.final.decisionGraph?.records.filter(record => record.stageId === second).at(-1)?.gateAccepted).toBe(!failedRepair);
-      if (failedRepair) expect(value.final.stages[second].gate?.reason).toContain('Repair reproduction remains open');
-      const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === first)!;
-      expect(original).toMatchObject({ exitCode: 1 });
-      expect(value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence))
-        .toMatchObject({ exitCode: failedRepair ? 1 : 0 });
-    }
+  it('dispatches another repair when the second review rejects with a grounded finding', async () => {
+    const value = await workflow('mixed', false, false, false, 'reject-again');
+    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review', 'repair_review', 'review']);
+    expect(value.final.status).toBe('complete');
+    expect(value.final.decisionGraph?.records.filter(record => record.stageId === 'review').map(record => record.gateAccepted)).toEqual([false, false, true]);
+    expect(readFileSync(join(value.project, 'docs/value.txt'), 'utf8')).toBe('repaired');
+  });
+
+  it('rejects declared validation failure on the repaired tree even when re-review passes', async () => {
+    const value = await workflow('mixed', false, false, 'failure');
+    expect(value.final.status).toBe('incomplete');
+    expect(value.final.stages.review.gate).toMatchObject({ pass: false,
+      findings: { confirmed: [expect.objectContaining({ record: expect.objectContaining({ validationRecord: expect.any(Number), exitCode: 7 }) })] } });
+    expect(value.final.stages.review.gate?.reason).toContain('Engine validation rejected');
+    expect(JSON.parse(readFileSync(runRecordPath(value.directory, 'verdict_review.json'), 'utf8')).pass).toBe(true);
   });
 
   it('keeps an accepted repair closed after independent downstream work and another review', async () => {
@@ -266,9 +274,8 @@ describe('repair requires a reviewer reproduction', () => {
     expect(value.final.status).toBe('complete');
   });
 
-  it.each(['stable-output', 'two-obligations', 'changing-output', 'nonzero', 'unfinished', 'declared-bound'] as const)(
-    'settles a reproduction with bounded replay and the same closure predicate (%s)', async mode => {
-      setEngineDefaults({ validation_attempts: 3 });
+  it.each(['stable-output', 'two-obligations', 'changing-output', 'nonzero', 'unfinished'] as const)(
+    'replays each finding once per repair attempt and leaves the verdict to review (%s)', async mode => {
       const project = mkdtempSync(join(tmpdir(), 'closure-replay-')); roots.push(project);
       const brief = '---\ncriteria: [{id: C1, text: Value is repaired}]\n---\nRepair value';
       const run = createRun(project, 'closure', 'name: closure\nstages: []\n', ['repair', 'review'], brief);
@@ -281,10 +288,6 @@ describe('repair requires a reviewer reproduction', () => {
       if (mode === 'two-obligations') originals.push(appendEvidence(run.runDirPath, { kind: 'command', owner: 'code',
         stageId: 'review', attemptIndex: 1, commandId: 'other', command: 'fixture other reproduction', context,
         exitCode: 1, outputDigest: 'original', treeHash: 'old-tree', treeAfterHash: 'old-tree' }));
-      if (mode === 'declared-bound') writeFileSync(runRecordPath(run.runDirPath, 'validation_baseline.json'), JSON.stringify({
-        version: 1, limits: { attempts: 1 }, baseline: { version: 1, projectDir: project,
-          discovery: { state: 'configured', commands: [], missingRoles: [] }, results: [] },
-      }));
       const state = readRunState(project, run.runId); state.status = 'running';
       state.gateRetryRound = { iteration: 1, round: 1 };
       state.planControl = { version: 1, stages: [
@@ -309,17 +312,12 @@ describe('repair requires a reviewer reproduction', () => {
       });
       await validateSettledTree(project, run.runId);
       await validateSettledTree(project, run.runId);
-      expect(calls).toBe(mode === 'stable-output' ? 2 : mode === 'two-obligations' ? 5 : mode === 'declared-bound' ? 1 : 3);
-      const verdict = readGateEvaluation(project, 'review', run.runId);
-      expect(verdict?.pass).toBe(mode === 'stable-output' || mode === 'two-obligations');
-      if (mode !== 'stable-output' && mode !== 'two-obligations') expect(verdict?.refusal?.kind).toBe('audit_findings');
-      if (mode === 'stable-output') {
-        writeFileSync(join(project, 'value.txt'), 'later change');
-        expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(false);
-        await validateSettledTree(project, run.runId);
-        expect(calls).toBe(3);
-        expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(true);
-      }
+      expect(calls).toBe(originals.length);
+      expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(true);
+      writeFileSync(join(project, 'value.txt'), 'later change');
+      await validateSettledTree(project, run.runId);
+      expect(calls).toBe(originals.length);
+      expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(true);
     });
 
   it('checks numeric contracts before accepting unconfirmed observations with passing criteria', () => {
@@ -396,95 +394,26 @@ describe('repair requires a reviewer reproduction', () => {
     expect(parseStageRecord(JSON.stringify(legacy), stageRecordSchema({ isGate: true }))).toEqual(legacy);
   });
 
-  it.each(['absent', 'partial', 'later', 'wrong-context', 'wrong-command', 'stale', 'complete'] as const)(
-    'requires a current passing replay of every archived confirmed reproduction (%s)', async mode => {
-      const project = mkdtempSync(join(tmpdir(), 'closure-set-')); roots.push(project);
-      const run = createRun(project, 'closure', 'name: closure\nstages: []\n', ['repair', 'later', 'review']);
-      const context = { cwd: project, shell: '/bin/sh' };
-      for (const id of ['one', 'two']) writeFileSync(join(project, id), 'bad');
-      const before = captureProjectTree(project).hash;
-      const originals: EvidenceEntry[] = [];
-      for (const id of ['one', 'two']) {
-        const command = `test "$(cat ${id})" = good`;
-        const response = await stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
-        expect(response.exitCode).toBe(1);
-        originals.push(appendEvidence(run.runDirPath, { kind: 'command', owner: 'adapter-event', stageId: 'review', attemptIndex: 1,
-          commandId: id, command, context, exitCode: response.exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before }));
-      }
+  it.each(['absent', 'nonzero', 'unfinished', 'other-tree'] as const)(
+    'does not override passing re-review for a replay that is %s', mode => {
+      const project = mkdtempSync(join(tmpdir(), 'replay-fact-')); roots.push(project);
+      const run = createRun(project, 'replay', 'name: replay\nstages: []\n', ['repair', 'review']);
+      writeFileSync(join(project, 'value'), 'repaired');
+      const tree = captureProjectTree(project).hash;
+      const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
+        commandId: 'probe', command: 'false', context: { cwd: project, shell: '/bin/sh' }, exitCode: 1,
+        outputDigest: 'original', treeHash: 'old-tree', treeAfterHash: 'old-tree' });
       const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
       writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review', engine_effective_pass: false,
-        findings: { confirmed: originals.map((record, index) => ({ ...finding(`defect_${index}`, record.sequence), record })), unconfirmed: [] } }));
-      for (const id of ['one', 'two']) writeFileSync(join(project, id), mode === 'partial' && id === 'two' ? 'bad' : 'good');
-      const after = captureProjectTree(project).hash;
-      for (const [index, original] of originals.entries()) {
-        if (mode === 'absent' || mode === 'partial' && index === 1 || original.kind !== 'command') continue;
-        const response = await stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', original.command!], display: original.command!, cwd: project });
-        expect(response.exitCode).toBe(0);
-        appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
-          commandId: `closure-${index}`, command: mode === 'wrong-command' ? 'true' : original.command,
-          context: mode === 'wrong-context' ? { ...context, cwd: '/elsewhere' } : context, exitCode: mode === 'later' ? 1 : response.exitCode,
-          outputDigest: 'closure', treeHash: mode === 'stale' ? before : after, treeAfterHash: after, reproductionOf: original.sequence });
-      }
-      if (mode === 'partial') {
-        const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh', args: ['-c', 'test "$(cat two)" = good'], display: 'remaining defect', cwd: project });
-        expect(response.exitCode).toBe(1);
-      }
-      for (const id of ['repair', ...(mode === 'later' ? ['later'] : []), 'review']) {
-        writeStageStatus(project, run.runId, id, { status: 'complete', retries: 0, exitCode: 0,
-          attempts: [{ index: 1, status: 'complete', startedAt: 'start', completedAt: 'end', exitCode: 0 }] });
-        if (id !== 'review') appendEvidence(run.runDirPath, { kind: 'attempt', stageId: id, attemptIndex: 1,
-          attemptStartedAt: 'start', exitCode: 0, status: 'complete', treeHash: after, files: [],
-          measurements: { inputTokens: 0, outputTokens: 0, durationMs: 1, provenance: 'adapter-reported' } });
-      }
-      writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {}, audit_findings: { version: 1, findings: [] } }));
-      expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(mode === 'complete');
+        findings: { confirmed: [{ ...finding('value', original.sequence), record: original }], unconfirmed: [] } }));
+      if (mode !== 'absent') appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
+        commandId: 'closure-value', command: 'false', context: { cwd: project, shell: '/bin/sh' },
+        exitCode: mode === 'nonzero' ? 1 : 0, unfinished: mode === 'unfinished', outputDigest: 'replay',
+        treeHash: mode === 'other-tree' ? 'other-tree' : tree, treeAfterHash: mode === 'other-tree' ? 'other-tree' : tree,
+        reproductionOf: original.sequence });
+      writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, criteria: {}, audit_findings: { version: 1, findings: [] } }));
+      expect(readGateEvaluation(project, 'review', run.runId)?.pass).toBe(true);
     });
-
-  it.each([
-    { gateAccepted: false, beforeReplay: false },
-    { gateAccepted: true, beforeReplay: true },
-  ])('refuses historical closure with gateAccepted=$gateAccepted and attempt before replay=$beforeReplay', async ({ gateAccepted, beforeReplay }) => {
-    const project = mkdtempSync(join(tmpdir(), 'historical-closure-')); roots.push(project);
-    const run = createRun(project, 'historical', 'name: historical\nstages: []\n', ['repair', 'review']);
-    const context = { cwd: project, shell: '/bin/sh' }, command = 'test "$(cat value)" = good';
-    const execute = () => stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
-    writeFileSync(join(project, 'value'), 'bad');
-    const before = captureProjectTree(project).hash;
-    const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
-      commandId: 'original', command, context, exitCode: (await execute()).exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before });
-    expect(original).toMatchObject({ exitCode: 1 });
-    const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
-    writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review', engine_effective_pass: false,
-      findings: { confirmed: [{ ...finding('value', original.sequence), record: original }], unconfirmed: [] } }));
-    writeFileSync(join(project, 'value'), 'good');
-    const repaired = captureProjectTree(project).hash;
-    const attempt = () => appendEvidence(run.runDirPath, { kind: 'attempt', stageId: 'review', attemptIndex: 2,
-      attemptStartedAt: 'review-start', exitCode: 0, status: 'complete', treeHash: repaired, files: [],
-      measurements: { inputTokens: 0, outputTokens: 0, durationMs: 1, provenance: 'adapter-reported' } });
-    const earlierAttempt = beforeReplay ? attempt() : undefined;
-    const closure = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
-      commandId: 'closure', command, context, exitCode: (await execute()).exitCode, outputDigest: 'closure',
-      treeHash: repaired, treeAfterHash: repaired, reproductionOf: original.sequence });
-    expect(closure).toMatchObject({ exitCode: 0, treeHash: repaired, treeAfterHash: repaired });
-    const reviewed = earlierAttempt ?? attempt();
-    expect(reviewed.sequence < closure.sequence).toBe(beforeReplay);
-    const state = readRunState(project, run.runId);
-    state.decisionGraph = { records: [{ key: '1/review/2/review-start', stageId: 'review', iteration: 1,
-      outcome: 'chosen', successor: 'later', reason: 'Authored pass and routing are insufficient', gateAccepted }],
-      enabled: {}, visits: {}, declarations: [] };
-    writeRunState(project, run.runId, state);
-    writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0, exitCode: 0,
-      attempts: [{ index: 2, status: 'complete', startedAt: 'review-start', completedAt: 'review-end', exitCode: 0 }] });
-    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {},
-      audit_findings: { version: 1, findings: [] } }));
-    // The valid replay closes on its current tree; only historical authority is missing.
-    expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(true);
-    writeFileSync(join(project, 'other'), 'Independent later output');
-    expect(captureProjectTree(project).hash).not.toBe(repaired);
-    expect(confirmedRepairFindings(run.runDirPath, ['review'])).toHaveLength(1);
-    expect(readGateEvaluation(project, 'review', run.runId, undefined, false)).toMatchObject({
-      pass: false, refusal: { kind: 'audit_findings' } });
-  });
 
   it('carries earlier confirmed reproductions into later repair rounds instead of replaying only the latest set', () => {
     const project = mkdtempSync(join(tmpdir(), 'closure-rounds-')); roots.push(project);
@@ -499,33 +428,6 @@ describe('repair requires a reviewer reproduction', () => {
     }
     expect(confirmedRepairFindings(run.runDirPath, ['review'], { iteration: 1, round: 1 }).map(item => item.record.sequence)).toEqual([records[0].sequence]);
     expect(confirmedRepairFindings(run.runDirPath, ['review'], { iteration: 1, round: 2 }).map(item => item.record.sequence)).toEqual(records.map(item => item.sequence));
-  });
-
-  it('does not reopen a completed repair at an unrelated later gate', async () => {
-    const project = mkdtempSync(join(tmpdir(), 'unrelated-gate-')); roots.push(project);
-    const run = createRun(project, 'unrelated', 'name: unrelated\nstages: []\n', ['repair', 'review', 'later_review']);
-    const context = { cwd: project, shell: '/bin/sh' }, command = 'test "$(cat value)" = good';
-    writeFileSync(join(project, 'value'), 'bad');
-    const before = captureProjectTree(project).hash;
-    const execute = () => stageFixtureCommand({ role: 'test', command: context.shell, args: ['-c', command], display: command, cwd: project });
-    const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
-      commandId: 'original', command, context, exitCode: (await execute()).exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before });
-    expect(original).toMatchObject({ exitCode: 1 });
-    const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
-    writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ engine_effective_pass: false,
-      findings: { confirmed: [{ ...finding('value', original.sequence), record: original }], unconfirmed: [] } }));
-    writeFileSync(join(project, 'value'), 'good');
-    const repaired = captureProjectTree(project).hash;
-    appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
-      commandId: 'closure', command, context, exitCode: (await execute()).exitCode, outputDigest: 'closure', treeHash: repaired, treeAfterHash: repaired, reproductionOf: original.sequence });
-    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, criteria: {} }));
-    expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(true);
-    writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0,
-      gate: { pass: true, validationRequired: false, kind: 'pass', verdictSha256: null } });
-    // Independent downstream work changes the tree after that repair closed.
-    writeFileSync(join(project, 'other'), 'later output');
-    writeFileSync(runRecordPath(run.runDirPath, 'verdict_later_review.json'), JSON.stringify({ pass: true, criteria: {} }));
-    expect(readGateEvaluation(project, 'later_review', run.runId, undefined, false)?.pass).toBe(true);
   });
 
   it.each(['gate', 'acceptedFrom'] as const)('projects uncited settled legacy observations without rewriting historical verdicts (%s)', carrier => {

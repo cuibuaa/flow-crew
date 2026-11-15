@@ -270,7 +270,11 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   const predecessor = stageId ? stagePredecessor(entries, stageId, previous ?? undefined) : undefined;
   const latest = new Map(entries.map(entry => [`${entry.kind}:${entry.stageId}`, entry]));
   const facts = entries.flatMap<object>(entry => {
-    if (entry.kind === 'command') return [];
+    if (entry.kind === 'command') return entry.reproductionOf === undefined ? [] : [{
+      kind: entry.kind, sequence: entry.sequence, stageId: entry.stageId, attemptIndex: entry.attemptIndex,
+      commandId: entry.commandId, reproductionOf: entry.reproductionOf, command: entry.command, context: entry.context,
+      exitCode: entry.exitCode, unfinished: entry.unfinished, treeHash: entry.treeHash, treeAfterHash: entry.treeAfterHash,
+    }];
     if (entry.kind === 'validation' ? entry !== validation : entry.kind !== 'decision' && latest.get(`${entry.kind}:${entry.stageId}`) !== entry) return [];
     if (entry.kind === 'validation') {
       const attempt = entries.find(fact => fact.kind === 'attempt' && fact.stageId === entry.stageId && fact.attemptIndex === entry.attemptIndex && fact.attemptStartedAt === entry.attemptStartedAt);

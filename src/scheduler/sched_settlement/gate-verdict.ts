@@ -3,7 +3,7 @@ import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult } from '../../project-validation.js';
-import { assessFindings, AuditFindingsSchema, projectLegacyFindings, repairReproductionClosed, validateFindingVerdict, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
+import { assessFindings, AuditFindingsSchema, projectLegacyFindings, validateFindingVerdict, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateContract, loadGateContract, validateVerdictAgainstContract } from './gate-contract.js';
 import { projectGateVerdict, readGateVerdictDocument, GateVerdictDocument, validateSettledGateVerdict, explicitPassContradiction, validateGateCriterionEvidence, validateGateRepairability, assignedGateCriterionRefs } from './gate-evidence.js';
-import { archivedGateRejections, confirmedRepairFindings } from './gate-archives.js';
+import { archivedGateRejections } from './gate-archives.js';
 import { currentValidationResults, currentValidationRegressions } from './gate-validation.js';
 
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
@@ -123,23 +123,9 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const unverified = validation.filter(result => result.measurement === 'unverified');
   const validationNote = unverified.length ? ` Validation unverified: ${unverified.map(result => `${result.display ?? result.role} (exit ${result.exitCode ?? 'absent'})`).join('; ')}.` : '';
   const { findings: _findings, validation: _validation, ...authored } = verdict;
-  // Rejections survive later review attempts. Effective acceptance binds a
-  // closure to its reviewed tree, so later independent work cannot reopen it.
-  const state = verdict.pass && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId) : undefined;
-  const gateIds = [stageId, ...(state?.planControl?.stages ?? []).flatMap(stage => stage.retry_to?.includes(stageId) ? stage.retry_to : [])];
-  const required = verdict.pass ? confirmedRepairFindings(base, [...new Set(gateIds)]) : [];
-  const accepted = ledger.filter(entry => entry.kind === 'attempt' && gateIds.includes(entry.stageId)
-    && entry.status === STAGE_STATUS.COMPLETE && entry.exitCode === 0 && state?.decisionGraph?.records.some(record => record.gateAccepted === true
-      && record.key === `${record.iteration}/${entry.stageId}/${entry.attemptIndex}/${entry.attemptStartedAt}`));
-  const closureFailed = required.some(finding => {
-    if (finding.record.validationRecord !== undefined) {
-      return results.length === 0 || results.some(result => projectValidationResult(result).state !== 'passed');
-    }
-    return !repairReproductionClosed(finding.record.sequence, ledger, treeHash, accepted);
-  });
-  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${validationNote}`;
+  const reason = `${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${validationNote}`;
   return { ...authored, ...(regressions.length && !authored.repairability ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Completed engine validation has a nonzero command exit' } } : {}),
-    ...(closureFailed || regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
+    ...(regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
     ...(parsed.success || historical || regressions.length ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
 
 }

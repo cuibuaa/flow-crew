@@ -58,7 +58,7 @@ export function auditFindingsJsonSchema(refs: string[], pass = false): import('.
 }
 export const FINDING_POLICY_TEXT = 'Choose each finding class:\n'
   + Object.entries(FINDING_CLASSES).map(([name, policy]) => `- ${name} (${policy.rejects ? 'rejecting' : 'advisory'}): ${policy.description}`).join('\n')
-  + '\nDo not invent task requirements. Only rejecting findings make pass=false; pass=true may include advisory findings. A rejection must contain a rejecting finding. Advisory findings are retained for the operator and never become repair obligations. Every rejecting finding rests on a named brief criterion or a reproduced base/changed difference. Independent evidence is required; the author’s word alone is not proof. Read configured validation from the engine record: do not rerun it or request a base suite, and unfinished validation is not a rejection. A reproduction command exits 0 when the defect is absent and nonzero when present.';
+  + '\nDo not invent task requirements. Only rejecting findings make pass=false; pass=true may include advisory findings. A rejection must contain a rejecting finding. Advisory findings are retained for the operator and never become repair obligations. Every rejecting finding rests on a named brief criterion or a reproduced base/changed difference. Independent evidence is required; the author’s word alone is not proof. Read configured validation from the engine record: do not rerun it or request a base suite, and unfinished validation is not a rejection. A reproduction command exits 0 when the defect is absent and nonzero when present. Repair replay facts inform your independent re-review; their exit or tree coverage does not decide your verdict.';
 
 /** Validate model declarations; never derive a class or override pass from text. */
 export function validateFindingVerdict(record: Record<string, unknown>, refs: string[],
@@ -126,15 +126,4 @@ function confirmedReproduction(finding: AuditFinding, ledger: EvidenceEntry[],
     return record;
   }
   return undefined;
-}
-
-/** Replay and gate settlement share the same receipt acceptance rule. */
-export function repairReproductionClosed(sequence: number, ledger: EvidenceEntry[], treeHash: string | null,
-  accepted: EvidenceEntry[] = []): boolean {
-  const original = ledger.find(entry => entry.sequence === sequence);
-  const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === sequence).at(-1);
-  return original?.kind === 'command' && !!original.context && closure?.kind === 'command' && closure.owner === 'code'
-    && !closure.unfinished && closure.exitCode === 0 && !!closure.outputDigest && !!treeHash && !!closure.treeHash && closure.treeAfterHash === closure.treeHash
-    && (closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
-    && closure.command === original.command && closure.context?.cwd === original.context.cwd && closure.context?.shell === original.context.shell;
 }

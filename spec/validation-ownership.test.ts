@@ -352,7 +352,7 @@ describe('scheduler owns validation after author settlement', () => {
     expect(readEvidence(runDir(root, final.runId)).filter(entry => entry.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 
-  it('engine-runs-it: spends the closure allowance on changing trees before review without resetting it at repeated barriers', async () => {
+  it('engine-runs-it: records one source-writing replay and validates its final tree before review', async () => {
     setEngineDefaults({ validation_attempts: 3 });
     const root = project(); projectValidation(root); const counter = join(project(), 'closure-count');
     const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -379,16 +379,15 @@ describe('scheduler owns validation after author settlement', () => {
         audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Value should be good', reproduction, class: 'criterion_unmet' as const, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } });
-    expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('3');
+    expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('1');
     const ledger = readEvidence(runDir(root, final.runId));
     const closures = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
-    expect(closures).toHaveLength(3);
+    expect(closures).toHaveLength(1);
     const closure = closures.at(-1)!;
     const validation = ledger.filter(entry => entry.kind === 'validation').at(-1)!;
     expect(closure.sequence).toBeLessThan(validation.sequence); expect(closure.treeAfterHash).toBe(validation.treeHash);
-    // A source-writing reproduction cannot itself prove a read-only closure.
-    expect(final.status).toBe('incomplete');
-    expect(final.stages.review.gate?.refusal?.kind).toBe('audit_findings');
+    expect(final.status).toBe('complete');
+    expect(final.stages.review.gate?.pass).toBe(true);
   });
   it('engine-runs-it and review-reads-record: author and repair end first; each tree has one execution and independent review consumes it', async () => {
     const root = project(); projectValidation(root); const calls: string[] = [];
@@ -562,7 +561,7 @@ describe('scheduler owns validation after author settlement', () => {
     expect(final.status).toBe('complete');
   });
 
-  it('repair replay copies unfinished and cannot close a finding on an unfinished zero exit', async () => {
+  it('repair replay copies unfinished as a review fact without overriding a passing verdict', async () => {
     const root = project(); projectValidation(root); let reviews = 0;
     vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
     const command = vi.spyOn(validationOwner, 'runProjectCommand').mockResolvedValueOnce({ exitCode: 1 })
@@ -588,7 +587,7 @@ describe('scheduler owns validation after author settlement', () => {
     const closure = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
     expect(closure).toMatchObject({ exitCode: 0, unfinished: true });
     expect(command.mock.calls[1][0].timeoutMs).toBeUndefined();
-    expect(final.status).toBe('incomplete'); expect(reviews).toBe(2);
+    expect(final.status).toBe('complete'); expect(reviews).toBe(2);
   });
 
   it('unfinished reporter bytes are retained without interpreting completed-test totals', async () => {
