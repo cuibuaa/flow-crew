@@ -1,5 +1,5 @@
 import { gateCriterionRefs } from '../../handoff.js';
-import { runRecordPath } from '../../run-layout.js';
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult } from '../../project-validation.js';
@@ -40,9 +40,11 @@ export function readGateEvaluation(
   projectDir: string, stageId: string, runId?: string, contract?: GateContract | null,
   _requireValidationDelta = true,
 ): GateVerdict | null {
-  let accepted;
-  try { accepted = runId ? readRunState(projectDir, runId).stages[stageId] : undefined; }
+  let state: StoreState | undefined;
+  try { state = runId ? readRunState(projectDir, runId) : undefined; }
   catch { /* Legacy authored verdicts remain readable without run state. */ }
+  const accepted = state?.stages[stageId];
+  if (contract === undefined && state && runId) contract = state.research ? null : loadGateContract(projectDir, runId, state.campaignStorageKey);
   if (accepted?.continuation) return null;
   if (accepted?.status === STAGE_STATUS.COMPLETE || accepted?.status === STAGE_STATUS.FAILED) {
     if (accepted.gate) return projectLegacyGateAssessment(projectDir, runId!, stageId, accepted.gate);
@@ -177,20 +179,18 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   // A secondary refusal cannot turn an irreversible rejected fact into repair
   // work. Keep the disposition and parsed-byte identity while retaining failure.
   const reject = (kind: NonNullable<GateVerdict['refusal']>['kind'], reason: string): GateVerdict => ({ ...document!.refuse(reason), refusal: { kind } });
-  if (v.audit_findings !== undefined) {
-    // Read-only compatibility for pre-class authored archives. New settlement
-    // and worker publication always require current classes.
-    const archived = recorded ? readArchivedAuditFindings(v.audit_findings) : undefined;
-    const classless = archived?.length && archived.every(finding => finding.class === undefined);
-    const violation = classless
-      ? v.pass === true ? 'AUDIT_FINDINGS_INVALID: historical findings reject under the original contract' : undefined
-      : validateFindingVerdict(v, gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId)), runId ? {
-        ledger: readEvidence(base), gate: { stageId,
-          attemptIndex: existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId]?.attempts?.at(-1)?.index ?? 0 : 0,
-          treeHash: captureProjectTree(projectDir, '', base).hash },
-      } : undefined);
-    if (violation) return reject('audit_findings', violation);
-  }
+  // Read-only compatibility for pre-class authored archives. New settlement
+  // and worker publication always require current classes.
+  const archived = recorded ? readArchivedAuditFindings(v.audit_findings) : undefined;
+  const classless = archived?.length && archived.every(finding => finding.class === undefined);
+  const violation = classless
+    ? v.pass === true ? 'AUDIT_FINDINGS_INVALID: historical findings reject under the original contract' : undefined
+    : validateFindingVerdict(v, gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId)), v.audit_findings !== undefined && runId ? {
+      ledger: readEvidence(base), gate: { stageId,
+        attemptIndex: existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId]?.attempts?.at(-1)?.index ?? 0 : 0,
+        treeHash: captureProjectTree(projectDir, '', base).hash },
+    } : undefined);
+  if (violation) return reject('audit_findings', violation);
   const contradiction = explicitPassContradiction(v, 'verdict');
   if (contradiction) {
     log.warn({ stageId, runId, contradiction }, 'Gate verdict rejected because its structured fields contradict pass=true');
@@ -207,7 +207,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   }
   // Contract enforcement: if a contract is provided, validate the verdict against it.
   if (contract && runId) {
-    const metricPath = join(stageDir(projectDir, runId, stageId), 'metric.json');
+    const metricPath = stageWorkPath(base, 'stages', stageId, 'metric.json');
     let metric: Record<string, unknown> | null = null;
     try { metric = JSON.parse(readFileSync(metricPath, 'utf-8')); } catch { /* optional */ }
     const violation = validateVerdictAgainstContract(v, metric, contract, stageId);

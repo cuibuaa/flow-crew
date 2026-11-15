@@ -208,7 +208,7 @@ describe('record correction uses the existing attempt', () => {
     expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
   });
 
-  it('allows closed unassessed reasons and reviewer-chosen carrying from an existing round', async () => {
+  it('corrects unassessed PASS while retaining closed reasons and reviewer-chosen carrying', async () => {
     const archive = runRecordPath(runDir, 'gate_reevaluation/iteration_2/round_3');
     mkdirSync(archive, { recursive: true });
     writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify(rejected()));
@@ -218,9 +218,16 @@ describe('record correction uses the existing attempt', () => {
       { status: 'carried', evidence: 'Reviewer elects to carry', from: { iteration: 2, round: 3 } },
     ]) {
       const record = { ...passed(), criteria: { criterion: entry } };
-      const result = await runStage({ async run() { return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 }; } }, options());
+      expect(parseStageRecord(JSON.stringify(record), schema())).toEqual(record);
+      let calls = 0;
+      const result = await runStage({ async run(prompt) {
+        calls++;
+        if (calls === 2) expect(prompt).toContain('AUDIT_FINDINGS_INVALID: CRITERION_NOT_ACCEPTED');
+        return { output: JSON.stringify(calls === 1 ? record : passed()), exitCode: 0, duration_ms: 1 };
+      } }, options());
       expect(result.exitCode, result.friendlyError).toBe(0);
-      expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
+      expect(calls).toBe(entry.status === 'not_assessed' ? 2 : 1);
+      expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(entry.status === 'not_assessed' ? passed() : record);
     }
   });
 

@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { evaluateCondition } from '../src/condition.js';
 import { fcGlobalDir, runDir, setFcGlobalDir, stageDir } from '../src/store.js';
 
@@ -36,6 +38,9 @@ describe('condition facts resolve from the producing stage only', () => {
     sandbox = mkdtempSync(join(tmpdir(), 'fc-condition-'));
     previousFcDir = fcGlobalDir();
     setFcGlobalDir(join(sandbox, 'fc-home'));
+    mkdirSync(runDir(sandbox, runId), { recursive: true });
+    writeFileSync(join(runDir(sandbox, runId), 'run.json'), JSON.stringify({ runId, projectDir: sandbox, stages: {},
+      briefAdmission: createBriefAdmission(inspectBrief(''), { kind: 'not_required' }) }));
   });
   afterEach(() => {
     setFcGlobalDir(previousFcDir);
@@ -61,6 +66,29 @@ describe('condition facts resolve from the producing stage only', () => {
     writeVerdict('audit', { pass: 'true' });
 
     expect(evaluateCondition('audit.pass == true', sandbox, runId)).toBe(false);
+  });
+
+  it.each([true, false])('routes pass conditions from the settled acceptance %s rather than authored opinion', pass => {
+    const gate = { pass, kind: pass ? 'pass' : 'score_contract', verdictSha256: 'settled-bytes',
+      ...(pass ? {} : { refusal: { kind: 'score_contract' }, reason: 'Measured score missed its line.' }) };
+    writeStage('audit', { status: 'complete', retries: 0, gate });
+    const directory = runDir(sandbox, runId);
+    writeFileSync(join(directory, 'run.json'), JSON.stringify({ runId, projectDir: sandbox, stages: { audit: { status: 'complete', retries: 0, gate } } }));
+    writeVerdict('audit', { pass: !pass });
+    const effective = readGateEvaluation(sandbox, 'audit', runId);
+    expect(effective).toMatchObject(gate);
+    expect(evaluateCondition(`audit.pass == ${pass}`, sandbox, runId)).toBe(true);
+    expect(evaluateCondition(`audit.pass == ${!pass}`, sandbox, runId)).toBe(false);
+  });
+
+  it('uses the same numeric contract on an unsettled legacy verdict as dependencies', () => {
+    writeStage('audit', { status: 'complete', retries: 0 });
+    writeVerdict('audit', { pass: true, metric: 'quality', value: 6 });
+    writeFileSync(runRecordPath(runDir(sandbox, runId), 'gate_contract.json'), JSON.stringify({ metric: 'quality', threshold: 7 }));
+    expect(readGateEvaluation(sandbox, 'audit', runId)).toMatchObject({ pass: false,
+      refusal: { kind: 'score_contract' }, reason: expect.stringContaining('value=6 does not satisfy') });
+    expect(evaluateCondition('audit.pass == true', sandbox, runId)).toBe(false);
+    expect(evaluateCondition('audit.pass == false', sandbox, runId)).toBe(true);
   });
 
   it('keeps status.json authoritative for process facts', () => {

@@ -63,6 +63,11 @@ export const FINDING_POLICY_TEXT = 'Choose each finding class:\n'
 /** Validate model declarations; never derive a class or override pass from text. */
 export function validateFindingVerdict(record: Record<string, unknown>, refs: string[],
   evidence?: { ledger: EvidenceEntry[]; gate: { stageId: string; attemptIndex: number; treeHash: string | null } }): string | undefined {
+  const criteria = record.criteria as Record<string, { status?: string }> | undefined;
+  const unmet = refs.filter(ref => ['fail', 'not_assessed'].includes(criteria?.[ref]?.status ?? ''));
+  if (record.pass === true && unmet.length) return `AUDIT_FINDINGS_INVALID: CRITERION_NOT_ACCEPTED: pass=true cannot accompany fail/not_assessed assigned criteria: ${unmet.join(', ')}`;
+  // Historical verdicts may predate findings; current worker schemas require them.
+  if (record.audit_findings === undefined) return undefined;
   const parsed = findingsSchema(refs).safeParse(record.audit_findings);
   if (!parsed.success) return `AUDIT_FINDINGS_INVALID: FINDING_SHAPE_INVALID: ${parsed.error.message}`;
   const rejecting = parsed.data.findings.some(findingRejects);

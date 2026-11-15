@@ -131,7 +131,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const revisiting = Boolean(destination && (state.stages[target]?.attempts?.length || state.stages[target]?.status === STAGE_STATUS.COMPLETE));
     // Gap identity belongs to the report, not the author's responsibility map.
     const ledger = source.is_gate ? readEvidence(directory) : [];
-    const gaps = source.is_gate ? gateReviewedAuthorIds(source, sorted).flatMap(id => {
+    const gaps = source.is_gate ? [...new Set([...gateReviewedAuthorIds(source, sorted), target])].flatMap(id => {
       const attempt = state.stages[id]?.attempts?.at(-1);
       if (attempt?.endingCause !== 'environment_gap') return [];
       const fact = ledger.find(entry => entry.kind === 'attempt' && entry.stageId === id
@@ -141,10 +141,10 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     }) : [];
     const unspecified = gaps.filter(({ blocks }) => !blocks || !blocks.criterion_ids.length && !blocks.paths.length);
     if (unspecified.length) record.reason += ` Environment gaps without declared blocks: ${unspecified.map(gap => gap.id).join(', ')}; relatedness unknown.`;
-    const repeatedGap = state.stages[target]?.attempts?.at(-1)?.endingCause === 'environment_gap' ? target
-      : gateAccepted === false ? gaps.find(({ blocks, unknownCriterionIds }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
-        && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id) && !unknownCriterionIds.includes(id)))
-          && (!blocks.paths.length || finding.paths.some(raw => {
+    // Refuse only a repair entirely covered by the same declared gap, including a gap discovered by its repair target.
+    const repeatedGap = gateAccepted === false && rejectedFindings.length ? gaps.find(({ blocks, unknownCriterionIds }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
+        && rejectedFindings.every(finding => (!blocks.criterion_ids.length || finding.criterion_ids.length > 0 && finding.criterion_ids.every(id => blocks.criterion_ids.includes(id) && !unknownCriterionIds.includes(id)))
+          && (!blocks.paths.length || finding.paths.length > 0 && finding.paths.every(raw => {
             const path = normalizedProjectPath(raw);
             return path !== undefined && blocks.paths.some(block => {
               const declaration = parseDeclaredScope(block);

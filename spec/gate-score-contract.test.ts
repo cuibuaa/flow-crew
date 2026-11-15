@@ -16,6 +16,33 @@ describe('binding gate scores', () => {
     if (reason === null) expect(violation).toBeNull();
     else expect(violation?.reason).toContain(reason);
   });
+  it('binds a selected observation name to its own value across carriers', () => {
+    const metric = { metric: 'quality', value: 1 };
+    expect(validateVerdictAgainstContract({ pass: true, metric: 'latency', value: 100 }, metric, contract, 'gate'))
+      .toMatchObject({ kind: 'score_contract', reason: expect.stringContaining('observation.metric="latency"') });
+    expect(validateVerdictAgainstContract({ pass: true, metric: 'quality' }, { metric: 'latency', value: 100 }, contract, 'gate'))
+      .toMatchObject({ kind: 'score_contract', reason: expect.stringContaining('observation.metric="latency"') });
+    expect(validateVerdictAgainstContract({ pass: true }, metric, contract, 'gate'))
+      .toMatchObject({ kind: 'score_contract', reason: expect.stringContaining('value=1 does not satisfy') });
+    expect(validateVerdictAgainstContract({ pass: true }, { metric: 'quality', value: 8 }, contract, 'gate')).toBeNull();
+  });
+
+  it.each(['phaseComplete', 'phase_complete'])('keeps campaign ceiling authority on the selected metric observation (%s)', phaseField => {
+    const metric = { metric: 'quality', value: 1, pass: false, outcome: 'ceiling_hit', [phaseField]: true };
+    expect(validateVerdictAgainstContract({ pass: true }, metric, contract, 'gate')).toBeNull();
+    const { outcome, [phaseField]: phase, ...measurement } = metric;
+    // Split verdict metadata used to complete the metric's exemption; it no longer does.
+    for (const [verdict, observation] of [
+      [{ pass: true, outcome }, { ...measurement, [phaseField]: phase }],
+      [{ pass: true, [phaseField]: phase }, { ...measurement, outcome }],
+      [{ pass: true, outcome, [phaseField]: phase }, measurement],
+      [{ pass: true, metric: 'quality', value: 1, outcome, [phaseField]: phase }, metric],
+    ] as const) {
+      expect(validateVerdictAgainstContract(verdict, observation, contract, 'gate'))
+        .toMatchObject({ kind: 'score_contract', reason: expect.stringContaining('value=1 does not satisfy') });
+    }
+  });
+
   it('preserves lower-is-better thresholds and gate-specific applicability', () => {
     const lower = { metric: 'errors', threshold: 2, higherIsBetter: false, appliesToGates: ['audit'] };
     expect(validateVerdictAgainstContract({ pass: true, metric: 'errors', score: 3 }, null, lower, 'audit')?.reason).toContain('does not satisfy');

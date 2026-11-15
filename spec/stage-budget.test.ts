@@ -4,6 +4,7 @@ import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import * as contractProbe from '../src/stage-artifact-contract.js';
+import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { providerFailureFromEvent, providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -405,6 +406,144 @@ it.each([false, true])('SI a gate rejection cannot spend another attempt on a de
   expect(result.stages.repair.attempts ?? []).toHaveLength(repairDiscovers ? 1 : 0);
   expect(result.decisionGraph?.records.filter(record => record.stageId === 'review').at(-1)?.reason).toContain(`Environment gap already reported by ${repairDiscovers ? 'repair' : 'work'}`);
 }, 60_000);
+
+
+it.each(['absent', 'empty', 'unrelated', 'shared_path', 'shared_criterion', 'mixed', 'related'] as const)(
+  'SI a repair target gap blocks only findings entirely covered by its declaration (%s)', async binding => {
+  const { roles, workflow } = workflowFixture(3);
+  const brief = '---\ncriteria: [{id: text, text: work.txt contains correct text.}, {id: history, text: Supply historical evidence.}]\noutputs: [work.txt]\n---\nDeliver correct text and historical evidence.';
+  workflow.stages.find(stage => stage.id === 'review')!.criterion_refs = ['text', 'history'];
+  workflow.stages.find(stage => stage.id === 'repair')!.scope = ['work.txt', 'report.md'];
+  const calls: string[] = [];
+  const findings = [0, 1, 2].map(index => ({ id: `text_defect_${index}`, class: 'criterion_unmet' as const,
+    paths: binding === 'shared_path' ? ['report.md', 'work.txt'] : binding === 'mixed' && index === 0 ? ['report.md'] : ['work.txt'],
+    reason: 'Delivered text is wrong; historical evidence is independent.',
+    criterion_ids: binding === 'shared_criterion' ? ['text', 'history'] : ['text'], invalidates_plan: false, repair_role: 'coder' }));
+  const blocks = binding === 'empty' ? { criterion_ids: [], paths: [] }
+    : binding === 'shared_criterion' ? { criterion_ids: ['text'], paths: [] }
+    : { criterion_ids: [], paths: binding === 'related' ? ['work.txt'] : ['report.md'] };
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'work') writeFileSync(join(project, 'work.txt'), 'wrong text');
+    if (opts.stageId === 'repair') {
+      if (calls.filter(id => id === 'repair').length === 1) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+        status: 'environment_gap', summary: 'Historical baseline object unavailable.', caveats: [],
+        remaining_work: ['Supply historical comparison evidence.'], ...(binding === 'absent' ? {} : { blocks }),
+      }) };
+      writeFileSync(join(project, 'work.txt'), 'correct text');
+    }
+    if (opts.stageId === 'review' && readFileSync(join(project, 'work.txt'), 'utf8') !== 'correct text') return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      pass: false, reason: 'Three independently reproduced product defects require repair.',
+      remaining_work: ['Repair the independently reproduced product defects.'],
+      criteria: { text: { status: 'fail', evidence: 'Incorrect delivered text.' },
+        history: { status: binding === 'shared_criterion' ? 'fail' : 'pass', evidence: 'Historical evidence is separate.' } },
+      audit_findings: { version: 1, findings }, repairability: { version: 1, disposition: 'repairable', evidence: 'Repair the delivered text.' },
+    }) };
+    return withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, withTextReproduction(adapter), new Map(), undefined, roles,
+    undefined, brief, false, undefined, undefined, () => manualClock().clock);
+  expect(result.stages.review.attempts?.[0].endingCause).toBe('complete');
+  expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
+  const decisions = result.decisionGraph?.records.filter(record => record.stageId === 'review') ?? [];
+  expect(decisions[0]).toMatchObject({ outcome: 'chosen', successor: 'repair', gateAccepted: false });
+  expect(result.stages.repair.attempts?.[0].endingCause).toBe('environment_gap');
+  if (binding === 'related') {
+    expect(decisions[1]).toMatchObject({ outcome: 'refused', gateAccepted: false });
+    expect(decisions[1].reason).toContain('Environment gap already reported by repair; no further attempt on that gap authorized.');
+    expect(result.stages.repair.attempts).toHaveLength(1);
+  } else {
+    expect(decisions[1]).toMatchObject({ outcome: 'chosen', successor: 'repair', gateAccepted: false });
+    expect(decisions[1].reason).not.toContain('Environment gap already reported');
+    if (binding === 'absent' || binding === 'empty') expect(decisions[1].reason).toContain('Environment gaps without declared blocks: repair; relatedness unknown.');
+    expect(result.stages.repair.attempts).toHaveLength(2);
+    expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('correct text');
+    expect(result.status, result.failureReason).toBe('complete');
+  }
+});
+
+
+
+it.each((['repair', 'work'] as const).flatMap(target =>
+  (['shared_path', 'shared_criterion', 'absent', 'covered'] as const).map(binding => ({ target, binding }))))(
+  'SI first repair for the reviewed gap author uses $target only for uncovered findings ($binding)', async ({ target, binding }) => {
+  const { roles, workflow } = workflowFixture(3);
+  // The archive dispatches a separate repair; also cover a retained edge back to the author.
+  if (target === 'work') workflow.stages = workflow.stages.filter(stage => stage.id !== 'repair');
+  workflow.stages.find(stage => stage.id === 'done')!.decision = { successors: ['work'], default: 'work' };
+  workflow.stages.find(stage => stage.id === 'work')!.scope = ['work.txt', 'report.md'];
+  const review = workflow.stages.find(stage => stage.id === 'review')!;
+  review.criterion_refs = ['text', 'history'];
+  review.decision = { successors: ['continue', target], default: target };
+  const brief = '---\ncriteria: [{id: text, text: work.txt contains correct text.}, {id: history, text: Supply historical evidence.}]\noutputs: [work.txt]\n---\nDeliver correct text and historical evidence.';
+  const blocks = binding === 'shared_criterion' ? { criterion_ids: ['history'], paths: [] }
+    : { criterion_ids: [], paths: binding === 'covered' ? ['report.md', 'work.txt'] : ['report.md'] };
+  const findings = [0, 1, 2].map(index => ({ id: `product_defect_${index}`, class: 'criterion_unmet',
+    paths: ['report.md', 'work.txt'], criterion_ids: ['text', 'history'],
+    reason: 'Delivered text contradicts the report; the missing historical baseline is separate.',
+    invalidates_plan: false, repair_role: 'coder' }));
+  const repairTurn = { projectFiles: { 'work.txt': 'correct text' }, output: JSON.stringify({ status: 'delivered', summary: 'Product defects repaired.',
+    caveats: [], remaining_work: ['Operator must supply historical comparison evidence.'] }) };
+  const adapter = new ScriptedAdapter({
+    done: { output: JSON.stringify({ successor: 'work', reason: 'Start the author.' }) },
+    work: [
+      { projectFiles: { 'work.txt': 'wrong text', 'report.md': 'Text is correct.' }, output: JSON.stringify({
+        status: 'environment_gap', summary: 'Historical baseline object unavailable.', caveats: [],
+        remaining_work: ['Operator must supply historical comparison evidence.'], ...(binding === 'absent' ? {} : { blocks }),
+      }) },
+      repairTurn,
+    ],
+    repair: repairTurn,
+    review: [{ output: JSON.stringify({ pass: false, reason: 'Three independently reproduced product defects require repair.',
+      remaining_work: ['Repair product defects.'], criteria: {
+        text: { status: 'fail', evidence: 'Incorrect delivered text.' },
+        history: { status: 'fail', evidence: 'The report also describes the defective text.' },
+      }, audit_findings: { version: 1, findings },
+      repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the delivered product independently of the missing baseline.' },
+    }) }, { output: JSON.stringify({ pass: true, reason: 'Product findings repaired; the historical gap remains disclosed.',
+      criteria: { text: { status: 'pass', evidence: 'Correct delivered text.' }, history: { status: 'pass', evidence: 'Historical limitation disclosed separately from product defects.' } },
+      audit_findings: { version: 1, findings: [] }, remaining_work: [],
+    }) }],
+  });
+  // Replay the admitted topology through the scheduler and real worker/settlement boundaries.
+  const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id), brief);
+  updateRunState(project, created.runId, state => {
+    recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Retained gap-author topology');
+    state.maxRetries = 3;
+  });
+  const result = await executeIteration(workflow.stages, project, created.runId, created.runDirPath, workflow,
+    withTextReproduction(adapter), new Map([['coder', role], ['qa', { ...role, name: 'qa' }]]), roles,
+    new Map([['coder', { name: 'coder', description: '' }], ['qa', { name: 'qa', description: '' }]]),
+    new Set(), undefined, brief, undefined, () => manualClock().clock);
+  expect(result.stages.work.attempts?.[0]?.endingCause, JSON.stringify({ calls: adapter.calls.map(call => call.stageId), failure: result.failureReason })).toBe('environment_gap');
+  expect(result.stages.review.attempts?.[0]).toMatchObject({ endingCause: 'complete', exitCode: 0 });
+  expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
+  expect(readRunEvents(project, result.runId).find(event => event.type === 'stage_complete' && event.stageId === 'review')?.gate?.findings?.confirmed).toHaveLength(3);
+  const facts = readEvidence(runDir(project, result.runId));
+  expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', attemptIndex: 1,
+    environmentGap: expect.objectContaining({ blocks: binding === 'absent' ? null : blocks }) }));
+  expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'review', continuation: false,
+    remainingWork: ['Repair product defects.'] }));
+  const decision = result.decisionGraph?.records.find(record => record.stageId === 'review');
+  if (binding === 'covered') {
+    expect(decision).toMatchObject({ outcome: 'refused', gateAccepted: false });
+    expect(decision?.reason).toContain('Environment gap already reported by work; no further attempt on that gap authorized.');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['done', 'work', 'review']);
+    expect(result.stages.work.attempts).toHaveLength(1);
+    expect(result.stages.work.status).toBe('complete');
+  } else {
+    expect(decision).toMatchObject({ outcome: 'chosen', successor: target, gateAccepted: false });
+    expect(decision?.reason).not.toContain('Environment gap already reported');
+    if (binding === 'absent') expect(decision?.reason).toContain('Environment gaps without declared blocks: work; relatedness unknown.');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(target === 'repair' ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review', 'work']);
+    expect(result.stages[target].attempts).toHaveLength(target === 'work' ? 2 : 1);
+    expect(result.stages[target].attempts?.at(-1)).toMatchObject({ endingCause: 'complete', exitCode: 0 });
+    expect(result.stages[target].attempts?.at(-1)?.continuation).toBeUndefined();
+    expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: target, attemptIndex: target === 'work' ? 2 : 1,
+      endingCause: 'complete', continuation: false, remainingWork: ['Operator must supply historical comparison evidence.'] }));
+    expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('correct text');
+  }
+});
 
 
 it.each(['gap', 'refusal', 'cancellation'] as const)('SI repair a validated gap at deadline preserves %s precedence', async disposition => {

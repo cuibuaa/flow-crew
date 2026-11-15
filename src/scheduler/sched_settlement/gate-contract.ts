@@ -62,8 +62,9 @@ export function loadGateContract(projectDir: string, runId?: string, campaignSto
  *   - verdict.metric doesn't match contract.metric or any synonym (gate redefined)
  *   - verdict.pass is true but verdict.value doesn't satisfy contract.threshold
  *
- * Cross-references `<runDir>/stages/<stageId>/metric.json` to find the
- * authoritative `value` and `metric` name when the verdict file omits them.
+ * A numeric verdict observation takes precedence; otherwise use the admitted
+ * stage-work metric observation. Name and value always come from that carrier.
+ * Legacy runs retain their original stage-work topology through stageWorkPath.
  */
 export function validateVerdictAgainstContract(
   verdict: Record<string, unknown>,
@@ -72,31 +73,24 @@ export function validateVerdictAgainstContract(
   stageId: string,
 ): { kind: 'numeric_evidence' | 'score_contract'; reason: string } | null {
   if (verdict.pass !== true || contract.appliesToGates && !contract.appliesToGates.includes(stageId)) return null;
-  const candidateValues: unknown[] = [verdict.value, verdict.score, metric?.value, metric?.score];
-  const value = candidateValues.find(
-    (candidate): candidate is number => typeof candidate === 'number' && Number.isFinite(candidate),
-  );
+  const finiteValue = (observation: Record<string, unknown> | null): number | undefined =>
+    [observation?.value, observation?.score].find((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const observation = finiteValue(verdict) !== undefined ? verdict : metric;
+  const value = finiteValue(observation);
   if (typeof value !== 'number') {
     return { kind: 'numeric_evidence', reason: `missing required numeric gate value for metric="${contract.metric}"; only finite numeric evidence is accepted, no finite numeric value was found in the current verdict or metric.json, and contract threshold=${contract.threshold} must be checked mechanically.` };
   }
   const expectedMetric = contract.metric.toLowerCase();
   const synonyms = (contract.metricSynonyms ?? []).map(s => s.toLowerCase());
   const acceptableNames = new Set([expectedMetric, ...synonyms]);
-  const verdictMetricName = typeof verdict.metric === 'string' ? verdict.metric.toLowerCase() : '';
-  const metricFileName = metric && typeof metric.metric === 'string' ? metric.metric.toLowerCase() : '';
-  const metricNameMatches = acceptableNames.has(verdictMetricName) || acceptableNames.has(metricFileName);
-  if (!metricNameMatches) {
-    return { kind: 'score_contract', reason: `verdict.metric="${verdict.metric ?? ''}" / metric.json.metric="${metric?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.` };
+  const metricName = typeof observation?.metric === 'string' ? observation.metric.toLowerCase() : '';
+  if (!acceptableNames.has(metricName)) {
+    return { kind: 'score_contract', reason: `observation.metric="${observation?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.` };
   }
   const higherIsBetter = contract.higherIsBetter !== false;
-  const terminalOutcome = typeof metric?.outcome === 'string'
-    ? metric.outcome
-    : typeof verdict.outcome === 'string' ? verdict.outcome : undefined;
-  const verifiedCampaignCeiling = terminalOutcome === RUN_STATUS.CEILING_HIT
-    && (metric?.phaseComplete === true || metric?.phase_complete === true
-      || verdict.phaseComplete === true || verdict.phase_complete === true)
-    && metric !== null
-    && metricFileIndicatesFailure(metric);
+  const verifiedCampaignCeiling = observation !== null && observation === metric && observation.outcome === RUN_STATUS.CEILING_HIT
+    && (observation.phaseComplete === true || observation.phase_complete === true)
+    && metricFileIndicatesFailure(observation);
   const mechanicalPass = higherIsBetter ? value >= contract.threshold : value <= contract.threshold;
   if (!mechanicalPass && !verifiedCampaignCeiling) {
     return { kind: 'score_contract', reason: `verdict.pass=true but value=${value} does not satisfy contract (${higherIsBetter ? '>=' : '<='} ${contract.threshold}). Pass set independently of mechanical check — verdict invalid.` };

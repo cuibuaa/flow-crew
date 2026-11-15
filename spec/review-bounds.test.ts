@@ -34,6 +34,30 @@ const verdict = (pass: boolean, findings: unknown[]) => ({ pass, reason: 'Indepe
 });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['value'] });
 describe('finding classes bound independent review', () => {
+  it.each(['fail', 'not_assessed'] as const)('refuses pass=true with assigned criterion %s at correction and settlement', status => {
+    const run = createRun(project, 'criterion-acceptance', 'name: criterion-acceptance\nstages: []\n', ['review'],
+      '---\ncriteria: [{id: value, text: Deliver the good value.}]\n---\n');
+    const record = { ...verdict(true, []), criteria: { value: { status, evidence: 'Required value is unavailable.',
+      ...(status === 'not_assessed' ? { reason: 'evidence_unavailable' } : {}) } } };
+    expect(validateFindingVerdict(record, ['value'])).toContain('CRITERION_NOT_ACCEPTED');
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify(record));
+    writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0 });
+    settleGateEvaluation(project, run.runId, 'review');
+    expect(readGateEvaluation(project, 'review', run.runId)).toMatchObject({ pass: false,
+      refusal: { kind: 'audit_findings' }, reason: expect.stringContaining('CRITERION_NOT_ACCEPTED') });
+  });
+
+  it('keeps criterion rejection even on a legacy verdict without finding metadata', () => {
+    const run = createRun(project, 'legacy-criterion', 'name: legacy-criterion\nstages: []\n', ['review'],
+      '---\ncriteria: [{id: value, text: Deliver the good value.}]\n---\n');
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true,
+      criteria: { value: { status: 'fail', evidence: 'Required value is absent.' } } }));
+    writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0 });
+    settleGateEvaluation(project, run.runId, 'review');
+    expect(readGateEvaluation(project, 'review', run.runId)).toMatchObject({ pass: false,
+      refusal: { kind: 'audit_findings' }, reason: expect.stringContaining('CRITERION_NOT_ACCEPTED') });
+  });
+
   it('accepts advisory findings on a passing verdict', () => {
     const record = verdict(true, [finding('advisory')]);
     expect(parseStageRecord(JSON.stringify(record), schema())).toEqual(record);

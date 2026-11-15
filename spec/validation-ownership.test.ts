@@ -236,6 +236,50 @@ function projectValidation(root: string) {
 }
 
 describe('scheduler owns validation after author settlement', () => {
+  it('gap-is-not-a-validation-veto: records all configured exits after a settled environment-gap author', async () => {
+    const root = project(), counter = join(project(), 'validation-calls');
+    const commands: ValidationCommand[] = (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath,
+      args: ['-e', `require('node:fs').appendFileSync(${JSON.stringify(counter)},${JSON.stringify(role + '\n')});process.exit(${role === 'test' ? 7 : 0});`], display: role }));
+    const { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', ['author']);
+    const stage = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'author', role: 'coder', scope: [] }] }).stages[0];
+    updateRunState(root, runId, state => { state.planControl = { version: 1, stages: [stage] }; });
+    writeStageStatus(root, runId, 'author', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: 'fixture-start', endingCause: 'environment_gap', exitCode: 0 }] });
+    evidenceOwner.appendEvidence(base, { kind: 'attempt', stageId: 'author', attemptIndex: 1, attemptStartedAt: 'fixture-start',
+      exitCode: 0, status: 'complete', endingCause: 'environment_gap', continuation: false,
+      environmentGap: { reason: 'Required comparison object unavailable.', blocks: { criterion_ids: [], paths: ['comparison.md'] } },
+      treeHash: captureProjectTree(root, '', base).hash, files: [],
+      measurements: { inputTokens: null, outputTokens: null, durationMs: 1, provenance: 'adapter-reported' } });
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'project-declarations',
+      baseline: { version: 1, projectDir: root, execution: 'skipped', discovery: { state: 'configured', commands, missingRoles: [] }, results: [] } }));
+    expect(await gateValidation.validateSettledTree(root, runId)).toBe(true);
+    const fact = readEvidence(base).find(entry => entry.kind === 'validation');
+    expect(fact).toMatchObject({ kind: 'validation', stageId: 'author', resourceState: 'complete', pass: false });
+    expect(readFileSync(counter, 'utf8')).toBe('build\ntest\nlint\n');
+    expect(validationBatch(fact as ValidationFact)?.commands.map(command => command.exitCode)).toEqual([0, 7, 0]);
+    expect(readRunState(root, runId).validation?.map(command => command.exitCode)).toEqual([0, 7, 0]);
+    expect(await gateValidation.validateSettledTree(root, runId)).toBe(true);
+    expect(readFileSync(counter, 'utf8')).toBe('build\ntest\nlint\n');
+    expect(readEvidence(base).filter(entry => entry.kind === 'validation')).toHaveLength(1);
+  });
+
+  it.each(['continuation', 'failed', 'gate', 'dispatch'] as const)('author-selection still excludes %s from configured validation', async kind => {
+    const root = project(); projectValidation(root);
+    const { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', ['author']);
+    const stage = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'author', role: 'coder', scope: [],
+      ...(kind === 'gate' ? { is_gate: true } : {}), ...(kind === 'dispatch' ? { dynamic_dispatch: true } : {}) }] }).stages[0];
+    updateRunState(root, runId, state => { state.planControl = { version: 1, stages: [stage] }; });
+    gateValidation.snapshotShipSetupValidationBaseline(root, '', base);
+    evidenceOwner.appendEvidence(base, { kind: 'attempt', stageId: 'author', attemptIndex: 1, attemptStartedAt: 'fixture-start',
+      exitCode: kind === 'failed' ? 1 : 0, status: kind === 'failed' ? 'failed' : 'complete',
+      continuation: kind === 'continuation', endingCause: kind === 'continuation' ? 'work_unfinished' : kind === 'failed' ? 'work_failed' : 'complete',
+      treeHash: captureProjectTree(root, '', base).hash, files: [],
+      measurements: { inputTokens: null, outputTokens: null, durationMs: 1, provenance: 'adapter-reported' } });
+    expect(await gateValidation.validateSettledTree(root, runId)).toBe(true);
+    expect(readEvidence(base).filter(entry => entry.kind === 'validation')).toEqual([]);
+    expect(readRunState(root, runId).validation).toBeUndefined();
+  });
+
   it.each(['empty', 'partial'] as const)('unfinished-publication: repeated %s records publish one fact per distinct state', async shape => {
     const root = project(); writeFileSync(join(root, 'value.txt'), 'unchanged');
     const { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', ['author']);

@@ -3,6 +3,7 @@ import { runRecordPath } from './run-layout.js';
 import { readFileSync } from 'node:fs';
 import { readStageStatus, runDir } from './store.js';
 import { createLogger } from './logging.js';
+import { readGateEvaluation } from './scheduler/sched_settlement/gate-verdict.js';
 
 const log = createLogger({ name: 'condition' });
 
@@ -89,7 +90,8 @@ function hasOwnField(record: Record<string, unknown>, field: string): boolean {
 /**
  * Resolve a condition fact from the producing stage's own evidence. Process
  * fields (status, retries, exitCode, and so on) live in status.json. Gate facts
- * such as pass, score, metric, and threshold live in verdict_<stageId>.json.
+ * use the shared effective gate evaluation for pass. Other authored gate facts
+ * such as score, metric, and threshold live in verdict_<stageId>.json.
  * The stage-specific verdict is the only fallback; a shared or sibling verdict
  * must never supply a fact for this stage.
  */
@@ -99,6 +101,7 @@ function readConditionFact(
   stageId: string,
   field: string,
 ): unknown {
+  if (field === 'pass') return readGateEvaluation(projectDir, stageId, runId)?.pass;
   const status = readStageStatus(projectDir, runId, stageId) as unknown as Record<string, unknown>;
   if (hasOwnField(status, field)) return status[field];
 

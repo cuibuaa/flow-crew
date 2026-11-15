@@ -126,7 +126,7 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   const state = readRunState(projectDir, runId);
   const author = readEvidence(base).filter(entry => {
-    if (entry.kind !== 'attempt' || entry.status !== STAGE_STATUS.COMPLETE || entry.continuation || entry.endingCause === 'environment_gap') return false;
+    if (entry.kind !== 'attempt' || entry.status !== STAGE_STATUS.COMPLETE || entry.continuation) return false;
     const stage = state.planControl?.stages.find(stage => stage.id === entry.stageId);
     return stage && !stage.is_gate && !stage.dynamic_dispatch;
   }).at(-1);

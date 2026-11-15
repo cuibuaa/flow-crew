@@ -1,6 +1,6 @@
 import './test-support/policy-runtime.js';
 import { runWorkflow } from './test-support/stage-deadline.js';
-import { runRecordPath } from '../src/run-layout.js';
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { captureProjectTree, projectCommit, readEvidence } from '../src/evidence-ledger.js';
@@ -134,6 +134,20 @@ describe('typed gate recovery routes', () => {
 });
 
 describe('settled gate results', () => {
+  it('accepts a score from the admitted layout-2 stage work carrier and still rejects its own low value', () => {
+    const state = readRunState(projectDir, runId); state.storageLayout = 2; writeRunState(projectDir, runId, state);
+    mkdirSync(runRecordPath(runDirPath, 'stages', gateId), { recursive: true });
+    mkdirSync(stageWorkPath(runDirPath, 'stages', gateId), { recursive: true });
+    writeVerdict({ pass: true });
+    const contract = { metric: 'quality', threshold: 7 };
+    const metricPath = stageWorkPath(runDirPath, 'stages', gateId, 'metric.json');
+    writeFileSync(metricPath, JSON.stringify({ metric: 'quality', value: 8 }));
+    expect(readGateEvaluation(projectDir, gateId, runId, contract)).toMatchObject({ pass: true });
+    writeFileSync(metricPath, JSON.stringify({ metric: 'quality', value: 6 }));
+    expect(readGateEvaluation(projectDir, gateId, runId, contract)).toMatchObject({ pass: false,
+      refusal: { kind: 'score_contract' }, reason: expect.stringContaining('value=6 does not satisfy') });
+  });
+
   it('publishes an authored FAIL on a completed review in both the stage and its completion event', () => {
     // b7295c: the review process completed with exit 0 while its verdict rejected the work.
     const verdictSha256 = writeVerdict({ pass: false, reason: 'Required controller behavior remains incomplete' });
