@@ -256,10 +256,10 @@ export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLook
   if (inodes.size === 0) return undefined;
 
   const owners = new Set<number>();
-  for (const entry of readdirSync(procRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-    const pid = Number.parseInt(entry.name, 10);
-    const fdDir = join(procRoot, entry.name, 'fd');
+  for (const name of readdirSync(procRoot)) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number.parseInt(name, 10);
+    const fdDir = join(procRoot, name, 'fd');
     let fds: string[];
     try {
       fds = readdirSync(fdDir);

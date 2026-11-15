@@ -126,12 +126,12 @@ describe('declared runner identity owns the failure population', () => {
 });
 
 async function partialWorkflow(confirmed: boolean) {
-  const root = project();
+  const fixtureRoot = project(), root = join(fixtureRoot, 'project'); mkdirSync(root);
   mkdirSync(join(root, 'config'));
   writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.mjs'], report: { format: 'vitest-json' } } } }));
   writeFileSync(join(root, 'check.mjs'), `console.log(${JSON.stringify(validationReport(['fixture failure'], { complete: false }))});process.exitCode=1;`);
-  for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) {
-    isolatedProjectCommand('git', args, root, root);
+  for (const args of [['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) {
+    isolatedProjectCommand('git', args, root, fixtureRoot);
   }
   const calls: string[] = [];
   let review = 0;
@@ -160,7 +160,7 @@ async function partialWorkflow(confirmed: boolean) {
           class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] } });
     }
     mkdirSync(join(root, 'docs'), { recursive: true });
-    writeFileSync(join(root, 'docs/value.txt'), opts.stageId === 'repair' ? 'repaired' : 'bad');
+    writeFileSync(join(root, 'docs/value.txt'), opts.stageId === 'repair_review' ? 'repaired' : 'bad');
     return result({ status: 'delivered', summary: 'Value written', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
   const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
@@ -172,7 +172,7 @@ async function partialWorkflow(confirmed: boolean) {
 describe('repair admission and certification have distinct evidence demands', () => {
   it('repairs a confirmed reproduction and continues rejecting a completed nonzero configured command', { timeout: 60_000 }, async () => {
     const { final, calls, ledger } = await partialWorkflow(true);
-    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair_review', 'review']);
     const validations = ledger.filter(entry => entry.kind === 'validation');
     expect(validations).toHaveLength(2);
     for (const fact of validations) {
@@ -188,7 +188,7 @@ describe('repair admission and certification have distinct evidence demands', ()
 
   it('rejects nonzero configured validation even when independent semantic review passes', async () => {
     const { final, calls } = await partialWorkflow(false);
-    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(final.status).toBe('incomplete');
     expect(final.stages.review.gate).toMatchObject({ pass: false });
   });

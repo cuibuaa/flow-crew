@@ -45,7 +45,7 @@ function seedProject(project = projectDir): string {
   execFileSync(process.execPath, ['--input-type=module', '-e', String.raw`
     import { execFileSync } from 'node:child_process';
     const git = args => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    git(['init', '-q']);
+    git(['init', '-q', '--separate-git-dir', ${JSON.stringify(project + '.git')}]);
     git(['add', 'protected.txt']);
     git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
       'commit', '-qm', 'Record protected source']);
@@ -74,6 +74,7 @@ beforeEach(() => {
 afterEach(() => {
   setFcGlobalDir(previousStateDir);
   rmSync(projectDir, { recursive: true, force: true });
+  rmSync(projectDir + '.git', { recursive: true, force: true });
   rmSync(stateDir, { recursive: true, force: true });
 });
 
@@ -120,6 +121,7 @@ describe('scheduler scope waves', () => {
       releaseFirst();
       await first;
       rmSync(otherProject, { recursive: true, force: true });
+      rmSync(otherProject + '.git', { recursive: true, force: true });
     }
     expect((await first).status).toBe('complete');
   });

@@ -56,7 +56,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'no-approvals-')); project = join(root, 'project'); mkdirSync(project);
   previous = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   // Exercise independent review with a readable diff.
-  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
   setEngineDefaults({ gate_retry_loops: 1, plan_stage_retries: 1, max_iterations: 1 });
 });

@@ -117,9 +117,9 @@ describe('published declaration inputs', () => {
   it('PS2 gives paper findings one citation instruction and retains required finding fields', () => {
     const prompt = parseAgent(parse(read('config/agents/paper_reviewer.yaml'))).prompt;
     expect(prompt.split('section/page'), 'one finding-locator owner').toHaveLength(2);
-    expect(prompt.replace(/\s+/g, ' '), 'reproducible finding fields').toContain('Each concern includes section/page, severity (major/minor), issue and suggested_fix');
-    expect(prompt, 'findings need evidence rather than a quota').toContain('Findings reflect the paper,');
-    expect(prompt, 'no invented finding minimum').toContain('with no minimum count');
+    expect(prompt.replace(/\s+/g, ' '), 'reproducible finding fields').toContain("Put section/page, severity, issue and suggested fix in each finding's reason");
+    expect(prompt, 'findings need evidence rather than a quota').toContain("typed verdict under the injected finding policy");
+    expect(prompt, 'no invented finding minimum').toContain('no minimum finding count');
   });
 
   it('leaves configured validation comparison to the engine', () => {

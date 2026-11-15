@@ -20,9 +20,9 @@ import { createRun } from './test-support/create-run.js';
 import { settleGateEvaluation, readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { buildGateFixCorrectionContract, confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
 
-let project: string;
-beforeEach(() => { project = mkdtempSync(join(tmpdir(), 'review-boundary-')); });
-afterEach(() => { rmSync(project, { recursive: true, force: true }); });
+let project: string, fixtureRoot: string;
+beforeEach(() => { fixtureRoot = mkdtempSync(join(tmpdir(), 'review-boundary-')); project = join(fixtureRoot, 'project'); mkdirSync(project); });
+afterEach(() => { rmSync(fixtureRoot, { recursive: true, force: true }); });
 
 const finding = (kind: 'criterion_unmet' | 'regression' | 'advisory') => ({
   id: kind, class: kind, paths: ['value.txt'], reason: kind === 'advisory' ? 'Optional metadata hardening.' : 'The value must remain good.',
@@ -64,7 +64,7 @@ describe('finding classes bound independent review', () => {
   });
 
   it.each(['advisory', 'criterion_unmet', 'regression'] as const)('settles %s findings without changing their repair authority', async kind => {
-    for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) {
+    for (const args of [['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) {
       isolatedProjectCommand('git', args, project, project);
     }
     writeFileSync(join(project, 'value.txt'), 'good\n');
@@ -75,7 +75,7 @@ describe('finding classes bound independent review', () => {
     const adapter: Adapter = { async run(prompt, _role, opts) {
       calls.push({ stage: opts.stageId, prompt });
       if (opts.stageId !== 'review') {
-        writeFileSync(join(project, 'value.txt'), opts.stageId === 'repair' || kind === 'advisory' ? 'good\n' : 'bad\n');
+        writeFileSync(join(project, 'value.txt'), opts.stageId === 'repair_review' || kind === 'advisory' ? 'good\n' : 'bad\n');
         return { output: JSON.stringify({ status: 'delivered', summary: 'Value delivered.', caveats: [], remaining_work: [] }),
           exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
       }
@@ -116,10 +116,10 @@ describe('finding classes bound independent review', () => {
       expect(summary.toLowerCase()).toContain('advisory');
       expect(summary).toContain('Optional metadata hardening.');
     } else {
-      expect(calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+      expect(calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
       const obligations = confirmedRepairFindings(directory, ['review']);
       expect(obligations.map(item => item.class)).toEqual([kind]);
-      const repair = calls.find(call => call.stage === 'repair')!.prompt;
+      const repair = calls.find(call => call.stage === 'repair_review')!.prompt;
       const facts = JSON.parse(repair.split('# Gate repair facts\n')[1].split('\n')[0]);
       expect(facts.confirmedFindings.review.map((item: { class: string }) => item.class)).toEqual([kind]);
       expect(facts.rejections.flatMap((rejection: { audit_findings: { findings: Array<{ class: string }> } }) => rejection.audit_findings.findings.map(item => item.class))).toEqual([kind]);

@@ -75,7 +75,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
   const baselineTree = captureProjectTree(target, brief);
   const calls: Array<{ stage: string; prompt: string; resume?: string; schema: RunOpts['outputSchema'] }> = [];
   let writes = 0, reviews = 0;
-  const scripted = new ScriptedAdapter({ implement: { output: 'AUTHOR_TRANSCRIPT_SENTINEL' }, repair: { output: 'REPAIR_TRANSCRIPT_SENTINEL' } });
+  const scripted = new ScriptedAdapter({ implement: { output: 'AUTHOR_TRANSCRIPT_SENTINEL' }, repair_review: { output: 'REPAIR_TRANSCRIPT_SENTINEL' } });
   const adapter: Adapter = { async run(prompt, role, opts) {
     calls.push({ stage: opts.stageId, prompt, resume: opts.resumeSessionId, schema: opts.outputSchema });
     if (opts.stageId === 'implement') {
@@ -88,7 +88,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       if (options.input === 'introduced') writeFileSync(join(target, 'data/value.txt'), 'BAD');
       if (options.input === 'mixed') writeFileSync(join(target, 'data/readme.txt'), 'authored member');
     }
-    if (opts.stageId === 'repair') {
+    if (opts.stageId === 'repair_review') {
       writeFileSync(join(target, 'value.txt'), options.returnToFirstTree ? reviews === 1 ? 'intermediate\n' : 'write 3\n' : options.unchanged ? 'base\n' : 'repaired\n');
       if (options.input === 'introduced') writeFileSync(join(target, 'data/value.txt'), 'GOOD');
     }
@@ -152,7 +152,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it('keeps ignored inputs available while source repair changes validation identity', async () => {
     const result = await fixture({ input: 'introduced' });
     expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(2);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(result.executions.map(value => value.input)).toEqual(['BAD', 'GOOD']);
     expect(result.validations.map(value => value.executions[0].commands[0].exitCode)).toEqual([1, 0]);
     expect(result.validations[0].treeHash).not.toBe(result.validations[1].treeHash);
@@ -199,9 +199,9 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     setEngineDefaults({ session_reuse: true });
     const result = await fixture({ introduce: true });
     expect(result.final.status).toBe('complete');
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(result.executions).toHaveLength(2);
-    expect(result.validations.map(value => value.stageId)).toEqual(['implement', 'repair']);
+    expect(result.validations.map(value => value.stageId)).toEqual(['implement', 'repair_review']);
     expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[1].executions).toHaveLength(1); expect(result.validations[1].pass).toBe(true);
     for (const call of result.calls) {
@@ -277,7 +277,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.final.status).toBe('complete'); expect(result.validations).toHaveLength(1);
     expect(result.executions).toHaveLength(1);
     // Re-reading one already-recorded attempt is idempotent, never a third suite.
-    await recordAttemptValidation(result.target, result.final.runId, 'repair', { runCommand: () => { throw new Error('duplicate suite'); } });
+    await recordAttemptValidation(result.target, result.final.runId, 'repair_review', { runCommand: () => { throw new Error('duplicate suite'); } });
     expect(readEvidence(result.rd).filter(entry => entry.kind === 'validation')).toHaveLength(1);
   });
 

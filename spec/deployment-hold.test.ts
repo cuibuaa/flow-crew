@@ -482,7 +482,7 @@ it('continues an attemptless legacy preparation without inventing completed hist
 
 it('retains completed uncommitted project work across a deployment hold and scheduler replacement', async () => {
   writeFileSync(join(project, 'product.txt'), 'Original tracked product.\n');
-  const setup = await daemonCommand(spawn(process.execPath, ['--input-type=module', '-e', "import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q']); execFileSync('git', ['add', 'product.txt']);"], {
+  const setup = await daemonCommand(spawn(process.execPath, ['--input-type=module', '-e', `import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q', '--separate-git-dir', ${JSON.stringify(join(root, 'git'))}]); execFileSync('git', ['add', 'product.txt']);`], {
     cwd: project, env: { ...process.env, HOME: project, FC_HOME: project },
   }));
   expect(setup.status, setup.stderr).toBe(0);

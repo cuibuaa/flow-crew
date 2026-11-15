@@ -28,17 +28,17 @@ import { startRpcServer } from '../src/orchestrator-rpc.js';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
 import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
 
-let root: string, previousStore: string;
+let root: string, fixtureRoot: string, previousStore: string;
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'identity-'));
-  previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'identity-')); root = join(fixtureRoot, 'project'); mkdirSync(root);
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(fixtureRoot, 'fc'));
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   vi.stubEnv('XDG_RUNTIME_DIR', root); vi.stubEnv('DBUS_SESSION_BUS_ADDRESS', undefined);
   commands.run.mockReset(); commands.spawn.mockReset();
 });
 afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs();
-  setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true });
+  setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive: true, force: true });
 });
 const longWait = 365 * 24 * 60 * 60_000;
 function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }

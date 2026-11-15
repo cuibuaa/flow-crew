@@ -109,7 +109,7 @@ it.each((['claude', 'codex'] as const).flatMap(frontend => (['green', 'red', 'em
     "process.stdout.write(result.stdout || ''); process.stderr.write(result.stderr || result.error?.message || '');",
     'process.exit(result.status ?? 1);',
   ].join('\n'));
-  for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Fixture']]) {
+  for (const args of [['init', '-q', '--separate-git-dir', join(root, 'git')], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'Fixture']]) {
     const result = await daemonCommand(spawn(process.execPath, [runner, 'git', ...args], {
       cwd: project, env: { ...env, HOME: join(root, 'home'), FC_HOME: engine }, stdio: ['pipe', 'pipe', 'pipe'],
     }));

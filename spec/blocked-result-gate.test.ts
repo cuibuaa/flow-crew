@@ -52,7 +52,7 @@ async function run(verdicts: Array<Record<string, unknown>>, answers: Record<str
   const { config, raw } = loadWorkflow(workflow);
   const final = await runWorkflow(config, raw, projectDir, withConfirmedRejections(adapter), new Map(), undefined, join(root, 'config', 'agents'), undefined, brief, true);
   const ledger = readFileSync(runRecordPath(runDir(projectDir, final.runId), 'evidence-ledger.jsonl'), 'utf8');
-  return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair ?? [], ledger };
+  return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair_review ?? [], ledger };
 }
 
 describe('a blocked author result goes to its gate', () => {
@@ -74,11 +74,11 @@ describe('a blocked author result goes to its gate', () => {
 
   it('sends a blocker the gate rejects to the bounded repair, whose work the gate reviews again', async () => {
     const { final, calls, reviews, repairs } = await run([REPAIRABLE, { pass: true, reason: 'repaired' }]);
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(reviews[0]).toContain('\"kind\":\"declaration\"');
     expect(repairs[0]).toContain('rejected_verdict_review.json');
     expect(repairs[0]).toContain('engine_verdict_review.json');
-    expect(reviews[1]).toContain('\"stageId\":\"repair\"');
+    expect(reviews[1]).toContain('\"stageId\":\"repair_review\"');
     expect(reviews[1]).not.toContain('The new parser rejects merge sequences');
     expect(final.status).toBe('complete');
   });
@@ -93,16 +93,16 @@ describe('a blocked author result goes to its gate', () => {
     expect(reviews[0]).toContain('A reported blocker needs independent reproduction; it does not establish irreparability');
     expect(reviews[0]).toContain('Use repairability \"irreparable\" only with reproduced evidence that no available repair can meet the brief');
     expect(reviews[0]).not.toContain('Real, and the brief does not accept a blocked report');
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(final.status).toBe('complete');
   });
 
   it('returns a repair that reports the blocker again to the same gate, which may then confirm it', async () => {
-    const { final, calls, reviews } = await run([REPAIRABLE, IRREPARABLE], { implement: [BLOCKED], repair: [BLOCKED] });
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    const { final, calls, reviews } = await run([REPAIRABLE, IRREPARABLE], { implement: [BLOCKED], repair_review: [BLOCKED] });
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(reviews[1]).not.toContain('The new parser rejects merge sequences longer than 100 entries.');
-    expect(reviews[1]).toContain('\"kind\":\"declaration\",\"stageId\":\"repair\"');
-    expect(reviews[1]).toContain('\"stageId\":\"repair\"');
+    expect(reviews[1]).toContain('\"kind\":\"declaration\",\"stageId\":\"repair_review\"');
+    expect(reviews[1]).toContain('\"stageId\":\"repair_review\"');
     expect(final.status).toBe('escalated');
   });
 
@@ -115,7 +115,7 @@ describe('a blocked author result goes to its gate', () => {
   it('tells the gate about a blocked author it reviews through another author', async () => {
     const workflow = join(projectDir, 'chain.yaml');
     const direct = readFileSync(join(root, 'config', 'workflows', 'direct.yaml'), 'utf8');
-    writeFileSync(workflow, direct.replace('  - id: implement\n', '  - id: inventory\n    role: coder\n    scope: ["docs/"]\n  - id: implement\n    depends_on: [inventory]\n'));
+    writeFileSync(workflow, direct.replace('  - id: implement\n', '  - id: inventory\n    role: coder\n    scope: ["docs/"]\n  - id: implement\n    depends_on: [inventory]\n') + '\n  - id: repair_review\n    role: coder\n    depends_on: [review]\n    retry_to: [review]\n    scope: ["."]\n');
     const { final, calls, reviews } = await run([IRREPARABLE], { inventory: [BLOCKED] }, workflow);
     expect(calls).toEqual(['inventory', 'implement', 'review']);
     expect(reviews[0]).toContain('evidence-ledger.jsonl');

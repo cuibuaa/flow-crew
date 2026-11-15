@@ -24,9 +24,9 @@ vi.mock('../src/build-manifest.js', async original => ({
 vi.mock('node:child_process', async original => {
   const actual = await original<typeof import('node:child_process')>();
   return { ...actual,
-    spawnSync: (file: string, args: string[], options: object) => file === 'git'
+    spawnSync: (file: string, args: string[], options: object) => file === 'git' && !fixture.setupCalls.some(call => call[call.indexOf('--target') + 1] === (options as { cwd?: string }).cwd)
       ? fixture.git.sync(args, options) : actual.spawnSync(file, args, options),
-    execFileSync: (file: string, args: string[], options: object) => file === 'git'
+    execFileSync: (file: string, args: string[], options: object) => file === 'git' && !fixture.setupCalls.some(call => call[call.indexOf('--target') + 1] === (options as { cwd?: string }).cwd)
       ? fixture.git.exec(args, options) : actual.execFileSync(file, args, options),
   };
 });
@@ -57,6 +57,8 @@ vi.mock('../src/cli-ship-setup.js', () => ({
     fixture.setupCalls.push(args);
     const target = args[args.indexOf('--target') + 1];
     mkdirSync(target, { recursive: true });
+    const { execFileSync } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    execFileSync('git', ['init', '-q', '--separate-git-dir', join(root, 'target-git'), target]);
     const { fcGlobalDir } = await import('../src/store.js');
     const path = writeReadySetupRecord(target, fixture.generated!.brief, fcGlobalDir());
     const setup = JSON.parse(readFileSync(path, 'utf8'));

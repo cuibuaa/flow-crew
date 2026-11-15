@@ -74,14 +74,15 @@ describe('shipped role outcome contracts', () => {
     for (const role of ['paper_reviewer', 'ai_detector']) {
       const text = prompt(role);
       for (const score of ['Novelty', 'Rigor', 'Clarity', 'Soundness']) expect(text).toContain(score);
-      expect(text).toContain('1–10 score');
+      expect(text).toContain('scores (1–10) in the verdict reason');
+      expect(text).toContain("Return the scheduler's typed verdict under the injected finding policy");
       expect(text).toContain('Disclose missing or ambiguous lines');
       expect(text).toContain('never invent a threshold or waive a supplied one');
     }
     expect(prompt('paper_reviewer')).toContain('Reproducibility');
-    expect(prompt('paper_reviewer')).toContain('no minimum count');
-    expect(prompt('ai_detector')).toContain('Stylistic flags guide improvements; they fail acceptance only when the brief');
-    expect(prompt('ai_detector')).toContain('zero flagged sections when explicitly required');
+    expect(prompt('paper_reviewer')).toContain('no minimum finding count');
+    expect(prompt('ai_detector')).toContain('Report per-section evidence');
+    expect(prompt('ai_detector')).toContain('Use these dimensions to investigate the assigned criteria');
     expect(prompt('ai_detector')).toContain('Every quantitative claim must have a source');
   });
 

@@ -31,7 +31,7 @@ it.each([
  setEngineDefaults({stage_technical_retries:1});
  const root=mkdtempSync(join(tmpdir(),'terminal-authority-')); roots.push(root);
  const project=join(root,'project');mkdirSync(project);setFcGlobalDir(join(root,'store'));
- isolatedProjectCommand('git',['init','-q'],project,root);if(ignored)writeFileSync(join(project,'.gitignore'),'result.md\n');
+ isolatedProjectCommand('git',['init','-q','--separate-git-dir',join(root,'git')],project,root);if(ignored)writeFileSync(join(project,'.gitignore'),'result.md\n');
  const stages=[
   {id:'a',role:'coder',scope:['result.md'],depends_on:dispatched?['plan']:[]},
   {id:'g',role:'qa',is_gate:true,scope:[],depends_on:['a']},
@@ -133,7 +133,7 @@ describe('reproduction 824', () => {
     setEngineDefaults({ stage_technical_retries: 1 });
     const root = mkdtempSync(join(tmpdir(), 'terminal-fifo-')); roots.push(root);
     const project = join(root, 'project'); mkdirSync(project); setFcGlobalDir(join(root, 'store'));
-    isolatedProjectCommand('git', ['init', '-q'], project, root);
+    isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
     writeFileSync(join(project, '.gitignore'), 'scratch/\n');
     const workflow = WorkflowConfigSchema.parse({ name: 'entry', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
       { id: 'author', role: 'coder', scope: ['draft.md'] },
@@ -190,7 +190,7 @@ it.each(['fifo', 'alias'] as const)('refuses publication after an unrestored %s 
 async function checkUnrestoredPublication(shape: 'fifo' | 'alias', attribution: 'structured' | 'unknown') {
   const root = mkdtempSync(join(tmpdir(), 'terminal-unrestored-')); roots.push(root);
   const project = join(root, 'project'); mkdirSync(project); setFcGlobalDir(join(root, 'store'));
-  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   writeFileSync(join(project, '.gitignore'), 'hidden/\nresult.md\n');
   if (shape === 'alias') {
     mkdirSync(join(project, 'hidden'));

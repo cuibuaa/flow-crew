@@ -60,7 +60,7 @@ function check(){if(existsSync(root+'/release')){watcher.close();writeFileSync(r
   // Git only operates on the disposable project; no user identity is printed.
   execFileSync(process.execPath, ['--input-type=module', '-e', `
     import { execFileSync } from 'node:child_process';
-    execFileSync('git', ['init', '-q']);
+    execFileSync('git', ['init', '-q', '--separate-git-dir', ${JSON.stringify(join(root, 'git'))}]);
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
   `], { cwd: project, env: { ...process.env, HOME: join(root,'h'), FC_HOME: fc }, timeout: 15000 });
   const build = deployBuild(root); const first = build.publish(1);

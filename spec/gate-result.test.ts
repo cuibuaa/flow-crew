@@ -361,7 +361,7 @@ describe('stage group settlement boundaries', () => {
 
 describe('validation at the review boundary', () => {
   it.each(['repaired', 'exhausted', 'launch_error'] as const)('rejects nonzero exits, validates changed repair trees, and hands unfinished facts to review: %s', async outcome => {
-    for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
+    for (const args of [['init', '-q', '--separate-git-dir', join(root, 'git')], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
       discovery: { state: 'partial', configPath: 'fixture', missingRoles: ['build', 'lint'],
@@ -411,7 +411,8 @@ describe('validation at the review boundary', () => {
       expect(fact).toMatchObject({ resourceState: 'unfinished', executions: expect.any(Array) });
       expect(fact.executions).toHaveLength(3);
       expect(fact.executions.map(execution => execution.commands.map(command => command.exitCode))).toEqual([[null], [null], [null]]);
-      expect(adapter.calls.find(call => call.stageId === gateId)!.prompt).toContain(JSON.stringify(fact));
+      expect(adapter.calls.find(call => call.stageId === gateId)!.prompt).toContain(JSON.stringify({ ...fact, executions: fact.executions.map(execution => ({ ...execution,
+        commands: execution.commands.map(({ output: _output, report: _report, ...command }) => command) })) }));
       expect(final.reasonCode).toBe('validation_unresolved');
       expect(final.stages[gateId]).toMatchObject({ status: 'complete', gate: { pass: true, kind: 'pass' } });
       expect(readRunEvents(projectDir, final.runId).filter(event => event.type === 'stage_complete').map(event => event.stageId)).toEqual(['work', gateId]);

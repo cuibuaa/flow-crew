@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
@@ -259,13 +258,7 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
     symlinkSync('evidence', join(projectDir, 'alias'));
     // Existing Git objects provide rollback without copying read-only inputs.
-    execFileSync(process.execPath, ['--input-type=module', '-e', `
-      import { execFileSync } from 'node:child_process';
-      for (const args of [
-        ['init', '-q'], ['add', '.'],
-        ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'],
-      ]) execFileSync('git', args);
-    `], { cwd: projectDir, env: { ...process.env, HOME: fixtureRoot, FC_HOME: join(fixtureRoot, 'private-store') } });
+    for (const args of [['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'baseline']]) isolatedProjectCommand('git', args, projectDir, fixtureRoot);
     const final = await runDirect(brief('inputs:\n  - {path: notes.md, frozen: true}\n  - {path: evidence, frozen: true}\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair_review') writeFileSync(join(projectDir, path), 'unauthorized\n');
     });

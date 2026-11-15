@@ -44,7 +44,7 @@ const workflow = () => WorkflowConfigSchema.parse({ name: 'fixture', defaults: {
 function project(name: string) {
   const path = join(root, name); mkdirSync(path);
   writeFileSync(join(path, '.gitignore'), 'ignored.txt\n'); writeFileSync(join(path, 'source.txt'), 'ORIGINAL');
-  for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) {
+  for (const args of [['init', '-q', '--separate-git-dir', join(root, `${name}-git`)], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) {
     isolatedProjectCommand('git', args, path, root);
   }
   return path;

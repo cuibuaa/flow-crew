@@ -195,7 +195,8 @@ describe('versioned declaration-owned research loop', () => {
       expect(fact.resourceState).toBe(historic ? 'complete' : 'unfinished');
       expect(fact.treeHash).toBe(captureProjectTree(project, text, opts.runDir).hash);
       expect(fact.executions.map(execution => execution.commands.map(command => command.exitCode))).toEqual(historic ? [[null], [0]] : [[null]]);
-      expect(prompt).toContain(JSON.stringify(fact));
+      expect(prompt).toContain(JSON.stringify({ ...fact, executions: fact.executions.map(execution => ({ ...execution,
+        commands: execution.commands.map(({ output: _output, report: _report, ...command }) => command) })) }));
       return { output: verdict(parseBriefFrontmatter(text).research!), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } };
     const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));

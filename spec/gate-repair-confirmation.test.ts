@@ -33,9 +33,10 @@ const finding = (id: string, reproduction?: number | null): AuditFinding => ({ i
   ...(reproduction === undefined ? {} : { reproduction }) });
 
 async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRepair = false, observeAfterRepair = false, needsValidationPreparation = false, variant?: 'long' | 'cwd' | 'bash' | 'unknown' | 'recorded', route?: [string, string, string?]) {
-  const project = mkdtempSync(join(tmpdir(), 'confirmed-gate-')); roots.push(project);
+  const root = mkdtempSync(join(tmpdir(), 'confirmed-gate-')); roots.push(root);
+  const project = join(root, 'project'); mkdirSync(project);
   // The reviewer receives a complete readable patch.
-  isolatedProjectCommand('git', ['init', '-q'], project, project);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, project);
   const calls: Array<{ stage: string; prompt: string }> = [];
   let review = 0;
@@ -96,7 +97,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
         ...(mode === 'observation' || corrected || !first ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'reviewed value' } }) });
     }
     mkdirSync(join(project, 'docs'), { recursive: true });
-    writeFileSync(join(project, 'docs/value.txt'), opts.stageId === 'repair' && !failedRepair ? 'repaired' : 'bad');
+    writeFileSync(join(project, 'docs/value.txt'), opts.stageId === (route ? 'repair' : 'repair_review') && !failedRepair ? 'repaired' : 'bad');
     if (route && opts.stageId === 'repair') return result({ successor: 'review', reason: 'Reassess the repaired value' }, ['docs/value.txt']);
     return result({ status: 'delivered', summary: 'Value delivered', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
@@ -145,7 +146,7 @@ describe('repair requires a reviewer reproduction', () => {
   it('records and closes an engine-run reproduction when native events omit execution context', async () => {
     const value = await workflow('mixed', false, false, false, 'recorded');
     expect(value.final.status).toBe('complete');
-    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
     expect(original).toMatchObject({ exitCode: 1, command: '[[ "$(cat value.txt)" == repaired ]]',
       context: { cwd: join(value.project, 'docs'), shell: '/bin/bash' }, outputDigest: expect.any(String),
@@ -162,7 +163,7 @@ describe('repair requires a reviewer reproduction', () => {
   it.each(['long', 'cwd', 'bash'] as const)('replays the complete engine-recorded command in its context (%s)', async variant => {
     const value = await workflow('mixed', variant !== 'bash', false, false, variant);
     expect(value.final.status).toBe(variant === 'bash' ? 'complete' : 'incomplete');
-    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;
     expect(original).toMatchObject({ exitCode: 1, context: {
@@ -185,18 +186,18 @@ describe('repair requires a reviewer reproduction', () => {
 
   it('records a reviewer-run command and repairs only the confirmed finding, closing its reproduction on the repaired tree', async () => {
     const value = await workflow('mixed');
-    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(value.final.status).toBe('complete');
     const reproduction = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
     expect(reproduction).toMatchObject({ kind: 'command', owner: 'code', stageId: 'review', exitCode: 1,
       treeHash: expect.stringMatching(/^[a-f0-9]{64}$/), outputDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     if (reproduction.kind !== 'command') throw Error('missing reproduction');
     expect(reproduction.treeAfterHash).toBe(reproduction.treeHash);
-    const repairFacts = JSON.parse(value.calls.find(call => call.stage === 'repair')!.prompt.split('# Gate repair facts\n')[1].split('\n')[0]);
+    const repairFacts = JSON.parse(value.calls.find(call => call.stage === 'repair_review')!.prompt.split('# Gate repair facts\n')[1].split('\n')[0]);
     const repair = JSON.stringify(repairFacts.confirmedFindings);
     expect(repair).toContain('"id":"confirmed"'); expect(repair).not.toContain('"id":"unconfirmed"');
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === reproduction.sequence)!;
-    expect(closure).toMatchObject({ kind: 'command', owner: 'code', stageId: 'repair', exitCode: 0,
+    expect(closure).toMatchObject({ kind: 'command', owner: 'code', stageId: 'repair_review', exitCode: 0,
       treeHash: expect.any(String), treeAfterHash: expect.any(String), outputDigest: expect.any(String) });
     if (closure.kind !== 'command') throw Error('missing closure');
     expect(closure.treeHash).toBe(closure.treeAfterHash); expect(closure.treeHash).not.toBe(reproduction.treeHash);
@@ -210,7 +211,7 @@ describe('repair requires a reviewer reproduction', () => {
     expect(value.final.status).toBe('complete');
     expect(validation.runValidationCommand).toHaveBeenCalledTimes(2);
     const configured = value.ledger.filter(entry => entry.kind === 'validation');
-    expect(configured.map(entry => entry.stageId)).toEqual(['implement', 'repair']);
+    expect(configured.map(entry => entry.stageId)).toEqual(['implement', 'repair_review']);
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)!;
     expect(closure).toMatchObject({ exitCode: 0 });
     expect(closure.sequence).toBeGreaterThan(configured[1].sequence);
@@ -218,7 +219,7 @@ describe('repair requires a reviewer reproduction', () => {
 
   it('does not close a finding when the repair reproduction still fails, even if the next model verdict passes', async () => {
     const value = await workflow('mixed', true);
-    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(value.final.status).toBe('incomplete');
     expect(value.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
     expect(value.final.stages.review.gate?.reason).toContain('Repair reproduction remains open');

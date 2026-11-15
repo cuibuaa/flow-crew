@@ -23,7 +23,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'terminal-delta-'));
   project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
-  projectProbe("require('node:child_process').execFileSync('git', ['init', '-q', '.'])");
+  projectProbe(`require('node:child_process').execFileSync('git', ['init', '-q', '--separate-git-dir', ${JSON.stringify(join(root, 'git'))}, '.'])`);
 });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
 

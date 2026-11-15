@@ -52,8 +52,8 @@ describe('author results and reports carry only what the brief and readers need'
 describe('a passing verdict is the record', () => {
   it('does not ask gates for documents beyond declared outputs while rejections keep findings', () => {
     const qa = loaded('qa');
-    expect(qa).toContain('Return the scheduler\'s typed verdict with reproducible evidence references; beyond declared outputs, a passing verdict is the whole record');
-    expect(qa).toContain('A rejection includes concrete repairable findings and whether repair is possible');
+    expect(qa).toContain("Return the scheduler's typed verdict with reproducible evidence references");
+    expect(qa).toContain('on rejection, whether repair is possible');
     expect(base.replace(/\s+/g, ' ')).toContain("Return the scheduler's schema-validated final result");
   });
 

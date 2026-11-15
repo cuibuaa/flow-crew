@@ -32,7 +32,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'ledger-handoff-'));
   project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
-  for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) {
+  for (const args of [['init', '-q', '--separate-git-dir', join(root, 'git')], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) {
     isolatedProjectCommand('git', args, project, root);
   }
 });

@@ -109,7 +109,7 @@ describe('host load is telemetry, never a command judgment', () => {
     expect(calls.slice(0, 2)).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(1);
     expect(final.stages.review.gate).toMatchObject({ pass: exitCode === 0, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
     if (exitCode !== 0) {
-      expect(final.stages.repair.attempts?.length).toBeGreaterThan(0);
+      expect(final.stages.repair_review.attempts?.length).toBeGreaterThan(0);
     }
     else expect(final.stages.review.gate?.reason).not.toContain('Validation not measured (');
     const directory = runDir(project, final.runId), fact = readEvidence(directory).find(entry => entry.kind === 'validation')!;

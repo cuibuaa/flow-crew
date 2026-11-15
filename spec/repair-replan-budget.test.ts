@@ -17,21 +17,22 @@ import { runDir } from '../src/store.js';
 import { declaredDispatch, fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
-let projectDir: string;
+let fixtureRoot: string, projectDir: string;
 beforeEach(() => {
-  projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-repair-budget-'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-repair-budget-'));
+  projectDir = join(fixtureRoot, 'project'); mkdirSync(projectDir);
   setEngineDefaults({ gate_retry_loops: 3, plan_stage_retries: 0 });
   writeFileSync(join(projectDir, 'input.txt'), 'frozen evidence\n');
   // Existing Git content restores a forbidden input write without eager backup.
   execFileSync(process.execPath, ['--input-type=module', '-e', `
     import { execFileSync } from 'node:child_process';
-    for (const args of [['init', '-q'], ['add', 'input.txt'],
+    for (const args of [['init', '-q', '--separate-git-dir', ${JSON.stringify(join(fixtureRoot, 'git'))}], ['add', 'input.txt'],
       ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']]) {
       execFileSync('git', args);
     }
   `], { cwd: projectDir, env: { ...process.env, HOME: projectDir, FC_HOME: projectDir } });
 });
-afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
+afterEach(() => { rmSync(fixtureRoot, { recursive: true, force: true }); });
 
 async function scenario(options: { negotiation?: boolean; includeRepair?: boolean; alwaysReject?: boolean; maxIterations?: number } = {}) {
   const workflow = WorkflowConfigSchema.parse({

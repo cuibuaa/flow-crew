@@ -24,7 +24,7 @@ async function runReviewedTerminal(reviewAfterFinalizer: boolean, changeProduct 
   const project = join(directory, 'project');
   mkdirSync(project);
   if (ignoredProduct) {
-    execFileSync(process.execPath, ['-e', "require('node:child_process').execFileSync('git', ['init', '-q', '.'])"], {
+    execFileSync(process.execPath, ['-e', `require('node:child_process').execFileSync('git', ['init', '-q', '--separate-git-dir', ${JSON.stringify(join(directory, 'git'))}, '.'])`], {
       cwd: project, env: { ...process.env, HOME: directory, FC_HOME: join(directory, 'state') },
     });
     writeFileSync(join(project, '.gitignore'), 'value.json\n');

@@ -221,7 +221,7 @@ describe('scheduler owns validation after author settlement', () => {
     let reviews = 0;
     const final = await engineering(root, { async run(prompt, _role, opts) {
       if (opts.stageId !== 'review') {
-        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair' ? 'good' : 'bad');
+        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair_review' ? 'good' : 'bad');
         return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
       }
       const fact = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
@@ -262,11 +262,11 @@ describe('scheduler owns validation after author settlement', () => {
       }
       expect(role.prompt).toContain('Run only tests related');
       expect(readStageStatus(root, JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId, opts.stageId).status).toBe('running');
-      writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair' ? 'good' : 'bad');
+      writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair_review' ? 'good' : 'bad');
       return { output: JSON.stringify({ status: 'delivered', summary: 'Code and related tests done', caveats: [], remaining_work: [] }),
         exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
     } });
-    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     const ledger = readEvidence(runDir(root, final.runId));
     const records = ledger.filter(entry => entry.kind === 'validation');
     expect(records).toHaveLength(2); expect(new Set(records.map(entry => entry.treeHash)).size).toBe(2);
@@ -277,7 +277,7 @@ describe('scheduler owns validation after author settlement', () => {
       const author = ledger.find(entry => entry.kind === 'attempt' && entry.stageId === record.stageId && entry.attemptIndex === record.attemptIndex)!;
       expect(author.sequence).toBeLessThan(record.sequence);
     }
-    expect(final.stages.repair.attempts).toHaveLength(1);
+    expect(final.stages.repair_review.attempts).toHaveLength(1);
     expect(final.stages.review.gate?.reason).toContain('engine evidence-ledger.jsonl sequence');
     expect(ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)).toEqual([]);
   });
@@ -379,7 +379,7 @@ describe('scheduler owns validation after author settlement', () => {
     });
     const final = await engineering(root, { async run(_prompt, _role, opts) {
       if (opts.stageId !== 'review') {
-        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair' ? 'good' : 'bad');
+        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair_review' ? 'good' : 'bad');
         return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
       }
       const first = ++reviews === 1;
@@ -473,7 +473,7 @@ describe('scheduler owns validation after author settlement', () => {
     }
     expect(seen).toBeDefined(); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(6);
     expect(final.status).toBe('incomplete'); // No successful publication from an unfinished receipt.
-    expect(final.stages.implement.attempts).toHaveLength(1); expect(final.stages.repair.attempts ?? []).toHaveLength(0);
+    expect(final.stages.implement.attempts).toHaveLength(1); expect(final.stages.repair_review.attempts ?? []).toHaveLength(0);
   });
 
 });

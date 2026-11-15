@@ -39,7 +39,7 @@ it('the same declaration with two bodies has identical admission, launch, valida
   const decisions: unknown[] = [], digests: string[] = [];
   for (const [index, body] of ['', hostileBody.repeat(150)].entries()) {
     const project = join(root, `project-${index}`); mkdirSync(join(project, 'docs'), { recursive: true });
-    gitSync(['init', '-q', project]);
+    gitSync(['init', '-q', '--separate-git-dir', join(root, `git-${index}`), project]);
     gitSync(['-c', 'user.name=Fixture', '-c', 'user.email=fixture', 'commit', '--allow-empty', '-qm', 'base'], { cwd: project });
     const brief = envelope(body), preflight = inspectBrief(brief);
     const admission = createBriefAdmission(preflight, { kind: 'not_required' });

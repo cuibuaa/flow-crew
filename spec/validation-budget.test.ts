@@ -144,9 +144,9 @@ describe('declarations or one repository-reading model choose commands', () => {
 
 async function catchFixture(kind: 'cache' | 'cpu', confirm: boolean) {
   setEngineDefaults({ validation_attempts: 10 });
-  const root = project(), calls: string[] = [];
-  const git = (...args: string[]) => isolatedProjectCommand('git', args, root, root);
-  git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  const fixtureRoot = project(), root = join(fixtureRoot, 'project'), calls: string[] = []; mkdirSync(root);
+  const git = (...args: string[]) => isolatedProjectCommand('git', args, root, fixtureRoot);
+  git('init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
   writeFileSync(join(root, 'contract.txt'), 'old'); writeFileSync(join(root, 'resource.txt'), kind === 'cache' ? 'TMP' : '0-5');
   // This finite reporter fixture reproduces the audit assertion and independent
   // existing environment failures, rather than imitating their console output.
@@ -188,7 +188,7 @@ describe('declared project assertions survive engine ownership', () => {
   it.each(['cache', 'cpu'] as const)('rejects the %s assertion directly and closes repair only when every declared command passes', async kind => {
     const result = await catchFixture(kind, true);
     expect(result.final.status).toBe(kind === 'cache' ? 'incomplete' : 'complete');
-    expect(result.calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.calls.slice(0, 4)).toEqual(['implement', 'review', 'repair_review', 'review']);
     const first = result.validations[0];
     expect(first.executions).toHaveLength(1);
     expect(first.executions[0].commands.map(command => command.role)).toEqual(['build', 'test']);
@@ -253,7 +253,7 @@ it('rejects a repository-selected nonzero test alongside a working build', async
     } }, ['docs/value.txt']);
   } };
   const result = await workflow(root, adapter, '');
-  expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair', 'review']);
+  expect(calls.slice(0, 4)).toEqual(['implement', 'review', 'repair_review', 'review']);
   expect(gateInput).toContain('"exitCode":127');
   expect(result.validations[0].executions[0].commands.map(command => command.exitCode)).toEqual([0, 127]);
   expect(result.final.status).toBe('incomplete');
@@ -263,8 +263,8 @@ it('rejects a repository-selected nonzero test alongside a working build', async
 });
 
 it('reuses declared destructive preparation on the same tree at a later stage', async () => {
-  const root = project();
-  isolatedProjectCommand('git', ['init', '-q'], root, root);
+  const fixtureRoot = project(), root = join(fixtureRoot, 'project'); mkdirSync(root);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], root, fixtureRoot);
   writeFileSync(join(root, '.gitignore'), 'node_modules\n');
   const prepare = "const f=require('fs');f.rmSync('node_modules',{recursive:true,force:true});f.mkdirSync('node_modules');f.writeFileSync('node_modules/prepared','once')";
   const adapter: Adapter = { async run(_prompt, _role, opts) {

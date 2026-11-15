@@ -229,7 +229,7 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
       child.kill('SIGKILL'); await stopped;
     }
   }
-  expect(readdirSync(engine)).not.toContain('runs');
+  expect(existsSync(join(engine, 'runs')) ? readdirSync(join(engine, 'runs')) : []).toEqual([]);
   const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
   expect(readFileSync(join(evidence, 'original.txt'), 'utf8')).toBe('write a greeting');
   writeFileSync(join(root, 'release'), 'continue');

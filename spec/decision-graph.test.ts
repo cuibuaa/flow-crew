@@ -39,7 +39,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'decision-graph-')); project = join(root, 'project'); mkdirSync(project);
   old = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   // Independent reviewers receive the real patch from the private fixture repository.
-  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
   isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
   setEngineDefaults({ gate_retry_loops: 3, plan_stage_retries: 1, max_iterations: 1 });
 });
@@ -172,7 +172,7 @@ describe('independent post-author review', () => {
   });
 
   it('settles repaired work through one read-only review, retaining the rejection', async () => {
-    isolatedProjectCommand('git', ['init', '-q'], project, root);
+    isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
     isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const calls: string[] = [];
@@ -253,7 +253,7 @@ describe('in-iteration replanning through the revision authority', () => {
     writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'decision-ledger-fixture', version: '1.0.0', scripts: { build: 'node check.cjs', test: 'node check.cjs', lint: 'node check.cjs' } }));
     writeFileSync(join(project, 'package-lock.json'), JSON.stringify({ name: 'decision-ledger-fixture', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'decision-ledger-fixture', version: '1.0.0' } } }));
     writeFileSync(join(project, 'check.cjs'), "console.log('configured check passed');\n");
-    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, project, root);
+    for (const args of [['init', '-q', '--separate-git-dir', join(root, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, project, root);
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const proposal = [
       { ...decisionStage('work', ['replan', 'review'], 'review', ['plan']), scope: ['docs/'] },
@@ -484,7 +484,7 @@ describe('independent review retains write isolation', () => {
 
 describe('planner-authored decomposition', () => {
   it.each([false, true])('honors the gate repair edge with a planner repair condition (initial pass=%s)', async initialPass => {
-    isolatedProjectCommand('git', ['init', '-q'], project, root);
+    isolatedProjectCommand('git', ['init', '-q', '--separate-git-dir', join(root, 'git')], project, root);
     isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const proposal = [

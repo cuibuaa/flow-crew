@@ -139,7 +139,7 @@ describe('independent engine-remediation verification', () => {
     const agentsDir = writeRole(projectDir, 'qa');
     setFcGlobalDir(globalRoot);
     write(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
-    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
+    for (const args of [['init', '-q', '--separate-git-dir', join(root, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     write(join(projectDir, 'validation-probe.mjs'), 'process.exit(1);\n');
     const brief = "---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Audit the validation delta.\"}]\n---\n# Goal\n## What the report must show\n1. Audit the validation delta.\n";
     const readyPath = writeReadySetupRecord(projectDir, brief, globalRoot);

@@ -223,7 +223,6 @@ export function createDispatchAdmission() {
       if (!stage.dynamic_dispatch && (stage.is_gate || !stage.retry_to?.length) && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
     }
     errors.push(...admitRepairTopology(input.dispatched, input.baseStages, Boolean(input.research)));
-    normalizeStageContracts(input.dispatched);
     const all = [...input.baseStages, ...input.dispatched];
     const byId = new Map(all.map(stage => [stage.id, stage]));
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
