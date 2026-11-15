@@ -248,7 +248,11 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
     expect(result.validations[0].resourceState).toBe('unfinished');
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
-    expect(result.calls[1].prompt).toContain(JSON.stringify(result.validations.at(-1)));
+    const raw = result.validations.at(-1)!;
+    const facts = JSON.parse(result.calls[1].prompt.split('Ledger facts:\n')[1].split('\n')[0]).facts;
+    expect(facts.find((fact: { kind: string }) => fact.kind === 'validation'), 'receipt facts retain source-changing validation identity').toEqual({ ...raw,
+      executions: raw.executions.map(execution => ({ ...execution,
+        commands: execution.commands.map(({ output: _output, report: _report, ...command }) => command) })) });
   });
 
   it('rejects a stale receipt after a later source write without rerunning validation', async () => {

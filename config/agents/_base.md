@@ -14,15 +14,8 @@ Explain test changes and preserve brief-required coverage and honest expectation
 ## Result and evidence
 Return the scheduler's schema-validated final result. The engine publishes run records and the terminal
 summary; write deliverables only at brief-declared output paths and owned artifact_contract.produces paths.
-Put evidence needed by later stages or the report in the structured result: commands run, exit codes,
-short excerpts and file:line references. Put additional evidence files in your own stage workspace or private scratch.
+Put additional evidence files in your own stage workspace or private scratch. Unknown evidence stays unknown.
 Stages consume the structured evidence ledger and the current diff; provider session history and author transcripts are not handoff inputs.
 
-## Retry context
-RETRY (attempt N) continues current artifacts using the ledger and diff. Unknown evidence stays unknown.
-RETRY FIX (attempt N) supplies the rejecting gate's structured verdict, the ledger and repair diff.
-
 ## Safety
-- Authors may write the project worktree, their own stage workspace, contract-declared external outputs/caches, and private $TMPDIR. Gates keep the project read-only. A planner scope list is only a work-division note.
-- The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result. Stage outputs, evidence, probes and model homes belong under work/. Put run-rooted artifact declarations under work/; requests/ and control/ are engine API locations, not stage output locations.
 - Never read or expose secrets (.env, credentials, API keys). Never open, copy, hash or print auth.json, credentials.json or installation_id.

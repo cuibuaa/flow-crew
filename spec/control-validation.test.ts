@@ -13,7 +13,7 @@ import { runDir, readRunState, readStageStatus, writeStageStatus } from '../src/
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { createRun } from './test-support/create-run.js';
 import { seedAttemptValidation as seedValidation } from './test-support/attempt-validation.js';
-import { appendEvidence, evidenceContext, projectValidationFact, readEvidence } from '../src/evidence-ledger.js';
+import { appendEvidence, evidenceContext, projectValidationFact, readEvidence, validationInputFact } from '../src/evidence-ledger.js';
 import { discoverProjectValidation, evaluateValidationDelta, projectValidationResult, reconcileProjectValidation,
   runProjectCommand, runProjectValidationBaseline, type ValidationCommandResult } from '../src/project-validation.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
@@ -320,7 +320,7 @@ describe('one projection across historic receipts and every reader', () => {
     expect(summary).toContain('recorded state not_measured');
     const display = evidenceContext(root, base);
     const handedOver = JSON.parse(display.split('Ledger facts:\n')[1].split('\n')[0]);
-    expect(handedOver.facts.find((entry: { kind: string }) => entry.kind === 'validation')).toEqual(projectValidationFact(fact));
+    expect(handedOver.facts.find((entry: { kind: string }) => entry.kind === 'validation')).toEqual(validationInputFact(projectValidationFact(fact), runRecordPath(base, 'evidence-ledger.jsonl')));
     for (const field of ['"storedState":"not_measured"', '"measurement":"verified"', '"state":"passed"']) expect(display).toContain(field);
     expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
     writeFileSync(runRecordPath(base, 'validation_delta_legacy.json'), JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));

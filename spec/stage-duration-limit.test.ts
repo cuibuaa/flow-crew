@@ -172,6 +172,9 @@ describe('real scheduler routing through the entry owner', () => {
       expect(result).toBeDefined();
       if (offset) { numericRefusal(result!); expect(run).not.toHaveBeenCalled(); }
       else { expect(run).toHaveBeenCalledOnce(); expect(result!.exitCode).toBe(0);
+        expect(run.mock.calls[0][0], 'P09 scheduler does not repeat the allowance').not.toContain('Stage budget:');
+        expect(run.mock.calls[0][0].split('# Execution clock'), 'P09 worker owns one clock').toHaveLength(2);
+        expect(run.mock.calls[0][0], 'P09 actual admitted allowance survives').toContain(`author-declared allowance ${limit} ms`);
         if (path === 'repair') expect(run.mock.calls[0][0]).toContain('# Gate repair facts');
         if (path === 'timeout-retry') expect(run.mock.calls[0][0]).toContain('# RETRY facts');
         if (path === 're-evaluation') expect(readStageStatus(project, created.runId, 'work').attempts).toHaveLength(2);

@@ -94,8 +94,9 @@ describe('direct workflow', () => {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }
       expect(call.user).toContain('Work-division note (scope)');
-      expect(call.user).toContain('Stage budget:');
-      expect(call.user).toContain('# Execution clock');
+      expect(call.user, 'P09 worker execution clock owns the allowance').not.toContain('Stage budget:');
+      expect(call.user.split('# Execution clock'), 'P09 one current execution clock').toHaveLength(2);
+      expect(call.user, 'P09 truthful undeclared clock').toContain('has no declared duration allowance');
       expect(call.user).toContain('Engine state query');
       if (call.id === 'review') {
         expect(call.system).toContain('Judge the assigned outcome using the injected verdict contract.');

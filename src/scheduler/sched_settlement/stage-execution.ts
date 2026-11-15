@@ -14,7 +14,7 @@ import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetr
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
-import { appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendProjectWriteContext } from '../sched_policy/prompt-contracts.js';
+import { appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendProjectWriteContext } from '../sched_policy/prompt-contracts.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -185,9 +185,9 @@ export async function executeSingleStage(
       role: agent,
       attribution: { role: stage.role, iteration: state.currentIteration ?? 1 },
       dependsOn: stage.depends_on ?? [],
-      promptTemplate: appendAttemptDeadlineContract(retryPreamble
+      promptTemplate: retryPreamble
         ? `${retryPreamble}\n\n${resolvedPrompt}`
-        : resolvedPrompt, prepared.budgetMs),
+        : resolvedPrompt,
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
       outputSchema: stageRecordSchema({ isGate: stage.is_gate, runDir: runDirPath,

@@ -31,7 +31,8 @@ describe('author results and reports carry only what the brief and readers need'
 
   it('asks for status and summary while configured checks live in the ledger', () => {
     const coder = loaded('coder');
-    expect(coder).toContain('Return delivered or blocked status and a short summary, including any material caveat');
+    expect(coder).toContain("Return the scheduler's schema-validated final result");
+    expect(coder).toContain('After the last change, supply relevant evidence for acceptance properties not established by engine records');
     expect(coder).toContain('omit duplicate command lists and prose verification reports');
     expect(coder).toContain('If blocked, include the attempted approach, exact error/path, suspected cause and a different next approach');
     // Empty arrays already validate, so the schema keeps every key required and
@@ -53,7 +54,7 @@ describe('a passing verdict is the record', () => {
     const qa = loaded('qa');
     expect(qa).toContain('Return the scheduler\'s typed verdict with reproducible evidence references; beyond declared outputs, a passing verdict is the whole record');
     expect(qa).toContain('A rejection includes concrete repairable findings and whether repair is possible');
-    expect(base.replace(/\s+/g, ' ')).toContain('Put evidence needed by later stages or the report in the structured result');
+    expect(base.replace(/\s+/g, ' ')).toContain("Return the scheduler's schema-validated final result");
   });
 
   it('no longer nudges planners toward evidence or handoff documents', () => {
@@ -108,11 +109,12 @@ describe('stage result contract', () => {
     });
     const text = assembled.replace(/\s+/g, ' ');
     expect(text).toContain('The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result.');
-    expect(text).toContain('contract-declared external outputs/caches');
+    expect(text).toContain('contract-declared outputs/caches');
     expect(text).toContain('Authors may write the project worktree');
     expect(text).toContain('These grants never authorize engine-record writes');
     expect(text).toContain("private $TMPDIR");
-    expect(text).toContain('commands run, exit codes, short excerpts and file:line references');
+    expect(text).toContain('Evidence references name reproducible files or commands');
+    expect(text).not.toContain('structured result: commands run, exit codes');
     expect(text).toContain('Put additional evidence files in your own stage workspace or private scratch');
     expect(text).not.toMatch(/Cite durable evidence|admitted evidence paths|copy final.*evidence.*from scratch/i);
     expect(text).not.toContain('explicitly authorized task-local run paths');

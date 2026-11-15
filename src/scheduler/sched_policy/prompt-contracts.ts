@@ -28,9 +28,9 @@ export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
 }
 
 export function appendProjectWriteContext(prompt: string, stage: StageConfig): string {
-  return `${prompt}\n\nWork-division note (scope): ${JSON.stringify(stage.scope)}. This note grants no authority. Authors may write the whole project worktree, their own stage workspace and contract-declared external outputs/caches; gates have no project write grant. Admitted external shared caches remain available. `
+  return `${prompt}\n\nWork-division note (scope): ${JSON.stringify(stage.scope)}. This note grants no authority. `
     + 'Preserve evidence that the task explicitly declares frozen. Input locators alone do not freeze source trees. '
-    + 'Each invocation has private scratch at $TMPDIR (also $TMP and $TEMP). Use mktemp -d "$TMPDIR/probe-XXXXXX" for disposable probes; check creation succeeded before copying.';
+    + 'Each invocation has private scratch at $TMPDIR (also $TMP and $TEMP).';
 }
 
 export function appendResearchPathContract(
@@ -64,15 +64,6 @@ export function appendPlannerAdmissionContract(
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
     + `Put compiler output and caches in $TMPDIR. Scratch is retired at run termination. Declare required deliverables in artifact_contract.produces at their admitted output paths. Put evidence in the structured result. `
     + `Paths under an external run store (for example .fc/runs/) are not project outputs and remain confined to the admitted run workspace.`;
-}
-
-export function appendAttemptDeadlineContract(
-  prompt: string,
-  attemptBudgetMs: number | undefined,
-): string {
-  if (attemptBudgetMs === undefined) return `${prompt}\n\nStage budget: undeclared; there is no duration hard stop.`;
-  return `${prompt}\n\nStage budget: ${attemptBudgetMs}ms, declared by the author. Keep admitted files and report done/remaining work. `
-    + `Retries, backoff and fallback share this execution's allowance; expiry hands typed unfinished work to the ordinary continuation path. Independent gates have separate stage allowances.`;
 }
 
 export function appendGateConstraintAuditContext(

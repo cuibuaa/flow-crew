@@ -17,9 +17,9 @@ describe('agent run-directory safety contract', () => {
     const safety = prompt('coder');
 
     expect(safety).toContain("Authors may write the project worktree");
-    expect(safety).toContain('contract-declared external outputs/caches');
+    expect(safety).toContain('contract-declared outputs/caches');
     expect(safety).toContain("private $TMPDIR");
-    expect(safety).toContain('Gates keep the project read-only');
+    expect(safety).toContain('Gates have no project write grant');
   });
 
   it.each([false, true])('keeps run mutation absolutely prohibited with base=%s', (withBase) => {

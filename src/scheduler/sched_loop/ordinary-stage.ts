@@ -13,7 +13,6 @@ import { StageConfig, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
-import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
 import { gateReviewedAuthorIds, isGateReviewed } from '../sched_settlement/gate-recovery.js';
 import { appendStageExecutionContracts, createSchedulerTechnicalRetryState, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult } from '../sched_settlement/stage-execution.js';
 import { StoreState } from '../../store.js';
@@ -91,7 +90,6 @@ export async function executeOrdinaryStage(
       if (currentRetries > 0) {
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
       }
-      resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
       const coordinate = state.gateRetryRound;
       const roundDiffPath = coordinate ? runRecordPath(runDirPath, 'gate_reevaluation', `iteration_${coordinate.iteration}`, `round_${coordinate.round}`, 'repair_diff.json') : undefined;
       let fixStageIds: string[] | undefined;

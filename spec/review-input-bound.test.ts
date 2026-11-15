@@ -11,7 +11,8 @@ import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapte
 import { providerFailureFromEvent } from '../src/provider-result.js';
 import { loadEngineDefaults } from '../src/config.js';
 import { adapterInputLimit } from '../src/adapter-input.js';
-import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
+import { appendEvidence, captureProjectTree, evidenceContext, VALIDATION_FACT_VERSION } from '../src/evidence-ledger.js';
+import { projectValidationResult } from '../src/project-validation.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, readStageStatus } from '../src/store.js';
@@ -59,6 +60,50 @@ describe('review stages keep their evidence inside the adapter limit', () => {
     return prompt;
   }
   beforeEach(() => { created = createRun(project, 'fixture', 'name: fixture', ['review']); });
+
+  it.each([1, 160_000])('receipt-fields-only: reviewer, repair and continuation omit even a %s-character body', size => {
+    const treeHash = captureProjectTree(project, '', created.runDirPath).hash;
+    const attemptStartedAt = '2026-01-01T00:00:00.000Z';
+    appendEvidence(created.runDirPath, { kind: 'attempt', stageId: 'author', attemptIndex: 1, attemptStartedAt,
+      exitCode: 0, status: 'complete', treeHash, files: [],
+      measurements: { inputTokens: null, outputTokens: null, durationMs: 1, provenance: 'adapter-reported' } });
+    const fullPath = runRecordPath(created.runDirPath, 'validation.json');
+    const command = { role: 'test' as const, command: 'node', args: ['check.mjs'], display: 'node check.mjs',
+      exitCode: 7, state: 'failed' as const, durationMs: 1,
+      totals: { tests: 2, passed: 1, failed: 1, pending: 0, todo: 0, files: 1 },
+      testsRun: 2, failureCount: 1, failureIdentity: 'known' as const, failureIdentifiers: ['fixture failure'],
+      identityOwner: 'runner-json' as const, outputPath: fullPath,
+      output: 'x'.repeat(size), report: JSON.stringify({ raw: 'y'.repeat(size) }) };
+    const receipt = appendEvidence(created.runDirPath, { kind: 'validation', validationVersion: VALIDATION_FACT_VERSION,
+      stageId: 'author', attemptIndex: 1, attemptStartedAt, treeHash, resourceState: 'complete', recordPath: fullPath,
+      executions: [{ target: 'attempt', cwd: project, treeHash, treeAfterHash: treeHash, commands: [command] }],
+      delta: [], failures: [], pass: false });
+    writeFileSync(fullPath, JSON.stringify(receipt));
+    for (const stage of ['review', 'repair', 'author']) {
+      const context = evidenceContext(project, created.runDirPath, stage,
+        stage === 'author' ? { index: 1, startedAt: attemptStartedAt } : null, 12_000);
+      expect(context, 'receipt-fields-only must avoid ledger_exceeds_inline_bound').toContain('Ledger facts:\n');
+      const inline = JSON.parse(context.split('Ledger facts:\n')[1].split('\n')[0]);
+      const validation = inline.facts.find((fact: { kind: string }) => fact.kind === 'validation');
+      expect(validation, 'current-tree validation exit/identity retained').toMatchObject({ treeHash, recordPath: fullPath,
+        executions: [{ treeHash, treeAfterHash: treeHash, commands: [{ exitCode: 7, totals: command.totals,
+          failureIdentifiers: command.failureIdentifiers, identityOwner: 'runner-json', outputPath: fullPath }] }] });
+      const supplied = validation.executions[0].commands[0];
+      expect(supplied, 'receipt-fields-only/output').not.toHaveProperty('output');
+      expect(supplied, 'receipt-fields-only/report').not.toHaveProperty('report');
+      expect(projectValidationResult(supplied), 'completed-nonzero-exit still rejects').toEqual({ state: 'failed', measurement: 'unverified' });
+      if (stage === 'author') {
+        const own = JSON.parse(context.split('# Own-stage continuation evidence\n')[1].split('\nDiff:\n')[0]);
+        expect(own.validation.executions[0].commands[0], 'continuation uses receipt-fields-only').toEqual(supplied);
+      }
+      expect(JSON.parse(readFileSync(validation.recordPath, 'utf8')).executions[0].commands[0], 'full receipt remains tool-readable').toEqual(command);
+    }
+    writeFileSync(join(project, 'changed.txt'), 'new tree');
+    const changed = evidenceContext(project, created.runDirPath, 'review');
+    const changedFacts = JSON.parse(changed.split('Ledger facts:\n')[1].split('\n')[0]).facts;
+    expect(changedFacts.some((fact: { kind: string }) => fact.kind === 'validation'), 'current-tree-only rejects stale receipt').toBe(false);
+    expect(changed).toContain('No configured validation fact covers the current tree; validation unmeasured.');
+  });
 
   it('inlines the ledger facts when they fit, and names the ledger with its counts when they do not', async () => {
     attemptFacts('author', 20);

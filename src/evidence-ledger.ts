@@ -75,6 +75,13 @@ export function projectValidationFact<T extends ValidationFact>(fact: T) {
   return { ...fact, executions, delta, failures: [], pass: delta.length > 0 && delta.every(entry => entry.state === 'verified') };
 }
 
+/** Stage inputs carry receipt facts; raw output and reporter bodies stay in the ledger. */
+export function validationInputFact<T extends ValidationFact>(fact: T, recordPath: string) {
+  return { ...fact, recordPath: fact.recordPath ?? recordPath,
+    executions: fact.executions.map(execution => ({ ...execution,
+      commands: execution.commands.map(({ output: _output, report: _report, ...command }) => command) })) };
+}
+
 /** Every historical receipt uses the same raw-exit projection, including
  * unversioned inline and older ledger-backed receipts. */
 export function projectValidationDelta<T extends { current: ValidationCommandResult[]; delta: ValidationDeltaResult[]; pass: boolean; ledgerSequence?: number }>(base: string, value: T): T | undefined {
@@ -266,7 +273,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
       const attempt = entries.find(fact => fact.kind === 'attempt' && fact.stageId === entry.stageId && fact.attemptIndex === entry.attemptIndex && fact.attemptStartedAt === entry.attemptStartedAt);
       if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
         || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
-      return [entry.validationVersion === VALIDATION_FACT_VERSION ? entry : projectValidationFact(entry)];
+      return [validationInputFact(entry.validationVersion === VALIDATION_FACT_VERSION ? entry : projectValidationFact(entry), runRecordPath(runDir, EVIDENCE_LEDGER))];
     }
     if (entry.kind === 'attempt') {
       const { finalRecord: _finalRecord, guidanceIds: _guidanceIds, remainingWork: _remainingWork, ...fact } = entry;
@@ -283,7 +290,8 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   });
   const selectionText = `\nValidation command selection (unconfigured roles are unmeasured): ${JSON.stringify(selection ?? { state: 'unknown', reason: 'No declaration or model selection recorded' })}`
     + (validation ? '' : '\nNo configured validation fact covers the current tree; validation unmeasured.');
-  const predecessorText = predecessor ? `\n\n# Own-stage continuation evidence\n${JSON.stringify(predecessor)}` : '';
+  const predecessorText = predecessor ? `\n\n# Own-stage continuation evidence\n${JSON.stringify({ ...predecessor,
+    ...(predecessor.validation?.kind === 'validation' ? { validation: validationInputFact(predecessor.validation, runRecordPath(runDir, EVIDENCE_LEDGER)) } : {}) })}` : '';
   const patchText = readFileSync(diffPath, 'utf8');
   const patchBytes = Buffer.from(patchText);
   let head = 1500, tail = patchBytes.length - 1500;

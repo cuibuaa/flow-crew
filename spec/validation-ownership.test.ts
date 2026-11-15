@@ -66,7 +66,7 @@ describe('engine validation ownership', () => {
     expect(projectValidationFact({ ...fact, executions: [execution([command('test', 1)]), fact.executions[1]] }).pass).toBe(false);
     expect(projectValidationFact({ ...fact, validationVersion: 4 }).pass).toBe(true);
   });
-  it('model context carries a stored validation record verbatim, including legacy labels', () => {
+  it('model context carries stored validation facts without the output body', () => {
     const root = project(), { runDirPath } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', []);
     const treeHash = captureProjectTree(root, '', runDirPath).hash;
     evidenceOwner.appendEvidence(runDirPath, { kind: 'attempt', stageId: 'author', attemptIndex: 1, attemptStartedAt: 'start',
@@ -75,7 +75,12 @@ describe('engine validation ownership', () => {
       attemptStartedAt: 'start', treeHash, resourceState: 'unfinished', executions: [{ target: 'attempt', cwd: root, treeHash, treeAfterHash: treeHash,
         commands: [{ role: 'test', command: 'fixture', args: [], state: 'unverified', exitCode: null, unfinished: true,
           durationMs: 0, output: '  completed A\nwaiting B\n', failureIdentifiers: [], failureIdentity: 'unknown' }] }], delta: [], failures: [], pass: false });
-    expect(evidenceOwner.evidenceContext(root, runDirPath)).toContain(JSON.stringify(fact));
+    const context = evidenceOwner.evidenceContext(root, runDirPath);
+    const inline = JSON.parse(context.split('Ledger facts:\n')[1].split('\n')[0]).facts.find((entry: { kind: string }) => entry.kind === 'validation');
+    const { output: _output, ...command } = fact.executions[0].commands[0];
+    expect(inline).toEqual({ ...fact, recordPath: runRecordPath(runDirPath, 'evidence-ledger.jsonl'),
+      executions: [{ ...fact.executions[0], commands: [command] }] });
+    expect(inline.executions[0].commands[0]).not.toHaveProperty('output');
   });
 
   it('once-per-tree: joins simultaneous requests and reuses a completed record across owners', async () => {
@@ -401,7 +406,7 @@ describe('scheduler owns validation after author settlement', () => {
       identityOwner: 'unknown', testsRun: null, failureIdentity: 'unknown' });
   });
 
-  it.each([false, true])('three unfinished validations reach the next model as untouched records (legacy parked=%s)', async legacy => {
+  it.each([false, true])('three unfinished validation receipts retain facts without inline bodies (legacy parked=%s)', async legacy => {
     const root = project(); projectValidation(root); const calls: string[] = [];
     const declaration = JSON.parse(readFileSync(join(root, 'config/validation.json'), 'utf8'));
     declaration.timeoutMs = 1_800_000; declaration.attempts = 3;
@@ -425,8 +430,11 @@ describe('scheduler owns validation after author settlement', () => {
       calls.push(opts.stageId);
       if (opts.stageId === 'review') {
         seen = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1) as ValidationFact;
-        // Whole record equality catches projections that rewrite opaque facts.
-        expect(prompt).toContain(JSON.stringify(seen));
+        const inline = JSON.parse(prompt.split('Ledger facts:\n')[1].split('\n')[0]).facts.find((fact: { kind: string }) => fact.kind === 'validation');
+        // Only receipt-body fields leave the input; the stored receipt stays lossless.
+        expect(inline, 'unfinished receipt metadata remains untouched').toEqual({ ...seen,
+          executions: seen.executions.map(execution => ({ ...execution,
+            commands: execution.commands.map(({ output: _output, report: _report, ...command }) => command) })) });
         expect(seen.executions).toHaveLength(3); expect(seen.resourceState).toBe('unfinished');
         for (const execution of seen.executions) {
           expect(execution.commands.map(command => command.exitCode)).toEqual([0, null, null]);

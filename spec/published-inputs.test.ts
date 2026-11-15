@@ -7,6 +7,7 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { appendProjectWriteContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 
 import { applyBasePrompt, inspectDispatchAdmission, loadBasePrompt, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { buildStagePrompt } from '../src/handoff.js';
@@ -70,6 +71,55 @@ describe('published declaration inputs', () => {
         }
       }
     } finally { owned.cleanup(); }
+  });
+
+  it('P05 gives the run-directory rule one owner while retaining the write refusal', () => {
+    const base = loadBasePrompt(join(projectRoot, 'config/agents'));
+    const raw = parse(read('config/agents/coder.yaml'));
+    const prompt = applyBasePrompt(parseAgent(raw), base).prompt;
+    expect(prompt.split('The run envelope contains separate engine/ and work/ trees.'), 'run-directory owner').toHaveLength(2);
+    expect(prompt, 'engine-record write refusal').toContain('writing those records voids the stage result');
+    expect(prompt, 'read authorization cannot grant mutation').toContain('read authorization never grants mutation authority');
+  });
+
+  it('P06 requests missing acceptance evidence without requesting copies of recorded commands', () => {
+    const base = loadBasePrompt(join(projectRoot, 'config/agents'));
+    const prompt = applyBasePrompt(parseAgent(parse(read('config/agents/coder.yaml'))), base).prompt;
+    expect(prompt, 'recorded-command duplication').not.toContain('structured result: commands run, exit codes');
+    expect(prompt, 'acceptance evidence absent from engine records').toContain('After the last change, supply relevant evidence for acceptance properties not established by engine records');
+    expect(prompt, 'existing record reuse').toContain('omit duplicate command lists and prose verification reports');
+    expect(prompt, 'structured result owner').toContain("Return the scheduler's schema-validated final result");
+    expect(prompt, 'schema alone selects statuses').not.toContain('Return delivered or blocked status');
+  });
+
+  it('P08 removes obsolete retry labels while retaining honest unknown evidence and ledger handoff', () => {
+    const base = loadBasePrompt(join(projectRoot, 'config/agents'));
+    expect(base, 'obsolete retry labels').not.toContain('RETRY (attempt N)');
+    expect(base, 'obsolete repair labels').not.toContain('RETRY FIX (attempt N)');
+    expect(base.split('Unknown evidence stays unknown.'), 'honest evidence owner').toHaveLength(2);
+    expect(base, 'continuation evidence source').toContain('Stages consume the structured evidence ledger and the current diff');
+    expect(base, 'independent handoff').toContain('provider session history and author transcripts are not handoff inputs');
+  });
+
+  it('PS removes duplicate write grants and scratch recipes while retaining scope and write boundaries', () => {
+    const base = loadBasePrompt(join(projectRoot, 'config/agents'));
+    const stage = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['source'] });
+    const prompt = appendProjectWriteContext(applyBasePrompt(parseAgent(parse(read('config/agents/coder.yaml'))), base).prompt, stage);
+    expect(prompt.split('Authors may write'), 'author write-grant owner').toHaveLength(2);
+    expect(prompt, 'gate read-only boundary').toContain('Gates have no project write grant');
+    expect(prompt, 'scope is not authority').toContain('Work-division note (scope): ["source"]. This note grants no authority');
+    expect(prompt, 'private scratch location').toContain('Each invocation has private scratch at $TMPDIR');
+    expect(prompt, 'brief-directed execution').not.toContain('Use mktemp -d');
+    expect(prompt, 'frozen evidence boundary').toContain('Preserve evidence that the task explicitly declares frozen');
+    expect(prompt, 'declared output boundary').toContain('write deliverables only at brief-declared output paths');
+  });
+
+  it('PS2 gives paper findings one citation instruction and retains required finding fields', () => {
+    const prompt = parseAgent(parse(read('config/agents/paper_reviewer.yaml'))).prompt;
+    expect(prompt.split('section/page'), 'one finding-locator owner').toHaveLength(2);
+    expect(prompt.replace(/\s+/g, ' '), 'reproducible finding fields').toContain('Each concern includes section/page, severity (major/minor), issue and suggested_fix');
+    expect(prompt, 'findings need evidence rather than a quota').toContain('Findings reflect the paper,');
+    expect(prompt, 'no invented finding minimum').toContain('with no minimum count');
   });
 
   it('leaves configured validation comparison to the engine', () => {
