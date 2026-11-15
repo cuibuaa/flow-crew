@@ -1,6 +1,6 @@
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter, once } from 'node:events';
 import { Duplex, PassThrough } from 'node:stream';
@@ -202,7 +202,11 @@ it.each([
   // The enclosing owner is too late: the command/batch itself must reject.
   expect(commandFailure).toBe(error);
   expect(onSpawn).toHaveBeenCalledTimes(1);
-  const record = JSON.parse(readFileSync(join(fcGlobalDir(), 'validation', `${hash}.json`), 'utf8'));
+  const receiptPaths = readdirSync(join(fcGlobalDir(), 'validation')).filter(name => name.endsWith('.json') && name !== 'queue.json')
+    .map(name => join(fcGlobalDir(), 'validation', name));
+  expect(receiptPaths).toHaveLength(1);
+  const record = JSON.parse(readFileSync(receiptPaths[0], 'utf8'));
+  expect(record).toMatchObject({ treeHash: hash, recordPath: receiptPaths[0] });
   expect(record.executions.flatMap((execution: { commands: unknown[] }) => execution.commands)).toEqual([]);
   expect(record.resourceState).toBe('unfinished');
   expect(record.pass).toBe(false);

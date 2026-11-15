@@ -1,4 +1,4 @@
-import { assertMeasuredSetupLaunch, inspectShipSetupRecord, measuredSetupFacts, measuredSetupSummary } from './ship-setup-record.js';
+import { SetupLaunchRefusal, inspectShipSetupRecord, measuredSetupFacts, measuredSetupSummary } from './ship-setup-record.js';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { hasLifecycleAuthority } from './run-lifecycle-authority.js';
 import { readProtocolResearchRecord } from './research-history.js';
@@ -1002,7 +1002,8 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     let setupError: string | undefined;
     const setup = inspectShipSetupRecord(targetDir, exactBrief);
     try {
-      if (setup.state !== 'ready') assertMeasuredSetupLaunch(targetDir, exactBrief);
+      if (setup.state !== 'ready') throw new SetupLaunchRefusal('setup_not_ready',
+        `Setup is ${setup.state}. Run flowcrew ship-setup for this target and exact brief.`);
       if (setup.state === 'ready') {
         const facts = measuredSetupFacts(setup.validationBaseline);
         setupIdentity = facts.identity;
@@ -1037,7 +1038,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
     const admission = createBriefAdmission(report,
       { kind: 'explicit', source: 'dashboard_receipt', at: new Date().toISOString(), measuredSetupIdentity: setupIdentity });
-    assertMeasuredSetupLaunch(targetDir, exactBrief, admission);
     return { ok: true, exactBrief, report, receipt, admission };
   };
   let cleanupComplete = false;

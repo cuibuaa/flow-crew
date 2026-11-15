@@ -193,8 +193,8 @@ export class SetupLaunchRefusal extends Error {
   }
 }
 
-/** Shared by every first-launch route; initialized runs retain their historical baseline. */
-export function assertMeasuredSetupLaunch(targetDir: string, brief: string, admission?: BriefAdmissionRecord) {
+/** Check measured consent without starting work or probing runtime capabilities. */
+export function assertMeasuredSetupAdmission(targetDir: string, brief: string, admission?: BriefAdmissionRecord) {
   const setup = inspectShipSetupRecord(targetDir, brief);
   if (setup.state !== 'ready') throw new SetupLaunchRefusal('setup_not_ready',
     `Setup is ${setup.state}. Run flowcrew ship-setup for this target and exact brief.`);
@@ -205,6 +205,12 @@ export function assertMeasuredSetupLaunch(targetDir: string, brief: string, admi
     throw new SetupLaunchRefusal('setup_acknowledgement_required',
       'Some declared validation command has no completed exit 0. Review the measured setup results, then launch with --acknowledge-brief-warnings.');
   }
+  return facts;
+}
+
+/** Shared by every first-launch route; initialized runs retain their historical baseline. */
+export function assertMeasuredSetupLaunch(targetDir: string, brief: string, admission?: BriefAdmissionRecord) {
+  const facts = assertMeasuredSetupAdmission(targetDir, brief, admission);
   assertWriteGrantReady(targetDir, runsRoot(), extractBriefOutputDeclarations(brief)
     .filter(output => isAbsolute(output.path)).map(output => output.path));
   return facts;

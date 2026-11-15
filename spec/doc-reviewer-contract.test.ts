@@ -12,7 +12,7 @@ function reviewerPrompt(): string {
 }
 
 describe('doc reviewer design contract', () => {
-  it('rejects assigned outcome failures and retains design dimensions as advisory investigation', () => {
+  it('requires assigned outcomes and delegates design findings to the injected policy', () => {
     const prompt = reviewerPrompt();
     const proposalStandards = [
       'Purpose traceability',
@@ -28,10 +28,10 @@ describe('doc reviewer design contract', () => {
     ];
 
     expect(prompt).toContain('primary-view elements answer a stated user question or goal');
-    expect(prompt.replace(/\s+/g, ' ')).toContain('Unassigned dimensions are advisory and cannot veto acceptance');
-    expect(prompt.replace(/\s+/g, ' ')).toContain('reject when evidence shows a failure of an assigned criterion or the brief\'s required outcome');
-    expect(prompt).toContain('Reject for critical inaccuracies');
-    expect(prompt).toContain('or missing required sections');
+    expect(prompt.replace(/\s+/g, ' ')).toContain('Unassigned dimensions guide investigation under the injected finding policy');
+    expect(prompt.replace(/\s+/g, ' ')).toContain('Use these dimensions to test the assigned outcome using the injected verdict contract');
+    expect(prompt).toContain('Pass only when all meet their acceptance lines');
+    expect(prompt.replace(/\s+/g, ' ')).toContain('Code references must exist and be accurate; examples must be correct and runnable; required sections and links must be complete and live');
     expect(prompt).toContain("Return the scheduler's typed PASS/FAIL verdict");
     expect(prompt).not.toContain('ALWAYS write the verdict file');
     for (const standard of proposalStandards) expect(prompt).toContain(`- ${standard}:`);
