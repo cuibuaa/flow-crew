@@ -1,7 +1,7 @@
 import { readEvidence } from '../src/evidence-ledger.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
-import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
+import { currentGateAnswers, withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import * as contractProbe from '../src/stage-artifact-contract.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
@@ -73,8 +73,8 @@ function options(created: {
     retries: 0, };
 }
 const completed = (opts: RunOpts, summary = 'Done: unit 1. Remaining: unit 2.'): RunResult => {
-  const refs = opts.outputSchema?.anyOf?.[0].properties?.criteria.required ?? [];
-  return opts.outputSchema?.anyOf ? { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: true, reason: summary,
+  const refs = opts.outputSchema?.properties?.criteria?.required ?? [];
+  return opts.outputSchema?.properties?.outcome ? { exitCode: 0, duration_ms: 1, output: JSON.stringify({ outcome: 'accepted', reason: summary,
       criteria: Object.fromEntries(refs.map(id => [id, { status: 'pass', evidence: 'Synthetic fixture evidence.' }])), audit_findings: { version: 1, findings: [] } }) }
     : fixtureResult({ exitCode: 0, output: summary, duration_ms: 1 }, opts) as RunResult;
 };
@@ -92,7 +92,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(result.exitCode).toBe(0);
     expect(result.continuation).toBeUndefined();
     expect(calls).toBe(1);
-    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_work.json'), 'utf8'))).toMatchObject({ pass: false, reason: 'Actual defect' });
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_work.json'), 'utf8'))).toMatchObject({ outcome: 'rejected_repairable', reason: 'Actual defect' });
   });
   it.each(['watchdog', 'parent'] as const)('B05 keeps %s cancellation authoritative over a budget boundary', async (source) => {
     const time = manualClock();
@@ -178,7 +178,7 @@ describe('authored completion at the budget boundary', () => {
     for (const schema of [RECORDED_HANDOFF_SCHEMA, stageRecordSchema({ isGate: true })]) {
       const base = schema === RECORDED_HANDOFF_SCHEMA
         ? { status: 'delivered', summary: 'Complete.', checks: [], caveats: [] }
-        : { pass: true, reason: 'Complete.', criteria: {}, audit_findings: { version: 1, findings: [] } };
+        : { outcome: 'accepted', reason: 'Complete.', criteria: {}, audit_findings: { version: 1, findings: [] } };
       expect(() => parseStageRecord(JSON.stringify(base), schema)).not.toThrow();
       expect(() => parseStageRecord(JSON.stringify({ ...base, remaining_work: [] }), schema)).not.toThrow();
       for (const remaining_work of [null, false, 'none', [''], ['   '], [1]]) {
@@ -381,7 +381,7 @@ it('SI verified success after provider cleanup is complete and never starts a cr
 });
 
 
-it.each([false, true])('SI a gate rejection cannot spend another attempt on a declared environment gap even with a confirmed finding (repair discovers=%s)', async repairDiscovers => {
+it.each([false, true])('SI a gate repairable outcome authorizes another attempt despite a declared environment gap (repair discovers=%s)', async repairDiscovers => {
   const { roles, workflow } = workflowFixture(3);
   const brief = '---\ncriteria: [{id: visual, text: Supply the required visual evidence.}]\n---\nSupply visual evidence.';
   const calls: string[] = [];
@@ -400,16 +400,15 @@ it.each([false, true])('SI a gate rejection cannot spend another attempt on a de
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter, 20_000), new Map(), undefined, roles,
     undefined, brief, false, undefined, undefined, () => manualClock().clock);
-  expect(calls).toEqual(repairDiscovers ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review']);
-  expect(result.status, result.failureReason).toBe('incomplete');
-  expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed).toHaveLength(1);
-  expect(result.stages.repair.attempts ?? []).toHaveLength(repairDiscovers ? 1 : 0);
-  expect(result.decisionGraph?.records.filter(record => record.stageId === 'review').at(-1)?.reason).toContain(`Environment gap already reported by ${repairDiscovers ? 'repair' : 'work'}`);
+  expect(calls).toEqual(['done', 'work', 'review', ...(repairDiscovers ? Array(result.resourcePolicy!.visits).fill(['repair', 'review']).flat() : ['repair', 'review'])]);
+  expect(result.status, result.failureReason).toBe(repairDiscovers ? 'incomplete' : 'complete');
+  expect(result.stages.repair.attempts ?? []).toHaveLength(repairDiscovers ? result.resourcePolicy!.visits : 1);
+  if (repairDiscovers) expect(result.decisionGraph?.records.at(-1)?.reason).toContain('Bound resourcePolicy.visits reached');
 }, 60_000);
 
 
 it.each(['absent', 'empty', 'unrelated', 'shared_path', 'shared_criterion', 'mixed', 'related'] as const)(
-  'SI a repair target gap blocks only findings entirely covered by its declaration (%s)', async binding => {
+  'SI a repair target gap never overrides the gate repairable outcome (%s)', async binding => {
   const { roles, workflow } = workflowFixture(3);
   const brief = '---\ncriteria: [{id: text, text: work.txt contains correct text.}, {id: history, text: Supply historical evidence.}]\noutputs: [work.txt]\n---\nDeliver correct text and historical evidence.';
   workflow.stages.find(stage => stage.id === 'review')!.criterion_refs = ['text', 'history'];
@@ -448,25 +447,18 @@ it.each(['absent', 'empty', 'unrelated', 'shared_path', 'shared_criterion', 'mix
   const decisions = result.decisionGraph?.records.filter(record => record.stageId === 'review') ?? [];
   expect(decisions[0]).toMatchObject({ outcome: 'chosen', successor: 'repair', gateAccepted: false });
   expect(result.stages.repair.attempts?.[0].endingCause).toBe('environment_gap');
-  if (binding === 'related') {
-    expect(decisions[1]).toMatchObject({ outcome: 'refused', gateAccepted: false });
-    expect(decisions[1].reason).toContain('Environment gap already reported by repair; no further attempt on that gap authorized.');
-    expect(result.stages.repair.attempts).toHaveLength(1);
-  } else {
     expect(decisions[1]).toMatchObject({ outcome: 'chosen', successor: 'repair', gateAccepted: false });
     expect(decisions[1].reason).not.toContain('Environment gap already reported');
-    if (binding === 'absent' || binding === 'empty') expect(decisions[1].reason).toContain('Environment gaps without declared blocks: repair; relatedness unknown.');
     expect(result.stages.repair.attempts).toHaveLength(2);
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('correct text');
     expect(result.status, result.failureReason).toBe('complete');
-  }
 });
 
 
 
 it.each((['repair', 'work'] as const).flatMap(target =>
   (['shared_path', 'shared_criterion', 'absent', 'covered'] as const).map(binding => ({ target, binding }))))(
-  'SI first repair for the reviewed gap author uses $target only for uncovered findings ($binding)', async ({ target, binding }) => {
+  'SI first repair for the reviewed gap author uses $target regardless of gap coverage ($binding)', async ({ target, binding }) => {
   const { roles, workflow } = workflowFixture(3);
   // The archive dispatches a separate repair; also cover a retained edge back to the author.
   if (target === 'work') workflow.stages = workflow.stages.filter(stage => stage.id !== 'repair');
@@ -518,23 +510,15 @@ it.each((['repair', 'work'] as const).flatMap(target =>
   expect(result.stages.work.attempts?.[0]?.endingCause, JSON.stringify({ calls: adapter.calls.map(call => call.stageId), failure: result.failureReason })).toBe('environment_gap');
   expect(result.stages.review.attempts?.[0]).toMatchObject({ endingCause: 'complete', exitCode: 0 });
   expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
-  expect(readRunEvents(project, result.runId).find(event => event.type === 'stage_complete' && event.stageId === 'review')?.gate?.findings?.confirmed).toHaveLength(3);
+  expect(readRunEvents(project, result.runId).find(event => event.type === 'stage_complete' && event.stageId === 'review')?.gate?.outcome).toBe('rejected_repairable');
   const facts = readEvidence(runDir(project, result.runId));
   expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', attemptIndex: 1,
     environmentGap: expect.objectContaining({ blocks: binding === 'absent' ? null : blocks }) }));
   expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'review', continuation: false,
     remainingWork: ['Repair product defects.'] }));
   const decision = result.decisionGraph?.records.find(record => record.stageId === 'review');
-  if (binding === 'covered') {
-    expect(decision).toMatchObject({ outcome: 'refused', gateAccepted: false });
-    expect(decision?.reason).toContain('Environment gap already reported by work; no further attempt on that gap authorized.');
-    expect(adapter.calls.map(call => call.stageId)).toEqual(['done', 'work', 'review']);
-    expect(result.stages.work.attempts).toHaveLength(1);
-    expect(result.stages.work.status).toBe('complete');
-  } else {
     expect(decision).toMatchObject({ outcome: 'chosen', successor: target, gateAccepted: false });
     expect(decision?.reason).not.toContain('Environment gap already reported');
-    if (binding === 'absent') expect(decision?.reason).toContain('Environment gaps without declared blocks: work; relatedness unknown.');
     expect(adapter.calls.map(call => call.stageId)).toEqual(target === 'repair' ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review', 'work']);
     expect(result.stages[target].attempts).toHaveLength(target === 'work' ? 2 : 1);
     expect(result.stages[target].attempts?.at(-1)).toMatchObject({ endingCause: 'complete', exitCode: 0 });
@@ -542,7 +526,6 @@ it.each((['repair', 'work'] as const).flatMap(target =>
     expect(facts).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: target, attemptIndex: target === 'work' ? 2 : 1,
       endingCause: 'complete', continuation: false, remainingWork: ['Operator must supply historical comparison evidence.'] }));
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('correct text');
-  }
 });
 
 
@@ -571,24 +554,7 @@ it.each(['gap', 'refusal', 'cancellation'] as const)('SI repair a validated gap 
   expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', endingCause, continuation: false }));
 });
 
-function withTextReproduction(adapter: Adapter): Adapter {
- return { async run(prompt,role,opts) {
-  const result=await adapter.run(prompt,role,opts);
-  if(result.exitCode || !opts.outputSchema?.anyOf)return result;
-  const verdict=JSON.parse(result.output);
-  if(verdict.pass!==false)return result;
-  const client=prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-  const snippet="process.exit(require('node:fs').readFileSync('work.txt','utf8')==='correct text'?0:1)";
-  const command=JSON.stringify(process.execPath)+' -e '+"'"+snippet.replaceAll("'", "'\\''")+"'";
-  const request=JSON.stringify({command,cwd:opts.workDir,shell:'/bin/sh'});
-  const {runProjectCommand}=await import('../src/project-validation.js');
-  const response=await runProjectCommand({role:'test',command:'/bin/sh',args:['-c',`${client} '${request.replaceAll("'", "'\\''")}'`],display:'Independently reproduce wrong work.txt',cwd:opts.workDir,runDir:opts.runDir,timeoutMs:20000});
-  const recorded=JSON.parse(response.stdout!).record;
-  expect(response.exitCode).toBe(0);expect(recorded.exitCode).toBe(1);
-  verdict.audit_findings.findings=verdict.audit_findings.findings.map((finding:Record<string,unknown>)=>({...finding,reproduction:recorded.sequence}));
-  return {...result,output:JSON.stringify(verdict)};
- }};
-}
+const withTextReproduction = currentGateAnswers;
 
 it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
   (['narrow','broad','absent'] as const).map(otherMapping => ({mapping,otherMapping,binding:'criteria' as string}))).concat(
@@ -625,28 +591,14 @@ it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
   expect(result.stages.repair.attempts??[]).toHaveLength(1);
   const fact=readEvidence(runDir(project,result.runId)).find(entry=>entry.kind==='attempt'&&entry.stageId==='work');
   expect(fact?.kind==='attempt'&&fact.environmentGap?.blocks).toEqual(binding==='absent'?null:binding==='empty'?{criterion_ids:[],paths:[]}:binding==='paths'?{criterion_ids:[],paths:['renderer']}:{criterion_ids:[refs[0]],paths:binding==='joint'?['work.txt']:[]});
-  if(binding==='absent'||binding==='empty')expect(result.decisionGraph?.records.find(record=>record.stageId==='review')?.reason).toContain('Environment gaps without declared blocks: work; relatedness unknown');
 });
 
-function withRendererReproduction(adapter: Adapter): Adapter {
- return {async run(prompt,role,opts) {
-  const result=await adapter.run(prompt,role,opts);
-  if(result.exitCode || !opts.outputSchema?.anyOf)return result;
-  const verdict=JSON.parse(result.output);if(verdict.pass!==false)return result;
-  const client=prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-  const request=JSON.stringify({command:'/bin/sh -c \'test -x ./renderer\'',cwd:opts.workDir,shell:'/bin/sh'});
-  const {runProjectCommand}=await import('../src/project-validation.js');
-  const response=await runProjectCommand({role:'test',command:'/bin/sh',args:['-c',`${client} '${request.replaceAll("'", "'\\''")}'`],display:'Reproduce same missing renderer capability',cwd:opts.workDir,runDir:opts.runDir,timeoutMs:20000});
-  expect(response.exitCode).toBe(0);const record=JSON.parse(response.stdout!).record;expect(record.exitCode).toBe(1);
-  verdict.audit_findings.findings=verdict.audit_findings.findings.map((f:Record<string,unknown>)=>({...f,reproduction:record.sequence}));
-  return {...result,output:JSON.stringify(verdict)};
- }};
-}
+const withRendererReproduction = currentGateAnswers;
 
 it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMapping =>
  (['narrow','broad','absent'] as const).map(otherMapping => ({authorMapping,otherMapping,binding:'joint'}))).concat(
   ['paths','criteria'].map(binding=>({authorMapping:'mismatched' as const,otherMapping:'broad' as const,binding}))))(
- 'SI repair shared ownership cannot reopen the same renderer gap with author=$authorMapping other=$otherMapping binding=$binding',async ({authorMapping,otherMapping,binding})=>{
+ 'SI repairable verdict reopens the renderer gap with author=$authorMapping other=$otherMapping binding=$binding',async ({authorMapping,otherMapping,binding})=>{
  const {roles,workflow}=workflowFixture(3);
  const brief="---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"The renderer executable supplies visual evidence.\"},{\"id\":\"fixture_2\",\"text\":\"work.txt contains correct text.\"}]\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.";
  const {extractBriefCriteria}=await import('../src/brief-criteria.js');const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
@@ -671,13 +623,13 @@ it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMappin
   return withRemaining(completed(opts,'Complete.'),[]);
  }};
  const result=await runWorkflow(workflow,stringify(workflow),project,withRendererReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,undefined,()=>manualClock().clock);
- expect(rendererProbes).toEqual(['work']);
- expect(calls).toEqual(['done','work','text','review']);
+ expect(rendererProbes).toEqual(['work', ...Array(result.resourcePolicy!.visits).fill('repair')]);
+ expect(calls).toEqual(['done','work','text','review', ...Array(result.resourcePolicy!.visits).fill(['repair','review']).flat()]);
  expect(result.status).toBe('incomplete');
  expect(result.stages.work.attempts).toHaveLength(1);
- expect(result.stages.repair.attempts ?? []).toHaveLength(0);
- expect(readGateEvaluation(project,'review',result.runId)?.findings?.confirmed).toHaveLength(1);
- expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
+ expect(result.stages.repair.attempts ?? []).toHaveLength(result.resourcePolicy!.visits);
+ expect(readGateEvaluation(project,'review',result.runId)?.outcome).toBe('rejected_repairable');
+ expect(result.decisionGraph?.records.at(-1)?.reason).toContain('Bound resourcePolicy.visits reached');
 });
 
 
@@ -710,11 +662,10 @@ it.each([
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
     undefined, brief, false, undefined, undefined, () => manualClock().clock);
-  expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed ?? []).toHaveLength(sameGap ? 1 : 0);
-  expect(calls).toEqual(sameGap ? ['done', 'work', 'review'] : ['done', 'work', 'review', 'repair', 'review']);
-  expect(result.status, result.failureReason).toBe(sameGap ? 'incomplete' : 'complete');
-  expect(result.stages.repair.attempts ?? []).toHaveLength(sameGap ? 0 : 1);
-  if (sameGap) expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
+  expect(readGateEvaluation(project, 'review', result.runId)?.outcome).toBe('accepted');
+  expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
+  expect(result.status, result.failureReason).toBe('complete');
+  expect(result.stages.repair.attempts ?? []).toHaveLength(1);
   const fact = readEvidence(runDir(project, result.runId)).find(entry => entry.kind === 'attempt' && entry.stageId === 'work');
   expect(fact?.kind === 'attempt' && fact.environmentGap?.blocks?.paths).toEqual([gapPath.includes('renderer') ? 'renderer' : 'assets']);
 });
@@ -755,10 +706,10 @@ it('SI gap path scope reports unknown blocked criterion ids to the gate', async 
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
     undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(gateSawFact).toBe(true);
-  expect(calls).toEqual(['done', 'work', 'review']);
-  expect(result.stages.repair.attempts ?? []).toHaveLength(0);
-  expect(result.status, result.failureReason).toBe('incomplete');
-  expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
+  expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
+  expect(result.stages.repair.attempts ?? []).toHaveLength(1);
+  expect(result.status, result.failureReason).toBe('complete');
+  expect(result.decisionGraph?.records[0]?.successor).toBe('repair');
 });
 
 function allowanceBrief(brief = '# Complete the fixture work.') {
@@ -861,7 +812,7 @@ describe('retained contracts under declared allowances', () => {
       } };
     const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status).toBe('incomplete');
-    expect(result.failureReason).toContain('iteration budget');
+    expect(result.failureReason).toContain('resourcePolicy.iterations');
     expect(result.currentIteration).toBe(2);
     expect(result.stages.work.attempts).toHaveLength(2);
     expect(result.stages.work.attempts?.every(attempt => attempt.exitCode === 0)).toBe(true);
@@ -1067,7 +1018,7 @@ describe('retained contracts under declared allowances', () => {
     expect(result.stages.work.attempts!.every(attempt => attempt.endingCause === 'work_unfinished')).toBe(true);
     expect(calls.filter(id => id === 'review')).toHaveLength(0);
     expect(readFileSync(runRecordPath(runDir(project, result.runId), result.stages.work.continuation!.handoff), 'utf8')).toContain('Research the remaining cases');
-    expect(result.failureReason).toContain(declared === undefined ? 'iteration budget' : 'declared continuation budget');
+    expect(result.failureReason).toContain(declared === undefined ? 'resourcePolicy.iterations' : 'resourcePolicy.continuations');
     expect(() => workflowContinuation(result, project, result.runId, workflow)).toThrow('budget exhausted');
   });
   it('SI declared continuations retain the work failure ceiling for their iteration', async () => {

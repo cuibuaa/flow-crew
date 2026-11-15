@@ -1,9 +1,11 @@
+import { parse as parseYaml } from 'yaml';
+import { admitResourcePolicy, type WorkflowConfig } from './scheduler/sched_admission/configuration.js';
+import { readAdmittedContract } from './brief-criteria.js';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { refuseStageDuration, stageDurationLimit } from './stage-duration.js';
 import { classifyEnding } from './attempt-ending.js';
-import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
+import { VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
 import { runRecordPath, stageWorkPath, stageWritePath, requestPath } from './run-layout.js';
-import { startCommandRecorder } from './recorded-command.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
 import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
@@ -31,8 +33,8 @@ import { createHash } from 'node:crypto';
 import { buildStagePrompt, gateCriterionRefs, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan } from './scheduler/sched_settlement/gate-validation.js';
-import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
-import { validateFindingVerdict } from './scoped-audit-repair.js';
+import { validateGateCriterionEvidence, validateGateRepairability } from './scheduler/sched_settlement/gate-evidence.js';
+import { GATE_OUTCOMES, type GateOutcome, validateFindingVerdict } from './scoped-audit-repair.js';
 import { admittedContract } from './brief-admission.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { normalizedProjectPath, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
@@ -44,7 +46,7 @@ import {
   closeStageAttempt,
   settleStageAttempt,
   StageAttemptSettlementError,
-  readRunState,
+  writeRunState, readRunState,
   writeStageStatus,
   writeStageOutput,
   TERMINAL_STATUSES,
@@ -147,7 +149,6 @@ export interface StageOpts {
   preserveSession?: boolean;
 }
 
-const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
 function inferAdapterName(adapter: Adapter): string | undefined {
   const name = adapter.constructor?.name;
@@ -254,8 +255,15 @@ export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
 ): Promise<RunResult> {
-  const runState = existsSync(runRecordPath(opts.runDir, 'run.json'))
-    ? readRunState(opts.projectDir, opts.runId) : undefined;
+  if (!existsSync(runRecordPath(opts.runDir, 'run.json')))
+    throw new EngineStateError('ENGINE_STATE_REFUSED: stage requires run.json and its resourcePolicy');
+  const runState = readRunState(opts.projectDir, opts.runId);
+  const unrecordedPolicy = !runState.resourcePolicy;
+  const policy = admitResourcePolicy(runState, unrecordedPolicy
+    ? parseYaml(readFileSync(runRecordPath(opts.runDir, 'workflow.yaml'), 'utf8')) as WorkflowConfig : undefined,
+    opts.technicalRetry?.delaysMs);
+  if (opts.technicalRetry?.delaysMs) policy.adapterRetryDelays = [...opts.technicalRetry.delaysMs];
+  if (unrecordedPolicy || opts.technicalRetry) writeRunState(opts.projectDir, opts.runId, runState);
   const durationLimit = stageDurationLimit(runState?.stageDurationLimitMs);
   const durationRefusal = refuseStageDuration(opts.timeout_ms, durationLimit);
   if (durationRefusal) {
@@ -841,7 +849,6 @@ export async function runStage(
         invocationAbortController.abort('guidance_delivery_at_tool_completion');
       }
     };
-    let recordedCommandIndex = 0;
     // The adapter promise owns child/group retirement; cancellation alone is
     // not closure evidence and cannot settle or void this invocation.
     const invocation = withAdmittedExecution({ projectDir: opts.projectDir, runDir: opts.runDir,
@@ -870,24 +877,7 @@ export async function runStage(
         const grant = { contract: runState?.writeGrant ?? legacyWriteGrant(), projectDir: opts.projectDir,
           runDir: opts.runDir, stageId: opts.stageId, readOnly: opts.isGate, artifacts: writableArtifacts, externalDirectories,
           home: stageSessionHome(opts.runDir, opts.stageId, selectedAdapter.sessionKind ?? 'custom') };
-        const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
-          const before = captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir);
-          const response = await withStageWriteGrant(grant, () => runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
-            display: request.command, cwd: request.cwd, runDir: opts.runDir,
-            abortSignal: AbortSignal.any([invocationAbortSignal, signal]) }));
-          const record = appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex, invocationIndex,
-            commandId: `recorded-${invocationIndex}-${++recordedCommandIndex}`, command: request.command,
-            context: { cwd: request.cwd, shell: request.shell }, exitCode: response.exitCode, unfinished: response.unfinished,
-            outputDigest: createHash('sha256').update(JSON.stringify([response.stdout ?? '', response.stderr ?? ''])).digest('hex'),
-            treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief, opts.runDir).hash });
-          return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}),
-            ...(response.writeGrantFailure ? { writeGrantFailure: response.writeGrantFailure } : {}),
-            ...(response.writeGrantApplied ? { writeGrantApplied: response.writeGrantApplied } : {}) };
-        }) : undefined;
-        const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment, waiting for completion or invocation cancellation, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
-        const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
-        try {
-        return await withStageWriteGrant(grant, () => runAdapter(selectedAdapter, recordedPrompt, invocationRole, {
+        return await withStageWriteGrant(grant, () => runAdapter(selectedAdapter, effectiveInvocationPrompt, invocationRole, {
           // The attempt owner already enforces the declared allowance across all phases.
           // No second native clock may cut it short.
           workDir: opts.projectDir,
@@ -903,9 +893,8 @@ export async function runStage(
           onInvocationInput: (input) => captureInput(input, 'model'),
           outputSchema: opts.outputSchema,
         }, runState?.inputLimitChars, () => {
-          if (!selectedAdapter.capturesInvocationInput) captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt }, 'adapter');
+          if (!selectedAdapter.capturesInvocationInput) captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt }, 'adapter');
         }, { limit: durationLimit, attemptBudgetMs: opts.timeout_ms }));
-        } finally { await recorder?.close(); }
       }).then(
         (value) => {
           let finalRecord: unknown;
@@ -972,11 +961,11 @@ export async function runStage(
     if (opts.decisionResult) return {}; // Successor defaults remain scheduler-owned.
     const record = parseStageRecord(output, recordedOutputSchema ?? opts.outputSchema!);
     if (opts.isGate) {
+      if (!GATE_OUTCOMES.includes(record.outcome as GateOutcome) || 'pass' in record || 'repairability' in record) throw new Error('GATE_OUTCOME_REQUIRED: every gate answer requires only the injected closed-set outcome; pass and repairability are retired answer fields');
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
-        ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');
+        ?? validateGateRepairability(record);
       if (violation) throw new Error(violation);
-      const findingViolation = validateFindingVerdict(record, gateCriterionRefs(opts.runDir, opts.criterionRefs), { ledger: readEvidence(opts.runDir),
-        gate: { stageId: opts.stageId, attemptIndex, treeHash: captureProjectTree(opts.projectDir, '', opts.runDir).hash } });
+      const findingViolation = validateFindingVerdict(record, gateCriterionRefs(opts.runDir, opts.criterionRefs), readAdmittedContract(opts.runDir).declaration.allow_blocked_acceptance === true);
       if (findingViolation) throw new Error(findingViolation);
     }
     return record;
@@ -1039,8 +1028,8 @@ export async function runStage(
         return combined;
       }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
-      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct the final JSON document using retained work and evidence; record a required targeted reproduction if it is missing. Preserve substantive evidence; never invent evidence or suppress a grounded rejection. Apply the injected finding policy when reclassifying an unsupported claim.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
-      if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {
+      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct the final JSON document using retained work and evidence. Preserve substantive evidence; never invent evidence or suppress a grounded rejection.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
+      if (correctionReinvocations >= policy.resultCorrections || aggregateAbortSignal.aborted) {
         return {
           ...combined,
           exitCode: aggregateAbortSignal.aborted ? combined.exitCode : 1,
@@ -1048,7 +1037,7 @@ export async function runStage(
           providerFailure: undefined,
           friendlyError: aggregateAbortSignal.aborted
             ? combined.friendlyError
-            : recordError,
+            : `Bound resourcePolicy.resultCorrections reached (${correctionReinvocations}/${policy.resultCorrections}). ${recordError}`,
         };
       }
       correctionReinvocations++;
@@ -1061,7 +1050,7 @@ export async function runStage(
       } catch { /* durable incident JSONL remains the audit source */ }
     }
   };
-  const adapterRetryDelays = opts.technicalRetry?.delaysMs ?? ADAPTER_RETRY_DELAYS;
+  const adapterRetryDelays = policy.adapterRetryDelays;
   const waitForRetry = async (delayMs: number): Promise<boolean> => {
     const canInvoke = () => !aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0;
     if (!canInvoke()) return false;

@@ -1,3 +1,4 @@
+import { projectGateVerdict } from './gate-evidence.js';
 import { findingRejects, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Canonical iteration/round coordinates, archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
@@ -24,8 +25,7 @@ export function appendGateEvidenceInstruction(prompt: string, runDirPath: string
 Return your verdict as the final JSON answer. The engine publishes
 ${runRecordPath(runDirPath, `verdict_${stageId}.json`)} and archives a rejecting attempt.
 Durable rejected-verdict citation: ${archivedGateVerdictWritePath(runDirPath, coordinate, stageId)}
-Accepting metric claims include value and metric; the contract owns the threshold. For campaign phase progress,
-include phase, phaseComplete, nextPhase, outcome, artifactSummary and reason there.
+Accepting metric claims include value and metric; the contract owns the threshold.
 Research comparisons use the research loop's own baseline and immutable round evidence.`;
 }
 
@@ -131,7 +131,8 @@ export function archiveGateRoundEvidence(
             inputPath: input,
             written_verdict_pass: readWrittenVerdictPass(verdict),
             engine_effective_pass: effective?.pass ?? null,
-            kind: effective?.refusal?.kind ?? (effective?.pass ? 'pass' : effective?.repairability?.disposition ?? 'repairable'),
+            ...(effective?.outcome ? { outcome: effective.outcome } : {}),
+            kind: effective?.refusal?.kind ?? (effective?.pass ? 'pass' : effective?.outcome === 'rejected_irreparable' ? 'irreparable' : effective?.repairability?.disposition ?? 'repairable'),
             engine_rejection_reason: effective?.reason ?? null,
             ...(effective?.repairability ? { repairability: effective.repairability } : {}),
             ...(effective?.findings ? { findings: effective.findings } : {}),
@@ -168,7 +169,7 @@ export function archiveRejectedGateRuntimeFacts(
 export function readWrittenVerdictPass(verdictPath: string): boolean | null {
   try {
     const parsed = JSON.parse(readFileSync(verdictPath, 'utf-8')) as Record<string, unknown>;
-    return typeof parsed.pass === 'boolean' ? parsed.pass : null;
+    return typeof parsed.outcome === 'string' ? projectGateVerdict(parsed).pass : typeof parsed.pass === 'boolean' ? parsed.pass : null;
   } catch {
     return null;
   }
@@ -256,7 +257,7 @@ export function buildGateDispatchPreamble(input: {
     rejections: archivedGateRejections(input.runDirPath, input.gateId).map(rejection => rejectionRecord(rejection)),
     repairChangedFiles,
     ...(input.roundDiffPath ? { repairDiffPath: input.roundDiffPath } : {}),
-  })}\nCheck every assigned criterion against the current tree using your own experiments. Continue through every brief criterion after finding a defect and report all findings in one verdict. Include exactly one entry for every brief criterion, even on rejection. Consume configured validation from the ledger without rerunning it. A reported blocker needs independent reproduction; it does not establish irreparability. Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief.
+  })}\nCheck every assigned criterion against the current tree using your own experiments. Continue through every brief criterion after finding a defect and report all findings in one verdict. Include exactly one entry for every brief criterion, even on rejection. Consume configured validation from the ledger without rerunning it.
 Prior criteria and findings are recorded in rejections; status "fail" means not met last round. Check each rejected finding against the repair diff. Consume the repair attempt's configured validation from the ledger without rerunning it.
 For a criterion met last round whose evidence files the repair did not touch, you may choose status "carried" with from: {iteration, round} naming that archived round. This is your judgment: re-examine any criterion you consider necessary and report every defect you find. The engine checks the value and referenced round's existence, not whether carrying is justified.
 The repairDiffPath names the complete, untruncated repair-round diff. repairChangedFiles comes from attempt content identities; null means unavailable. With no structured rejection, run a complete initial evaluation.`;
@@ -276,17 +277,6 @@ function rejectionRecord(rejection: ArchivedGateRejection, repair = false): obje
   };
 }
 
-export function confirmedRepairFindings(runDirPath: string, gateIds: string[], through?: GateArchiveCoordinate): NonNullable<GateVerdict['findings']>['confirmed'] {
-  const findings = gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
-    .filter(coordinate => !through || coordinate.iteration < through.iteration || coordinate.iteration === through.iteration && coordinate.round <= through.round)
-    .flatMap(coordinate => {
-      try { return (JSON.parse(readFileSync(gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'), 'utf8')).findings?.confirmed ?? []).filter(findingRejects); }
-      catch { return []; } // A missing archive never creates repair authority.
-    })) as NonNullable<GateVerdict['findings']>['confirmed'];
-  // Later repairs must replay earlier obligations on their new tree too.
-  return [...new Map(findings.map(finding => [finding.record.sequence, finding])).values()];
-}
-
 export function buildGateFixCorrectionContract(
   runDirPath: string, gateIds: string[], coordinate: GateArchiveCoordinate,
 ): string {
@@ -294,7 +284,6 @@ export function buildGateFixCorrectionContract(
     rejections: gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
       .filter(rejection => rejection.iteration === coordinate.iteration && rejection.round === coordinate.round)
       .map(rejection => rejectionRecord(rejection, true))),
-    confirmedFindings: Object.fromEntries(gateIds.map(gateId => [gateId, confirmedRepairFindings(runDirPath, [gateId], coordinate)])),
     ledgerPath: runRecordPath(runDirPath, 'evidence-ledger.jsonl'),
-  })}\nReceive all criterion entries and rejecting findings of this round in rejections; advisory findings remain in the durable verdict for the operator and are never repair obligations. Resolve all not-met (status "fail") entries and confirmed findings together against the current diff. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
+  })}\nReceive all criterion entries and rejecting findings of this round in rejections; advisory findings remain in the durable verdict for the operator and are never repair obligations. Resolve all not-met (status "fail") entries and rejecting findings together against the current diff. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
 }

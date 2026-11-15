@@ -1,4 +1,4 @@
-import { auditFindingsJsonSchema, FINDING_POLICY_TEXT } from './scoped-audit-repair.js';
+import { auditFindingsJsonSchema, FINDING_POLICY_TEXT, GATE_OUTCOMES, gateAccepted } from './scoped-audit-repair.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { ValidationSelectionSchema } from './project-validation.js';
 import { runRecordPath, stageWorkPath } from './run-layout.js';
@@ -71,14 +71,14 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   if (!opts.isGate) return HANDOFF_SCHEMA;
   const refs = opts.runDir ? gateCriterionRefs(opts.runDir, opts.criterionRefs) : opts.criterionRefs ?? [];
   const criteria = object(Object.fromEntries(refs.map(id => [id, CRITERION_ENTRY_SCHEMA])));
-  const audit_findings = auditFindingsJsonSchema(refs);
-  const pass = object({ reason: text, criteria, audit_findings: auditFindingsJsonSchema(refs, true),
-    pass: { type: 'boolean', enum: [true] } }, completion);
-  const fail = object({ reason: text, criteria, audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
-    version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
-  }) }, completion);
-  if (opts.extendedVerdict) pass.additionalProperties = fail.additionalProperties = true;
-  return { type: 'object', anyOf: [pass, fail] };
+  const verdict = object({ reason: text, criteria, audit_findings: auditFindingsJsonSchema(refs),
+    outcome: { type: 'string', enum: [...GATE_OUTCOMES] } }, completion);
+  verdict.anyOf = [
+    { properties: { outcome: { enum: GATE_OUTCOMES.filter(gateAccepted) }, audit_findings: auditFindingsJsonSchema(refs, true) } },
+    { properties: { outcome: { enum: GATE_OUTCOMES.filter(outcome => !gateAccepted(outcome)) } } },
+  ];
+  if (opts.extendedVerdict) verdict.additionalProperties = true;
+  return verdict;
 }
 
 export function parseStageRecord(output: string, schema: Schema): Record<string, unknown> {

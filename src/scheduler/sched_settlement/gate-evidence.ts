@@ -10,6 +10,7 @@ import { STAGE_STATUS } from '../../store.js';
 import type { StageArtifactContractAudit } from '../../stage-artifact-contract.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { GATE_OUTCOMES, gateAccepted, type GateOutcome } from '../../scoped-audit-repair.js';
 import { canonicalRunDirectory } from '../../cancellation-policy.js';
 
 const repairabilitySchema = z.object({
@@ -19,6 +20,10 @@ const repairabilitySchema = z.object({
 }).strict();
 /** Terminality is an explicit verdict fact, never an inference from its prose. */
 export function validateGateRepairability(record: Record<string, unknown>): string | undefined {
+  if (typeof record.pass !== 'boolean') {
+    if (!GATE_OUTCOMES.includes(record.outcome as GateOutcome) || 'pass' in record || 'repairability' in record) return 'Gate contract violation: use exactly one outcome; pass and repairability are retired answer fields';
+    return undefined;
+  }
   if (!('repairability' in record)) return undefined;
   if (record.pass !== false || !repairabilitySchema.safeParse(record.repairability).success) {
     return 'Gate contract violation: repairability requires pass=false and exactly {version:1, disposition:"repairable"|"irreparable", evidence:"<non-empty reproducible evidence>"}; omit repairability for a legacy verdict';
@@ -27,8 +32,10 @@ export function validateGateRepairability(record: Record<string, unknown>): stri
 }
 
 export function projectGateVerdict(record: Record<string, unknown>): GateVerdict {
+  const outcome = typeof record.pass !== 'boolean' && GATE_OUTCOMES.includes(record.outcome as GateOutcome) ? record.outcome as GateOutcome : undefined;
   return {
-    pass: record.pass as boolean,
+    ...(outcome ? { outcome } : {}),
+    pass: outcome ? gateAccepted(outcome) : record.pass as boolean,
     ...(typeof record.reason === 'string' ? { reason: record.reason } : {}),
     ...(!validateGateRepairability(record) && record.repairability
       ? { repairability: repairabilitySchema.parse(record.repairability) } : {}),
@@ -81,7 +88,7 @@ export function validateGateCriterionEvidence(
   verdict: Record<string, unknown>,
 ): string | undefined {
   const refs = gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId));
-  if (refs.length === 0) return undefined; // Legacy records without admitted criteria.
+  if (refs.length === 0 && typeof verdict.pass === 'boolean') return undefined; // Historical records without admitted criteria.
   const criteria = verdict.criteria;
   if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria)) {
     return `Gate criterion contract violation: missing criteria evidence map for ${refs.join(', ')}`;
@@ -109,13 +116,13 @@ export class GateVerdictDocument {
   readonly value: Record<string, unknown>;
   constructor(bytes: Buffer) {
     this.value = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
-    if (typeof this.value.pass !== 'boolean') throw new Error('Gate verdict requires boolean pass');
+    if (!GATE_OUTCOMES.includes(this.value.outcome as GateOutcome) && typeof this.value.pass !== 'boolean') throw new Error('Gate verdict requires outcome');
     this.digest = createHash('sha256').update(bytes).digest('hex');
   }
 
   project(): GateVerdict { return projectGateVerdict(this.value); }
   refuse(reason: string): GateVerdict {
-    return this.value.repairability ? { ...this.project(), pass: false, reason } : { pass: false, reason };
+    return { ...this.project(), pass: false, reason };
   }
 }
 

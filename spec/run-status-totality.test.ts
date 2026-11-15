@@ -36,6 +36,7 @@ const EXPECTED_SEMANTICS = {
   [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true, resumable: false },
   [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true, resumable: true },
   [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.ACCEPTED_BLOCKED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
   [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
   [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
   [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },

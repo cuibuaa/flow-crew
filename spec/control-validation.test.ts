@@ -141,23 +141,12 @@ async function partialWorkflow(confirmed: boolean) {
     calls.push(opts.stageId);
     if (opts.stageId === 'review') {
       const reject = confirmed && review++ === 0;
-      let reproduction: number | undefined;
-      if (reject) {
-        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-        const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.exit(require('node:fs').readFileSync('docs/value.txt','utf8')==='repaired'?0:1)")}`,
-          cwd: root, shell: '/bin/sh' };
-        const child = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`],
-          display: 'reviewer reproduction', cwd: root, runDir: opts.runDir, timeoutMs: 30000 });
-        expect(child.exitCode).toBe(0);
-        const recorded = JSON.parse(child.stdout!).record;
-        expect(recorded.exitCode).toBe(1); reproduction = recorded.sequence;
-      }
       const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
       return result({ pass: !reject, reason: reject ? 'Confirmed repairable defect' : 'Semantic criteria satisfied',
-        ...(reject ? { repairability: { version: 1, disposition: 'repairable', evidence: `ledger #${reproduction}` } } : {}),
+        ...(reject ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Independent inspection' } } : {}),
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: reject ? 'fail' : 'pass', evidence: 'Read value' }])),
         audit_findings: { version: 1, findings: reject ? [{ id: 'value', paths: ['docs/value.txt'], reason: 'Value predicate failed',
-          class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] } });
+          class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] : [] } });
     }
     mkdirSync(join(root, 'docs'), { recursive: true });
     writeFileSync(join(root, 'docs/value.txt'), opts.stageId === 'repair_review' ? 'repaired' : 'bad');
@@ -179,9 +168,7 @@ describe('repair admission and certification have distinct evidence demands', ()
       expect(fact.delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
       expect(fact.executions[0].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: 'partial' });
     }
-    const original = ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.exitCode === 1)!;
-    expect(original).toBeDefined();
-    expect(ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)).toMatchObject({ exitCode: 0 });
+    expect(ledger.filter(entry => entry.kind === 'command')).toEqual([]);
     expect(final.status).toBe('incomplete');
     expect(final.stages.review.gate).toMatchObject({ pass: false });
   });

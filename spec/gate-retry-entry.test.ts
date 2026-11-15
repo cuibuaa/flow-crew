@@ -245,7 +245,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
           `rejected_verdict_${GATE_ID}.json`,
         );
         if (existsSync(archived)) {
-          repairSawArchivedNegative ||= JSON.parse(readFileSync(archived, 'utf-8')).pass === false;
+          repairSawArchivedNegative ||= JSON.parse(readFileSync(archived, 'utf-8')).outcome === 'rejected_repairable';
         }
         return fixtureResult({ output: 'repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
@@ -313,7 +313,7 @@ describe('gate retry loop entry', () => {
     expect(result.repairCalls).toBe(0);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
     expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
-      pass: true, metric: 'e18_quality', score: 0, threshold: 0,
+      outcome: 'accepted', metric: 'e18_quality', score: 0, threshold: 0,
     });
     expect(JSON.parse(readFileSync(stageWorkPath(result.runDirPath, 'stages', GATE_ID, 'metric.json'), 'utf-8'))).toMatchObject({
       pass: true, metric: 'e18_quality', value: 0, threshold: 0,
@@ -330,7 +330,7 @@ describe('gate retry loop entry', () => {
     expect(result.repairSawArchivedNegative).toBe(true);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('complete');
     expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
-      pass: true, score: 0, threshold: 0,
+      outcome: 'accepted', score: 0, threshold: 0,
     });
     expect(JSON.parse(readFileSync(runRecordPath(
       result.runDirPath,
@@ -338,7 +338,7 @@ describe('gate retry loop entry', () => {
       'iteration_1',
       'round_1',
       `rejected_verdict_${GATE_ID}.json`,
-    ), 'utf-8'))).toMatchObject({ pass: false, score: -1, threshold: 0 });
+    ), 'utf-8'))).toMatchObject({ outcome: 'rejected_repairable', score: -1, threshold: 0 });
     const inputPath = gateArchiveArtifactPath(result.runDirPath, { iteration: 1, round: 1 }, GATE_ID, 'input');
     expect(existsSync(inputPath)).toBe(true);
     const archivedInput = readInvocationInput(inputPath).userPrompt;
@@ -394,11 +394,11 @@ describe('gate retry loop entry', () => {
 
     expect(result.repairCalls).toBe(0);
     expect(result.gateCalls).toBe(1);
-    expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
+    expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ outcome: 'accepted' });
     const archiveDir = runRecordPath(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     expect(JSON.parse(readFileSync(
       join(archiveDir, `rejected_verdict_${UNRELATED_GATE_ID}.json`),
       'utf-8',
-    ))).toMatchObject({ pass: false, reason: 'unrelated rejection' });
+    ))).toMatchObject({ outcome: 'rejected_repairable', reason: 'unrelated rejection' });
   });
 });

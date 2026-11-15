@@ -10,7 +10,7 @@ import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBu
 import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
-import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, parseAgent } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, admitResourcePolicy, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
@@ -152,8 +152,8 @@ export async function executeSingleStage(
     availableRoles = [...roleRegistry.entries()].map(([k, v]) => `- ${k}: ${v.description}`).join('\n');
   }
 
-  const maxTechnicalRetries = configuredTechnicalRetryLimit();
-  const maxFailureRetries = failureRetryLimit(stage, workflow);
+  const maxTechnicalRetries = configuredTechnicalRetryLimit(state, workflow);
+  const maxFailureRetries = failureRetryLimit(stage, workflow, state);
 
   const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
   let result: RunResult | undefined;
@@ -168,7 +168,7 @@ export async function executeSingleStage(
     try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
     const retries = state.stages[stage.id]?.retries ?? 0;
     const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
-    const researchWall = state.research?.budget?.wall_seconds;
+    const researchWall = admitResourcePolicy(state, workflow).research?.wall_seconds;
     if (researchWall !== undefined) prepared.budgetMs = Math.max(1, Math.min(prepared.budgetMs ?? Infinity,
       Math.floor(Date.parse(state.startedAt) + researchWall * 1000 - Date.now())));
     // Read the failure cause before the running projection clears latest error.
@@ -228,7 +228,7 @@ export async function executeSingleStage(
       continue;
     }
     if (result.providerFailure && result.providerFailure.kind !== 'refusal') {
-      const detail = `Upstream adapter failure exhausted technical recovery for ${stage.id}: ${result.providerFailure?.kind}`;
+      const detail = `Upstream adapter failure ended stage ${stage.id}: ${result.providerFailure?.kind}`;
       concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: result.providerFailure.kind === 'input_too_large' ? 'input_too_large' : 'adapter_failure', detail, pendingStageNote: detail, eventFields: () => ({
         iteration: state.currentIteration ?? 1, stageId: stage.id, detail, source: 'scheduler', level: 'warning',
       }) });

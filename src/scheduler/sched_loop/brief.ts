@@ -6,7 +6,7 @@ import { resolveCampaignStorageKey } from '../../campaigns.js';
 
 import { splitBriefFrontmatter } from '../../brief-frontmatter.js';
 import { entryWorkflow, declarationConfiguration, captureTerminalReceiptBaselines, terminalReceiptGlob } from '../sched_admission/brief-contract.js';
-import { WorkflowConfig } from '../sched_admission/configuration.js';
+import { admitResourcePolicy, WorkflowConfig } from '../sched_admission/configuration.js';
 import { StoreState, readRunState, writeRunState } from '../../store.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync } from 'node:fs';
@@ -63,6 +63,7 @@ export function configureWorkflowBrief(
     return { kind: 'settled', state: concludeRun(s, { status: 'incomplete', reasonCode: ARTIFACT_OWNERSHIP_UNVERIFIED,
       detail: 'Terminal ownership cannot be verified without the recorded launch content baseline.' }) };
   }
+  admitResourcePolicy(s, workflow);
   s.briefConfigured = true;
   writeRunState(projectDir, runId, s);
   // An explicitly acknowledged continuation can update model instructions,

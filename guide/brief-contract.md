@@ -130,7 +130,7 @@ listing and UI readers require no migration.
 
 One closed declaration schema, version 1, validates the entire leading mapping before
 any consumer selects a field. Its keys are `inputs`, `outputs`, `criteria`, `validation`,
-`max_continuations`, `stage_duration_ms`, `input_limit_chars`, `terminal_states`,
+`max_continuations`, `stage_duration_ms`, `input_limit_chars`, `allow_blocked_acceptance`, `terminal_states`,
 `reality_checks` and `research`. Unknown fields, aliases, duplicate YAML keys, YAML aliases,
 null blocks and malformed values refuse the whole brief with `DECLARATION_INVALID` and a
 key path. Omitted read `kind` has the documented value `file` and is recorded in the canonical declaration; omitted output type is `file`, and omitted output disposition is `create` (or input reuse when the same path is an input). These fixed optional semantics do not repair malformed supplied values. Arbitrary nested metadata is never searched for paths. Inputs are an array of path strings or `{path, frozen?, type?, sha256?}` entries.
@@ -682,3 +682,7 @@ reality_checks:
 ```
 
 Historical artifacts remain inspectable as evidence. The runtime does not recover input identities from legacy aliases, setup receipt presence or current brief files; a hashless run needs a new admission under a new run identity.
+
+Gate-limited acceptance is declared in frontmatter with `allow_blocked_acceptance: true`.
+Absent or false, gates cannot accept blocked outcomes. `accepted_blocked` is not a terminal-file status; only a gate can request it. The injected gate schema and finding
+policy apply in both engineering and research mode; accepted blocked runs retain their distinct status.

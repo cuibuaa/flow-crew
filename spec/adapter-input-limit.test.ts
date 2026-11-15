@@ -32,7 +32,6 @@ import * as adapterLoader from '../src/adapters/loader.js';
 vi.mock('../src/evidence-ledger.js', async original => ({
   ...await original<typeof import('../src/evidence-ledger.js')>(), evidenceContext: () => 'Synthetic ledger reference.',
 }));
-vi.mock('../src/recorded-command.js', () => ({ startCommandRecorder: async () => ({ command: 'fixture-recorder', close: async () => {} }) }));
 
 const role: AgentConfig = { name: 'fixture', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'System 🌿\r\n' };
 const contract = { version: 1 as const, produces: [], reads: [], groups: [] };

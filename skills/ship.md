@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 66 -->
+<!-- flowcrew-skill-revision: 68 -->
 
 # Ship a conversation to FlowCrew
 
@@ -246,9 +246,9 @@ the body is model context only. Editing prose cannot add or remove engine obliga
 Engineering work receives one full independent read-only review after authoring. The reviewer
 chooses independent experiments against the brief's criteria and reproduced regressions relative to
 the unchanged base; it must not invent requirements. Finding classes decide rejection under the
-single finding policy. Rejecting findings require failed engine-recorded reproductions; unmet criteria
-must also be marked fail in the same verdict. Missing grounding uses bounded result correction. Other real defects are advisory, remain in the
-durable record and operator summary, and never become repair obligations. No preliminary decision
+single injected finding policy and result schema. The independent gate owns acceptance, blocked
+acceptance and rejection; blocked acceptance requires the operator's terminal declaration
+`allow_blocked_acceptance: true`. Reviewer commands are optional evidence. No preliminary decision
 routes review depth.
 
 Scheduler retry context contains recorded facts and admission reports. The run-wide admission

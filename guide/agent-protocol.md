@@ -134,7 +134,7 @@ the missing capability, observations, and remaining work. This closed status kee
 ordinary answer schema compatible with native generation. The engine retains it in attempt evidence and sends
 it to the independent read-only gate once, without renewing the work or continuation
 budget. The gate alone decides whether the stated gap permits acceptance under its
-criteria. A gap is not an instruction to waive a required product or a confirmed finding.
+criteria. A gap is not an instruction to waive a required product or a gate rejection.
 
 A native provider error with typed code `usage_limit_reached` or `quota_exceeded` and
 `reset_at` (Unix seconds or an ISO timestamp) parks the run until that reset. The daemon
@@ -193,7 +193,7 @@ Ordinary stages return one JSON document with `status: delivered|blocked`, nonbl
 `evidence`. The injected schema is authoritative; do not handwrite a verdict or a file-list
 handoff instead. The engine records writes with their attribution.
 
-A gate returns `pass` and `reason` and exactly one `criteria` entry for every canonical
+A gate returns `outcome` and `reason` and exactly one `criteria` entry for every canonical
 ID in the brief, including criteria outside its narrower work assignment. Continue through
 all criteria after finding a defect; report all findings in the same verdict.
 Each entry has nonblank `evidence` and a closed `status`:
@@ -208,14 +208,6 @@ referenced round existence; it never reads finding prose or decides whether carr
 justified. The reviewer assigns each finding's `class`; the engine never infers it from prose.
 The class set and rejection rule have one owner:
 [finding policy](../src/scoped-audit-repair.ts), used by the schema, settlement and injected instructions.
-The classes are `criterion_unmet` (name canonical `criterion_ids` entries, each marked `fail` in this verdict), `regression`
-(a reproduced base/changed difference introduced by the change or its repairs), and `advisory`
-(other real defects, including pre-existing defects, unrequested hardening and style).
-Only the first two reject. Every referenced criterion ID must exist in the brief. A passing verdict
-may carry advisories; a rejecting verdict must contain a rejecting finding and `repairability`.
-Pass with a rejecting finding, rejection with only advisories, an unknown class or an unknown
-criterion ID is invalid and follows the same correction path as other invalid verdicts.
-Review judges the brief's criteria and introduced regressions; it must not invent requirements.
 Invalid JSON/shape uses the existing bounded correction in the same execution and deadline;
 persistent invalidity cannot publish an authoritative verdict. Old authored records, including
 ones without criterion entries or with `judgement`, remain readable in summaries and verdict
@@ -225,7 +217,7 @@ heuristic reclassifies them as advisory, and their stored verdict and assessment
 Reading an old finding cannot grant it fresh confirmation or repair authority.
 
 Repair receives the round's authored criterion entries and rejecting findings in the
-existing rejection records, alongside confirmed reproduction obligations. Advisories remain in
+existing rejection records, with the gate-owned outcome. Advisories remain in
 the durable verdict and operator summary, and never become repair obligations. Re-review receives
 these records and `repairChangedFiles` from the engine's complete repair tree diff (`null`
 means unavailable). A reviewer may carry a previously met criterion whose evidence files
@@ -236,8 +228,7 @@ optional `appliesToGates`. Accepting gates must supply finite numeric evidence w
 use `value` or `score` plus `metric`, with optional verdict `threshold`. The binding
 contract supplies the direction and authoritative threshold. Renaming the metric or asserting
 pass below the contract threshold refuses. A missing required accepting value fails before dispatching ordinary product repair;
-see [gate recovery](../src/scheduler/sched_settlement/gate-recovery.ts). Phase metadata names are `phase`, `phaseComplete`, `nextPhase`, `outcome`,
-`artifactSummary` and `reason`; these do not create a principal metric. Historical separate
+see [gate recovery](../src/scheduler/sched_settlement/gate-recovery.ts). Legacy phase metadata remains readable; new gate decisions use their injected outcome enum. Historical separate
 metric artifacts remain readable; current gates have no optional campaign principal-metric
 publication channel. Gate rejection archives under the injected
 `gate_reevaluation/iteration_<n>/round_<n>/` path are durable evidence; the root verdict is live.
@@ -245,39 +236,11 @@ publication channel. Gate rejection archives under the injected
 Every verdict carries `audit_findings: {version: 1, findings: [...]}`. Findings include `class`, exact
 project paths, reason, canonical criterion IDs, `invalidates_plan` and configured
 `repair_role`, and optionally `reproduction` (a positive evidence-ledger sequence, or null).
-Run a targeted command, where exit 0 means the defect is absent and a positive exit
-means it is present. Each reviewer invocation receives an engine-recorded command endpoint:
-call its supplied client through the native shell tool with a JSON object containing
-`command`, absolute `cwd` and absolute `shell`. The parent executes it with the isolated
-command environment, waiting for command completion or invocation cancellation; the response
-returns output and `record.sequence` to cite. This works when native events omit context.
-Native command events are also eligible when they carry explicit absolute cwd and shell,
-exit and output. Replay uses that shell with `-c` in that cwd. Put required shell options
-in an explicit invocation in the command. Read the ledger after completion and cite
-that command's sequence. The engine records its exit, output digest and unchanged
-project tree hash; it confirms a finding only against a failed command from this reviewer
-attempt on the reviewed tree. Both rejecting classes require that reproduction: criterion status alone
-cannot close the existing command-replay repair loop. Missing execution context, absent/missing citations,
-passing records or a changed tree invalidate the verdict and use the existing same-attempt correction.
-The reviewer supplies the reproduction or reclassifies the finding as advisory. One correction invocation
-is allowed; persistent invalidity fails the stage without publishing a verdict, as with other invalid JSON.
-Only confirmed rejecting findings acquire reproduction obligations. The complete authored verdict,
-including advisories, remains in the durable record, run facts and the report. Advisories never acquire
-repair authority even when reproduced. Historical unconfirmed observations remain readable without
-acquiring fresh repair authority.
+The injected schema and `FINDING_POLICY_TEXT` own the verdict vocabulary and finding consistency
+rules for every role and mode. Commands are optional evidence. The engine does not confirm
+reviewer findings from command exits and never replays reviewer experiments after repair.
+Native command progress remains evidence. Historical assessments and replay receipts remain readable.
 
-When the brief supplies no criterion IDs, `criterion_unmet` cannot validate. Advisory and regression
-remain usable; a regression can reject only with its failed recorded reproduction. An unmet outcome
-without a named brief criterion cannot be rejected as `criterion_unmet`; supply criteria in the brief.
-An empty stage assignment still covers all canonical brief criteria when the brief has them.
-Repair closure replays each confirmed rejecting command on the repaired tree and
-records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,
-after the attempt's selected validation commands. Dependency preparation, when needed, is part of those declared commands.
-No reproduction is a second configured validation.
-Native command progress records retain command, context when available, raw exit and output
-digest without tree captures. Only engine-recorded reproductions and their closure replays
-receive command tree hashes; cite the engine-recorded command endpoint for a finding.
-Repair admission uses confirmed reproductions and completed nonzero engine validation records.
 A completed record with any nonzero exit always returns the work to repair, whatever the base
 tree, the failure identity or the review verdict was; an unfinished record is a resource state
 the engine reruns within its allowance, never a finding or a repair reason. A run completes only
@@ -288,13 +251,13 @@ An acknowledged base changes launch permission only; final validation must still
 A passing gate skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.
 
-`repairability: {version: 1, disposition: repairable|irreparable, evidence: <nonblank>}` is
-valid only on rejection. An unchanged canonical verdict bound to a completed gate receipt
-can establish an irreparable blocker and terminate escalated before repair. Prose alone,
-incomplete/shared unbound evidence, or an invalid declaration cannot grant that authority.
-A reviewed author's `blocked` answer settles for the gate to confirm or reject; an unreviewed
-blocked answer fails its stage. A pass still requires every assigned brief criterion, including
-any explicitly permitted negative/blocked report outcome.
+Every gate receives the same injected outcome contract.
+The brief's frontmatter `allow_blocked_acceptance: true` permits blocked/limited acceptance;
+absence disallows it. Accepted blocked runs end `accepted_blocked`, preserving evidenced
+`not_assessed` criteria. A reviewed author gap remains evidence for the independent gate;
+it cannot suppress the gate's repair decision. Old `pass` and `repairability` records remain readable.
+The run's admitted `resourcePolicy` shows iteration, visit, planner, correction and retry bounds.
+A refused successor names the reached bound or missing route; quiescence alone is not exhaustion.
 
 Configured validation belongs to the engine after author/repair settlement, outside the
 author invocation and its deadline. Authors run related tests, finish code and deliverables,

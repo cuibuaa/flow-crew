@@ -577,20 +577,17 @@ process.stdin.resume(); process.stdin.on('end', () => {
     }
   });
 
-  it('keeps delegated engine-recorded commands inside the requesting stage grant', async () => {
+  it('keeps reviewer native commands inside the requesting stage grant', async () => {
     if (!supported()) return;
     const outside = join(root, 'outside'); writeFileSync(outside, 'unchanged');
     let observed: any;
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const adapter: Adapter = { sessionKind: 'local', async run(prompt, _role, opts) {
-      const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-      const request = { command: `${quote(process.execPath)} -e ${quote(observe(`fs.writeFileSync(${JSON.stringify(outside)},'bad')`))}`, cwd: project, shell: '/bin/sh' };
-      const result = await execWithStdin('/bin/sh', ['-c', `${client} ${quote(JSON.stringify(request))}`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
+      const result = await execWithStdin(process.execPath, ['-e', observe(`fs.writeFileSync(${JSON.stringify(outside)},'bad')`)], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
       expect(result.exitCode, result.output).toBe(0);
       observed = JSON.parse(result.output);
-      expect(observed.record?.exitCode, result.output).toBe(0);
-      expect(JSON.parse(observed.stdout)).toEqual({ denied: true, code: 'EACCES' });
-      return { ...result, output: JSON.stringify({ pass: true, reason: 'Recorded command observed.', criteria: {}, audit_findings: { version: 1, findings: [] } }) };
+      expect(observed).toEqual({ denied: true, code: 'EACCES' });
+      return { ...result, output: JSON.stringify({ outcome: 'accepted', reason: 'Native command observed.', criteria: {}, audit_findings: { version: 1, findings: [] } }) };
     } };
     await runStage(adapter, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId, runDir: directory,
       retries: 0, timeout_ms: 60_000, artifactContract: artifacts, scope: ['left/'], isGate: true, outputSchema: stageRecordSchema({ isGate: true }) });
@@ -646,7 +643,7 @@ process.stdin.resume(); process.stdin.on('end', () => {
 fs.writeFileSync(${JSON.stringify(probe)},'workspace probe');
 fs.writeFileSync(path.join(process.env.TMPDIR,'probe'),'temporary probe');
 let code;try{fs.writeFileSync(${JSON.stringify(join(project,'forbidden'))},'bad');}catch(error){code=error.code;}
-console.log(JSON.stringify({pass:true,reason:code,criteria:{},audit_findings:{version:1,findings:[]}}));`], '',
+console.log(JSON.stringify({outcome:'accepted',reason:code,criteria:{},audit_findings:{version:1,findings:[]}}));`], '',
         { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
     } };
     const result = await runStage(agent, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId,
@@ -663,12 +660,12 @@ console.log(JSON.stringify({pass:true,reason:code,criteria:{},audit_findings:{ve
     const path = join(directory, 'work', 'verdict_left.json');
     const contract = { ...artifacts, produces: [{ id: 'verdict', root: 'run' as const, path: 'work/verdict_left.json', kind: 'file' as const, nonempty: false }] };
     const adapter: Adapter = { sessionKind: 'local', async run(_prompt, _role, opts) {
-      return execWithStdin(process.execPath, ['-e', `let code; try {require('node:fs').writeFileSync(${JSON.stringify(path)},'forged');}catch(error){code=error.code;} console.log(JSON.stringify({pass:true,reason:code,criteria:{},audit_findings:{version:1,findings:[]}}));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
+      return execWithStdin(process.execPath, ['-e', `let code; try {require('node:fs').writeFileSync(${JSON.stringify(path)},'forged');}catch(error){code=error.code;} console.log(JSON.stringify({outcome:'accepted',reason:code,criteria:{},audit_findings:{version:1,findings:[]}}));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
     } };
     const result = await runStage(adapter, { stageId: 'left', role, dependsOn: [], promptTemplate: '', projectDir: project, runId, runDir: directory,
       retries: 0, timeout_ms: 60_000, artifactContract: contract, scope: [], isGate: true, outputSchema: stageRecordSchema({ isGate: true }) });
     expect(result.exitCode, result.output).toBe(0);
-    expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pass: true, reason: 'EACCES' });
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ outcome: 'accepted', reason: 'EACCES' });
   });
 
   it('refuses declarations covering another stage, shared run scratch or an engine record', () => {
@@ -817,7 +814,7 @@ console.log(JSON.stringify({
  parent:attempt(()=>fs.writeFileSync(${JSON.stringify(join(root, 'sibling'))},'bad')),
  alias:attempt(()=>fs.linkSync(source,${JSON.stringify(join(output, 'alias'))}))
 }));`], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts, captureStreams: true });
-        const record = gate ? { pass: true, reason: 'Read-only gate.', criteria: {}, audit_findings: { version: 1, findings: [] } }
+        const record = gate ? { outcome: 'accepted', reason: 'Read-only gate.', criteria: {}, audit_findings: { version: 1, findings: [] } }
           : stage.decision ? { successor: 'right', reason: 'Declared output observed.' }
           : { status: 'delivered', summary: 'Declared output observed.', caveats: [], remaining_work: [], blocks: null };
         return { ...child, output: JSON.stringify(record) };

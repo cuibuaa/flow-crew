@@ -346,7 +346,7 @@ describe('compressed acceptance loop', () => {
       expect(existsSync(join(roundDir, `previous_output_${GATE_ID}.md`))).toBe(false);
       expect(existsSync(join(roundDir, `evaluated_input_${GATE_ID}.md`))).toBe(false);
       expect(verdict).toContain(`iteration-${iteration}-round-1-verdict`);
-      expect(JSON.parse(output)).toMatchObject({ pass: false, marker: `iteration-${iteration}-round-1-verdict` });
+      expect(JSON.parse(output)).toMatchObject({ outcome: 'rejected_repairable', marker: `iteration-${iteration}-round-1-verdict` });
       expect(verdict).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
       expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
       expect(evaluatedInput).toBe(result.gatePrompts[iteration === 1 ? 0 : 2]);

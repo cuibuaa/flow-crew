@@ -230,10 +230,10 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
         if (Array.isArray(value.stages)) {
           const plan = parseStageRecord(output, RECORDED_PLAN_SCHEMA);
           lines.push(`Plan: ${(plan.stages as Array<{ id: string }>).map(stage => stage.id).join(', ')}.`);
-        } else if (typeof value.pass === 'boolean') {
+        } else if (typeof value.outcome === 'string' || typeof value.pass === 'boolean') {
           // Display authored history without re-admitting it under today's schema.
           const record = value;
-          lines.push(`Independent verdict: ${record.pass ? 'PASS' : 'FAIL'} — ${record.reason}`);
+          lines.push(`Independent verdict: ${record.outcome ?? (record.pass ? 'PASS' : 'FAIL')} — ${record.reason}`);
           const criteria = record.criteria as Record<string, { status: string; evidence: string }>;
           for (const [id, criterion] of Object.entries(criteria ?? {})) lines.push(`- ${id}: ${criterion.status} — ${criterion.evidence}`);
           const findings = record.audit_findings as { findings: Array<{ id: string; class?: string; reason: string; paths: string[] }> };

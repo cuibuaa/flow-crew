@@ -8,7 +8,7 @@ import { cancelledRunPublicationError } from '../../cancellation-policy.js';
 import { type StoreState, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, updateRunState, readRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 
 export type RunConclusionReason =
-  | 'workflow_complete' | 'stage_failed' | 'bounded_attempts' | 'validation_unresolved' | 'provider_refusal'
+  | 'accepted_blocked' | 'no_successor' | 'workflow_complete' | 'stage_failed' | 'bounded_attempts' | 'validation_unresolved' | 'provider_refusal'
   | 'cancelled' | 'reality_gate_failed' | 'recovery_blocked' | 'scheduler_failed' | 'launch_conflict'
   | 'dispatch_refused' | 'workflow_refused' | 'admission_refused' | 'adapter_failure' | 'input_too_large'
   | 'irreparable_gate_rejection' | 'gate_contract_refusal' | 'terminal_artifact'
@@ -70,8 +70,10 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
         return;
       }
       Object.assign(current, state);
-      current.status = outcome.status;
-      current.reasonCode = outcome.reasonCode;
+      const blocked = isSuccessfulRunStatus(outcome.status) && Object.values(current.stages).some(stage =>
+        stage.gate?.pass && stage.gate.outcome === 'accepted_blocked');
+      current.status = blocked ? RUN_STATUS.ACCEPTED_BLOCKED : outcome.status;
+      current.reasonCode = blocked ? 'accepted_blocked' : outcome.reasonCode;
       if (outcome.detail !== undefined) current.failureReason = outcome.detail;
       outcome.beforeCommit?.(current);
       current.validation = currentValidationResults(current.projectDir, current.runId).map(result => ({

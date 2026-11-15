@@ -38,14 +38,13 @@ export type StageScript = ScriptedTurn | ScriptedTurn[];
  * JSON (including malformed JSON) is returned untouched for negative probes. */
 export function scriptedRecord(output: string, opts: RunOpts, finalRecord?: string): string {
   if (!opts.outputSchema || /^\s*[[{]/.test(output)) return output;
-  if (opts.outputSchema.anyOf) {
+  if (opts.outputSchema.properties?.outcome) {
     if (!finalRecord) return output; // absence must still be refused
     const record = JSON.parse(finalRecord);
     record.reason ??= output.trim() || 'Fixture verdict.';
-    if (!opts.outputSchema.anyOf[0].properties?.criteria.required?.length) record.criteria ??= {};
+    if (!opts.outputSchema.properties.criteria.required?.length) record.criteria ??= {};
     // Fixtures must author finding classes explicitly; an empty rejecting verdict stays invalid.
     record.audit_findings ??= { version: 1, findings: [] };
-    if (record.pass === false && !('repairability' in record)) record.repairability = { version: 1, disposition: 'repairable', evidence: record.reason };
     return JSON.stringify(record);
   }
   return JSON.stringify({ status: 'delivered', summary: output.trim() || 'Fixture completed.', checks: [], caveats: [] });

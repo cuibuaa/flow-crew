@@ -160,7 +160,7 @@ describe('measured setup launch rule', () => {
       artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_qa.json', kind: 'file' }], reads: [] } });
     w.stages.push({ ...w.stages[0], id: 'repair', depends_on: ['qa'], retry_to: ['qa'] });
     const run = vi.fn(async (_prompt, _agent, opts) => fixtureResult({
-      output: opts.stageId === 'qa' ? JSON.stringify({ pass: true, reason: 'controlled pass', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'done', exitCode: 0, duration_ms: 0 }, opts));
+      output: opts.stageId === 'qa' ? JSON.stringify({ outcome: 'accepted', reason: 'controlled pass', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'done', exitCode: 0, duration_ms: 0 }, opts));
     const state = await runWorkflow(w, stringify(w), project, { run }, new Map(), undefined, agents, undefined, brief,
       undefined, undefined, acknowledge(item.baseline), stationaryStageClock);
     expect(run, JSON.stringify(state)).toHaveBeenCalled(); expect(state.status === 'complete', state.failureReason).toBe(finalExit === 0);

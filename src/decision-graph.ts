@@ -15,6 +15,8 @@ export interface DecisionRecord {
   gateAccepted?: boolean;
   key: string; stageId: string; iteration: number; successor?: string; reason: string;
   outcome: 'chosen' | 'defaulted' | 'refused';
+  /** Reached operator policy bound; absence on refusal means no admitted successor. */
+  bound?: 'iterations' | 'visits';
   /** Archived chooser assumptions, retained for read-only summaries. */
   assumptions?: string[];
   /** Archived assessment suggestions, retained for read-only history. */

@@ -53,7 +53,7 @@ it.each([1, 2])('admits a planner graph with %s author duties through dispatch a
   const final = await runWorkflow(config, raw, project, { async run(_user, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') return plannerReply(opts, proposal);
-    return { output: JSON.stringify(opts.outputSchema?.anyOf
+    return { output: JSON.stringify(opts.outputSchema?.properties?.outcome
       ? { pass: true, reason: 'Independent greeting check.', criteria: { result: { status: 'pass', evidence: 'Independent check.' } }, audit_findings: { version: 1, findings: [] } }
       : { status: 'delivered', summary: 'Greeting delivered.', caveats: [], remaining_work: [], blocks: null }), exitCode: 0, duration_ms: 0 };
   } }, new Map(), undefined, roles, undefined, brief, true);
@@ -187,7 +187,7 @@ it('shipped workflows contain no pre-review routing decision', async () => {
   const final = await runWorkflow(config, raw, project, { async run(_user, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') return plannerReply(opts);
-    return { output: JSON.stringify(opts.outputSchema?.anyOf
+    return { output: JSON.stringify(opts.outputSchema?.properties?.outcome
       ? { pass: true, reason: 'Independent greeting check.', criteria: { result: { status: 'pass', evidence: 'Independent check.' } }, audit_findings: { version: 1, findings: [] } }
       : { status: 'delivered', summary: 'Greeting delivered.', caveats: [], remaining_work: [], blocks: null }), exitCode: 0, duration_ms: 0 };
   } }, new Map(), undefined, roles, undefined, brief, true);

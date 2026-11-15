@@ -253,7 +253,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     expect(final.status).toBe('incomplete');
     expect(final.currentIteration).toBe(1);
     expect([plans, repairs, gates]).toEqual([1, 1, 2]);
-    expect(final.failureReason).toBe('Workflow stopped after bounded stage/repair attempts: gates did not pass or required work did not complete (iteration 1/3; gate re-evaluations used: 1/1).');
+    expect(final.failureReason).toContain('Bound resourcePolicy.visits reached (1/1)');
     expect(final.status).not.toBe('failed');          // no longer the unconditional 'failed' clobber
     expect(isTerminalRunStatus(final.status)).toBe(true);
     expect(isSuccessfulRunStatus(final.status)).toBe(false);

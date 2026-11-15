@@ -223,6 +223,7 @@ const PRIOR_RUN_EVIDENCE_ACTIONS = {
   [RUN_STATUS.RUNNING]: 'inspect',
   [RUN_STATUS.PARKED]: 'inspect',
   [RUN_STATUS.COMPLETE]: 'clean',
+  [RUN_STATUS.ACCEPTED_BLOCKED]: 'inspect',
   [RUN_STATUS.FAILED]: 'inspect',
   [RUN_STATUS.SHIPPED]: 'clean',
   [RUN_STATUS.CEILING_HIT]: 'inspect',

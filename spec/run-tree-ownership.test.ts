@@ -159,7 +159,7 @@ it('catches an arbitrary engine carrier under a home-looking directory', async (
 });
 
 it('accepts a gate writing its own work verdict and publishes only its validated answer', async () => {
-  const answer = { pass: true, reason: 'Inspected the fixture.', audit_findings: { version: 1, findings: [] }, remaining_work: [] };
+  const answer = { outcome: 'accepted', reason: 'Inspected the fixture.', criteria: {}, audit_findings: { version: 1, findings: [] }, remaining_work: [] };
   const verdict = stageWorkPath(run, 'verdict_review.json');
   const adapter: Adapter = { async run() {
     writeFileSync(verdict, JSON.stringify(answer));
@@ -168,8 +168,8 @@ it('accepts a gate writing its own work verdict and publishes only its validated
   const result = await runStage(adapter, { stageId: 'review', isGate: true, projectDir: project, runDir: run, runId,
     role, dependsOn: [], promptTemplate: 'Judge the fixture.', timeout_ms: 10000, retries: 0,
     artifactContract: { ...contract, produces: [{ root: 'run', path: 'work/verdict_review.json', id: 'verdict', kind: 'file' }] },
-    outputSchema: { type: 'object', required: ['pass', 'reason', 'audit_findings', 'remaining_work'], properties: {
-      pass: { type: 'boolean' }, reason: { type: 'string' }, audit_findings: { type: 'object' }, remaining_work: { type: 'array', items: { type: 'string' } },
+    outputSchema: { type: 'object', required: ['outcome', 'reason', 'criteria', 'audit_findings', 'remaining_work'], properties: {
+      outcome: { type: 'string', enum: ['accepted'] }, reason: { type: 'string' }, criteria: { type: 'object' }, audit_findings: { type: 'object' }, remaining_work: { type: 'array', items: { type: 'string' } },
     }, additionalProperties: false } });
   expect(result.exitCode, result.friendlyError ?? result.output).toBe(0);
   expect(existsSync(runRecordPath(run, 'verdict_review.json')), 'schema-validated verdict is engine-published').toBe(true);
@@ -216,7 +216,7 @@ it('does not publish a schema-invalid gate answer from the work tree', async () 
   const adapter: Adapter = { async run() { return { output: '{"pass":"yes"}', exitCode: 0, duration_ms: 1 }; } };
   const result = await runStage(adapter, { stageId: 'review', isGate: true, projectDir: project, runDir: run, runId,
     role, dependsOn: [], promptTemplate: 'Judge the fixture.', timeout_ms: 10000, retries: 0, artifactContract: contract,
-    outputSchema: { type: 'object', required: ['pass'], properties: { pass: { type: 'boolean' } }, additionalProperties: false } });
+    outputSchema: { type: 'object', required: ['outcome'], properties: { outcome: { type: 'string', enum: ['accepted'] } }, additionalProperties: false } });
   expect(result.exitCode).not.toBe(0);
   expect(existsSync(runRecordPath(run, 'verdict_review.json'))).toBe(false);
 });
@@ -229,15 +229,15 @@ it.each(['before', 'during'] as const)('refuses a work directory redirected to a
     symlinkSync(engineDirectory(other), workspace, 'dir');
   };
   if (timing === 'before') redirect();
-  const answer = { pass: true, reason: 'Inspected.', audit_findings: { version: 1, findings: [] }, remaining_work: [] };
+  const answer = { outcome: 'accepted', reason: 'Inspected.', criteria: {}, audit_findings: { version: 1, findings: [] }, remaining_work: [] };
   const adapter: Adapter = { async run() {
     if (timing === 'during') redirect();
     return { output: JSON.stringify(answer), exitCode: 0, duration_ms: 1 };
   } };
   const outcome = await runStage(adapter, { stageId: 'review', isGate: true, projectDir: project, runDir: run, runId,
     role, dependsOn: [], promptTemplate: 'Judge.', timeout_ms: 10000, retries: 0, artifactContract: contract,
-    outputSchema: { type: 'object', required: ['pass', 'reason', 'audit_findings', 'remaining_work'], properties: {
-      pass: { type: 'boolean' }, reason: { type: 'string' }, audit_findings: { type: 'object' }, remaining_work: { type: 'array', items: { type: 'string' } },
+    outputSchema: { type: 'object', required: ['outcome', 'reason', 'criteria', 'audit_findings', 'remaining_work'], properties: {
+      outcome: { type: 'string', enum: ['accepted'] }, reason: { type: 'string' }, criteria: { type: 'object' }, audit_findings: { type: 'object' }, remaining_work: { type: 'array', items: { type: 'string' } },
     }, additionalProperties: false } }).then(result => result.exitCode, () => 125);
   expect(outcome, 'an engine alias cannot become a stage result destination').not.toBe(0);
   expect(existsSync(runRecordPath(other, 'result.json')), 'no trusted write through a stage alias').toBe(false);

@@ -195,6 +195,7 @@ const CLI_RUN_STATUS_PRESENTATION = {
   [RUN_STATUS.RUNNING]: { listLabel: '⟳ running ', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.PARKED]: { listLabel: '· parked  ', notificationTitle: 'FlowCrew: Run Paused' },
   [RUN_STATUS.COMPLETE]: { listLabel: '✓ complete', notificationTitle: 'FlowCrew: Task Complete' },
+  [RUN_STATUS.ACCEPTED_BLOCKED]: { listLabel: '· accepted_blocked', notificationTitle: 'FlowCrew: Blocked outcome accepted' },
   [RUN_STATUS.FAILED]: { listLabel: '✗ failed  ', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.SHIPPED]: { listLabel: '· shipped ', notificationTitle: 'FlowCrew: shipped' },
   [RUN_STATUS.CEILING_HIT]: { listLabel: '· ceiling_hit', notificationTitle: 'FlowCrew: ceiling_hit' },

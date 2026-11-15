@@ -240,7 +240,7 @@ describe('terminal final contract workflow behavior', () => {
       modelPass: false,
       modelSuccess: false,
       terminalStudyComplete: true,
-      outcome: 'study_complete_without_model_success',
+      outcome: 'accepted',
     });
   });
 

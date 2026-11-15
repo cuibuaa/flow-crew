@@ -31,7 +31,6 @@ import { startDashboard } from '../src/dashboard.js';
 vi.mock('../src/evidence-ledger.js', async original => ({
   ...await original<typeof import('../src/evidence-ledger.js')>(), evidenceContext: () => 'Synthetic evidence reference.',
 }));
-vi.mock('../src/recorded-command.js', () => ({ startCommandRecorder: async () => ({ command: 'fixture-recorder', close: async () => {} }) }));
 
 const role: AgentConfig = { name: 'fixture', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'System.' };
 const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
@@ -114,7 +113,7 @@ describe('worker attempt entry', () => {
     for (const offset of [0, 1]) {
       const created = createdRun();
       const gate = path === 'review';
-      const run = vi.fn<Adapter['run']>(async () => ({ output: gate ? JSON.stringify({ pass: true, reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } }) : valid, exitCode: 0, duration_ms: 0 }));
+      const run = vi.fn<Adapter['run']>(async () => ({ output: gate ? JSON.stringify({ outcome: 'accepted', reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } }) : valid, exitCode: 0, duration_ms: 0 }));
       const result = await runStage({ run }, { ...created, projectDir: project, runDir: created.runDirPath,
         stageId: 'work', role, dependsOn: [], promptTemplate: 'Task', artifactContract: contract,
         timeout_ms: limit + offset, deadlineClock: clock(), retries: path === 'timeout-retry' ? 3 : 0,
@@ -150,7 +149,7 @@ describe('real scheduler routing through the entry owner', () => {
         state.stages.work = rependStageStatus(previous, path === 'timeout-retry' ? 10 : 0);
         writeStageStatus(project, created.runId, 'work', state.stages.work);
       }
-      const run = vi.fn<Adapter['run']>(async (_prompt, _role, opts) => ({ output: opts.outputSchema?.anyOf ? JSON.stringify({ pass: true, reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } })
+      const run = vi.fn<Adapter['run']>(async (_prompt, _role, opts) => ({ output: opts.outputSchema?.properties?.outcome ? JSON.stringify({ outcome: 'accepted', reason: 'Checked.', criteria: {}, audit_findings: { version: 1, findings: [] } })
         : stage.decision ? JSON.stringify({ successor: 'next', reason: 'Selected.' }) : valid, exitCode: 0, duration_ms: 0 }));
       const transition = deadline.transitionTechnicalRetryBudget;
       // Inject an excessive request at budget selection; entry and its comparison stay real.

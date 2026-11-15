@@ -1,3 +1,5 @@
+import { EngineStateError } from '../src/engine-integrity.js';
+import { runStage } from '../src/worker.js';
 import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -12,8 +14,8 @@ import { appendEvidence, captureProjectTree } from '../src/evidence-ledger.js';
 import { stageFixtureCommand } from './test-support/stage-command.js';
 import { readRunEvents } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
-import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+import { fcGlobalDir, readRunState, writeRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
+
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
@@ -43,8 +45,8 @@ let reproduction: number;
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review independently.' };
 const sessionId = '11111111-1111-4111-8111-111111111111';
 const finding = () => ({ id: 'report', paths: ['docs/report.md'], reason: 'The report needs repair.', class: 'criterion_unmet' as const, criterion_ids: ['criterion'], invalidates_plan: false, repair_role: 'coder', reproduction });
-const rejected = () => ({ pass: false, reason: 'Reproduced a report defect.', criteria: { criterion: { status: 'fail', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [finding()] }, repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the report.' } });
-const passed = () => ({ pass: true, reason: 'The report meets the brief.', criteria: { criterion: { status: 'pass', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [] } });
+const rejected = () => ({ outcome: 'rejected_repairable', reason: 'Reproduced a report defect.', criteria: { criterion: { status: 'fail', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [finding()] } });
+const passed = () => ({ outcome: 'accepted', reason: 'The report meets the brief.', criteria: { criterion: { status: 'pass', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [] } });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
 const options = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: 'Review the report.', projectDir, runId, runDir,
   retries: 0, timeout_ms: 10000, deadlineClock: time.clock, isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
@@ -57,18 +59,41 @@ beforeEach(async () => {
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review'], '---\ncriteria: [{id: criterion, text: Deliver the complete report.}]\n---\nDeliver the complete report.'));
   writeFileSync(runRecordPath(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
-  // This fixture's criterion requires the report. Record the actual failing
-  // predicate; a citation alone must never manufacture repair authority.
-  const treeHash = captureProjectTree(projectDir, '', runDir).hash;
-  const command = 'test -s docs/report.md';
-  const result = await stageFixtureCommand({ role: 'test', command: '/bin/sh', args: ['-c', command],
-    display: 'Required report exists', cwd: projectDir });
-  expect(result.exitCode).toBe(1);
-  reproduction = appendEvidence(runDir, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
-    commandId: 'required-report', command, context: { cwd: projectDir, shell: '/bin/sh' },
-    exitCode: result.exitCode, outputDigest: 'missing-report', treeHash, treeAfterHash: treeHash }).sequence;
+  reproduction = 1; // Optional citation syntax; it supplies no engine authority.
+
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+
+describe('stage resource policy admission', () => {
+  it('refuses an absent run record before invoking the adapter or writing a policy', async () => {
+    rmSync(runRecordPath(runDir, 'run.json'));
+    let calls = 0;
+    const result = runStage({ async run() { calls++; return { output: JSON.stringify(passed()), exitCode: 0, duration_ms: 1 }; } }, options());
+    await expect(result).rejects.toBeInstanceOf(EngineStateError);
+    await expect(result).rejects.toThrow('ENGINE_STATE_REFUSED: stage requires run.json and its resourcePolicy');
+    expect(calls).toBe(0);
+    expect(existsSync(runRecordPath(runDir, 'run.json'))).toBe(false);
+  });
+  it('snapshots missing policy with recorded workflow retry values once before invocation', async () => {
+    const initial = readRunState(projectDir, runId);
+    delete initial.resourcePolicy;
+    writeRunState(projectDir, runId, initial);
+    writeFileSync(runRecordPath(runDir, 'workflow.yaml'), 'name: fixture\ndefaults: {max_retries: 4}\nstages: [{id: review, role: qa, max_retries: 2}]\n');
+    const snapshots: unknown[] = [];
+    const adapter: Adapter = { async run() {
+      snapshots.push(readRunState(projectDir, runId).resourcePolicy);
+      return { output: JSON.stringify(passed()), exitCode: 0, duration_ms: 1 };
+    } };
+    expect((await runStage(adapter, options())).exitCode).toBe(0);
+    writeFileSync(runRecordPath(runDir, 'workflow.yaml'), 'name: fixture\ndefaults: {max_retries: 9}\nstages: [{id: review, role: qa, max_retries: 8}]\n');
+    expect((await runStage(adapter, options())).exitCode).toBe(0);
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0]).toMatchObject({ failureRetries: 4, stageFailureRetries: { review: 2 }, resultCorrections: 1,
+      adapterRetryDelays: [30000, 60000, 120000] });
+    expect(snapshots[1]).toEqual(snapshots[0]);
+    expect(readRunState(projectDir, runId).resourcePolicy).toEqual(snapshots[0]);
+  });
+});
 
 describe('stage record constraints before settlement', () => {
   it.each(['/outside', ['..', 'outside'].join('/'), 'docs/../outside', 'docs//report.md', './report.md', 'docs/', 'docs\\report.md', 'docs/\0report.md', ''])('rejects the unsafe artifact path %j at declaration and use', path => {
@@ -129,8 +154,7 @@ describe('informational citations preserve independent refusals', () => {
     expect(AuditFindingsSchema.parse(record.audit_findings)).toEqual(record.audit_findings);
     expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     // Accepting the citation must preserve the real unmet-outcome rejection.
-    expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: expect.stringContaining(record.reason),
-      findings: { confirmed: [expect.objectContaining({ reason: record.reason, reproduction })], unconfirmed: [] } });
+    expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ outcome: 'rejected_repairable', pass: false, reason: expect.stringContaining(record.reason) });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
     // The same string remains unusable as a writable artifact capability.
     expect(ArtifactPathSchema.safeParse(path).success).toBe(false);

@@ -29,9 +29,9 @@ export async function runWorkflowIterations(
     if (!stageIds.length) return false;
     recordRunEvent(projectDir, runId, { type: 'iteration_completed', runId, timestamp: new Date().toISOString(), iteration,
       detail: `Retained budget handoff for ${stageIds.join(', ')}; ${iteration}/${maxIterations} iterations spent`, source: 'scheduler' });
-    if (state.maxContinuations === undefined && iteration >= maxIterations || continuationExhausted(state)) {
+    if (state.resourcePolicy?.continuations === undefined && iteration >= maxIterations || continuationExhausted(state)) {
       await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'bounded_attempts',
-        detail: `Retained stage work needs continuation, but ${continuationExhausted(state) ? 'declared continuation budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
+        detail: `Retained stage work needs continuation, but ${continuationExhausted(state) ? 'resourcePolicy.continuations' : 'resourcePolicy.iterations'} is exhausted (${iteration}/${maxIterations}).`,
         eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry });
     }
     return true;
@@ -64,7 +64,7 @@ export async function runWorkflowIterations(
 
     if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
-      if (state.maxContinuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
+      if (state.resourcePolicy?.continuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
       continue;
     }
 
@@ -91,7 +91,7 @@ export async function runWorkflowIterations(
     state = readRunState(projectDir, runId);
     if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
-      if (state.maxContinuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
+      if (state.resourcePolicy?.continuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
       continue;
     }
     // Ordinary iteration evidence used to live inside research advancement.

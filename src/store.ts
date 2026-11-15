@@ -202,7 +202,7 @@ export function isContinuingStage(stage: StageStatus): boolean {
 
 /** The declaration limits each stage's retained budget slices; interruptions
  * have no continuation marker and spend neither this allowance nor iterations. */
-export function continuationExhausted(state: StoreState, allowance = state.maxContinuations): boolean {
+export function continuationExhausted(state: StoreState, allowance = state.resourcePolicy?.continuations ?? state.maxContinuations): boolean {
   return allowance !== undefined && Object.values(state.stages).some(stage =>
     stage.continuation && (stage.attempts ?? []).filter(attempt => attempt.continuation
       && (attempt.iteration ?? 1) === (state.currentIteration ?? 1)).length > allowance);
@@ -484,6 +484,11 @@ export interface StoreState {
   stageDurationLimitMs?: number;
   currentIteration?: number;
   gateRetryRound?: { iteration: number; round: number };
+  resourcePolicy?: {
+    iterations: number; visits: number; plannerAttempts: number; resultCorrections: number;
+    technicalRetries: number; failureRetries: number; stageFailureRetries: Record<string, number>;
+    adapterRetryDelays: number[]; continuations?: number; research?: ResearchConfig['budget'];
+  };
   maxIterations?: number;
   maxContinuations?: number;
   maxRetries?: number;
@@ -569,6 +574,8 @@ export interface GateVerdict {
   findings?: import('./scoped-audit-repair.js').FindingAssessment;
   validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'command' | 'args' | 'env' | 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed' | 'sourceBound' | 'totals' | 'testsRun' | 'failureCount'>
     & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: string; measurement: import('./project-validation.js').ValidationMeasurement }>;
+  outcome?: import('./scoped-audit-repair.js').GateOutcome;
+  /** Read projection for existing consumers; new answers author only outcome. */
   pass: boolean;
   reason?: string;
   repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };
@@ -576,14 +583,10 @@ export interface GateVerdict {
   refusal?: { kind: 'repairability' | 'validation_regression' | 'validation_unresolved' | 'declared_output' | 'audit_findings' | 'research_outcome_absent' | 'research_outcome_invalid' | 'contradiction' | 'criterion_evidence' | 'numeric_evidence' | 'score_contract' | 'missing_verdict' };
 }
 export const VERDICT_CONTRACT_DOC = 'A gate returns its verdict as the final structured JSON answer matching its active result schema; the engine validates it and publishes verdict_<stage_id>.json. Stage templates must not instruct stages to write verdict files or other engine-owned files. '
-  + 'Verdict fields: {"pass": true|false, "reason": "<why>"} (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
-  + 'Gate reviewers receive the injected finding-class policy and must ground every rejecting finding. '
-  + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
-  + 'Use irreparable only when no repair or re-plan can undo the observed failure; it ends the run escalated and preserves the rejection. '
-  + 'A repair requires a completed nonzero engine validation record or a finding citing a failed reviewer command in the evidence ledger; a rejecting finding without a confirmed reproduction is invalid and uses result correction. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
+  + 'The injected result schema and FINDING_POLICY_TEXT define the single verdict contract for every gate role and mode.';
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
-export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';
+export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, artifactSummary, reason';
 
 const SETTLED_STAGE_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED] as const;
 const SATISFIED_STAGE_DEPENDENCY_STATUSES = [STAGE_STATUS.COMPLETE] as const;

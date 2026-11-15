@@ -53,7 +53,7 @@ describe('a passing verdict is the record', () => {
   it('does not ask gates for documents beyond declared outputs while rejections keep findings', () => {
     const qa = loaded('qa');
     expect(qa).toContain("Return the scheduler's typed verdict with reproducible evidence references");
-    expect(qa).toContain('on rejection, whether repair is possible');
+    expect(qa).toContain('injected verdict contract');
     expect(base.replace(/\s+/g, ' ')).toContain("Return the scheduler's schema-validated final result");
   });
 

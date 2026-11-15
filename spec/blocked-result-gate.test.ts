@@ -67,7 +67,7 @@ describe('a blocked author result goes to its gate', () => {
     }
     expect(reviews[0]).toContain('"kind":"declaration","stageId":"implement","attemptIndex":1,"status":"blocked"');
     expect(reviews[0]).toContain('evidence-ledger.jsonl');
-    expect(reviews[0]).toContain('"irreparable"');
+    expect(reviews[0]).toContain('"rejected_irreparable"');
     expect(final.status).toBe('escalated');
     expect(final.failureReason).toContain('Blocker confirmed by reproduction');
   });
@@ -90,8 +90,8 @@ describe('a blocked author result goes to its gate', () => {
     const { final, calls, reviews } = await run([{ pass: false, reason: 'Confirmed blocker has a recovery route',
       repairability: { version: 1, disposition: 'repairable', evidence: 'exact recorded paths can request scope readmission' } },
     { pass: true, reason: 'cleanup and delivery verified' }], { implement: [blocked] });
-    expect(reviews[0]).toContain('A reported blocker needs independent reproduction; it does not establish irreparability');
-    expect(reviews[0]).toContain('Use repairability \"irreparable\" only with reproduced evidence that no available repair can meet the brief');
+    expect(reviews[0]).toContain('Independent evidence is required');
+    expect(reviews[0]).toContain('Use rejected_irreparable when no available repair can meet the brief');
     expect(reviews[0]).not.toContain('Real, and the brief does not accept a blocked report');
     expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(final.status).toBe('complete');

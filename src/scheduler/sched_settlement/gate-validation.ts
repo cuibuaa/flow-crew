@@ -6,13 +6,12 @@ import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeFileSync } from '../../engine-fs.js';
 import { engineValidation } from '../../engine-validation.js';
-import { confirmedRepairFindings } from './gate-archives.js';
 import { runProcessAbortSignal } from '../../adapters/base.js';
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
 import { readStageStatus, readRunState, updateRunState, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 import {
-  reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, projectValidationResult, evaluateValidationDelta, runProjectCommand,
+  reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, projectValidationResult, evaluateValidationDelta,
   type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationLimits, type ValidationDeltaResult,
 } from '../../project-validation.js';
 import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, validationBatch, validationForTree, VALIDATION_FACT_VERSION, type ValidationFact } from '../../evidence-ledger.js';
@@ -149,23 +148,6 @@ export async function validateSettledTree(projectDir: string, runId: string): Pr
     return true;
   };
   try {
-    if (!await validate()) return false;
-    const stage = state.planControl?.stages.find(stage => stage.id === author.stageId);
-    const findings = stage?.retry_to && state.gateRetryRound ? confirmedRepairFindings(base, stage.retry_to, state.gateRetryRound) : [];
-    for (const finding of findings) {
-      if (control.signal.aborted) break;
-      if (!finding.record.context || readEvidence(base).some(entry => entry.kind === 'command'
-        && entry.reproductionOf === finding.record.sequence && entry.sequence > author.sequence)) continue;
-      const before = captureProjectTree(projectDir, briefAt(base), base);
-      const replay = await runProjectCommand({ role: 'test', command: finding.record.context!.shell,
-        args: ['-c', finding.record.command!], display: finding.record.command!, cwd: finding.record.context!.cwd, runDir: base,
-        timeoutMs: finding.record.timeoutMs, abortSignal: control.signal });
-      appendEvidence(base, { kind: 'command', owner: 'code', stageId: author.stageId, attemptIndex: author.attemptIndex,
-        commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode, unfinished: replay.unfinished,
-        outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
-        treeHash: before.hash, treeAfterHash: captureProjectTree(projectDir, briefAt(base), base).hash, reproductionOf: finding.record.sequence });
-    }
-    // A replay may write; bind its final tree before releasing review.
     return await validate();
   } finally {
     clearInterval(timer);
@@ -222,18 +204,10 @@ export function currentValidationResults(projectDir: string, runId: string): Pro
   });
 }
 
-/** Completed nonzero exits are repair facts, without another reproduction. */
-export function currentValidationRegressions(projectDir: string, runId: string): NonNullable<ValidationFact['regressions']> {
+/** Only declared completed nonzero exits supply the operator validation floor. */
+export function currentValidationFailures(projectDir: string, runId: string): ProjectValidationBaseline['results'] {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash, plan?.baseline.discovery.commands);
   if (fact?.validationVersion !== VALIDATION_FACT_VERSION || fact.resourceState !== 'complete') return [];
-  return (fact.executions.at(-1)?.commands ?? []).flatMap((command, index) => {
-    if (command.exitCode === 0) return [];
-    return [{ id: `validation_${index}`, paths: ['.'], criterion_ids: [], invalidates_plan: false,
-      repair_role: 'coder', reason: `Engine validation record ${fact.sequence}: ${command.display} exited ${command.exitCode}`,
-      reproduction: fact.sequence, record: { version: 1 as const, sequence: fact.sequence, at: fact.at,
-        kind: 'command' as const, commandId: `validation-${index}`, owner: 'code' as const, stageId: fact.stageId, attemptIndex: fact.attemptIndex,
-        command: command.display ?? null, exitCode: command.exitCode ?? null, treeHash: fact.treeHash, treeAfterHash: fact.treeHash,
-        validationRecord: fact.sequence } }];
-  });
+  return (fact.executions.at(-1)?.commands ?? []).filter(command => Number.isInteger(command.exitCode) && command.exitCode !== 0 && !command.unfinished);
 }

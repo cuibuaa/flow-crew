@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
+import { runStage } from '../src/worker.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,7 @@ import { fixtureResult } from './test-support/declared-dispatch.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+
 
 let root: string, project: string, previousStore: string;
 beforeEach(() => {

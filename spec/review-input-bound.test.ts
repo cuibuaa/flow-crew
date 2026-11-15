@@ -105,7 +105,7 @@ describe('review stages keep their evidence inside the adapter limit', () => {
     expect(changed).toContain('No configured validation fact covers the current tree; validation unmeasured.');
   });
 
-  it('projects replay identity, exit and tree facts without output bodies and uses the existing input bound', () => {
+  it('omits historical replay facts and output bodies from stage input and uses the existing input bound', () => {
     appendEvidence(created.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
       commandId: 'probe', command: 'false', exitCode: 1 });
     const replay = appendEvidence(created.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
@@ -113,9 +113,7 @@ describe('review stages keep their evidence inside the adapter limit', () => {
       treeHash: 'before', treeAfterHash: 'after', evidence: 'REPLAY_OUTPUT_BODY'.repeat(10_000), outputDigest: 'digest' });
     const context = evidenceContext(project, created.runDirPath, 'review', null, 4_000);
     const facts = JSON.parse(context.split('Ledger facts:\n')[1].split('\n')[0]).facts;
-    expect(facts).toEqual([{ kind: 'command', sequence: replay.sequence, stageId: 'repair', attemptIndex: 1,
-      commandId: 'closure-finding', command: 'false', reproductionOf: 1, exitCode: 1, unfinished: true,
-      treeHash: 'before', treeAfterHash: 'after' }]);
+    expect(facts).toEqual([]);
     expect(context).not.toContain('REPLAY_OUTPUT_BODY');
     expect(evidenceContext(project, created.runDirPath, 'review', null, 100)).toContain('ledger_exceeds_inline_bound');
   });

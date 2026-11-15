@@ -158,16 +158,11 @@ describe('control reaches the invocation with verified retirement', () => {
     expect(guidanceForExecution([scheduler, operator], 2)).toEqual([operator]);
   });
 
-  it('retains native gate facts without trees and tree-binds engine-recorded reproduction', async () => {
+  it('retains native gate command facts without manufacturing tree identities', async () => {
     const { run, options } = fixture();
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       opts.onCommandLifecycle?.({ phase: 'started', id: 'native', command: 'true', timestamp: new Date().toISOString() });
       opts.onCommandLifecycle?.({ phase: 'completed', id: 'native', exitCode: 0, output: 'native output', timestamp: new Date().toISOString() });
-      const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-      const request = JSON.stringify({ command: 'exit 1', cwd: projectDir, shell: '/bin/sh' });
-      const result = await execWithStdin('/bin/sh', ['-c', `${client} '${request}'`], '', { cwd: projectDir, timeout_ms: 3_000 });
-      expect(result.exitCode).toBe(0);
-      expect(JSON.parse(result.output).record).toMatchObject({ exitCode: 1, owner: 'code', treeHash: expect.any(String), treeAfterHash: expect.any(String) });
       return { output: 'Captured facts', exitCode: 1, duration_ms: 1 };
     } };
     await runStage(adapter, { ...options, isGate: true });

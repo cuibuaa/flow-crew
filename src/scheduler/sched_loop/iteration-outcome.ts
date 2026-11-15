@@ -2,7 +2,7 @@ import { runRecordPath } from '../../run-layout.js';
 // Boundary: Choose next iteration or truthful completion/failure from settled gates, required obligations and finite budgets; no stage execution.
 import { Adapter } from '../../adapters/base.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
-import { StageConfig } from '../sched_admission/configuration.js';
+import { admitResourcePolicy, StageConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { allDone, anyFailed } from '../sched_scope/stage-group.js';
@@ -23,6 +23,8 @@ export async function concludeWorkflowIteration(
   projectDir: string, runId: string, runDirPath: string, adapter: Adapter,
   _injectedDispatchStages: Set<string>,
 ): Promise<IterationDisposition> {
+    const policy = state.resourcePolicy ??= admitResourcePolicy({ ...state, maxIterations, maxRetries: maxInnerRetries });
+    maxIterations = policy.iterations; maxInnerRetries = policy.visits;
     // A retry stage that never ran because every related gate accepted the
     // work has a truthful terminal disposition: skipped, not indefinitely
     // pending and not falsely complete.
@@ -169,18 +171,20 @@ export async function concludeWorkflowIteration(
         state.currentIteration ?? iteration,
         runDirPath,
       ).stageIds;
-      const detail = unresolvedStageIds.length > 0
-        ? `Required stage obligation(s) remain unresolved: ${unresolvedStageIds.join(', ')}.`
-        : iteration === maxIterations
-        ? `Workflow iteration budget exhausted: gates did not pass or required work did not complete (iteration ${iteration}/${maxIterations}).`
-        : `Workflow stopped after bounded stage/repair attempts: gates did not pass or required work did not complete (iteration ${iteration}/${maxIterations}; gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}).`;
+      const endingDecision = state.decisionGraph?.records.at(-1);
+      const legacyVisitBound = !endingDecision && innerRetriesUsed >= maxInnerRetries;
+      const detail = [endingDecision?.outcome === 'refused' ? `${endingDecision.stageId}: ${endingDecision.reason}`
+        : legacyVisitBound ? `Bound resourcePolicy.visits reached (${innerRetriesUsed}/${maxInnerRetries}).`
+        : iteration === maxIterations ? 'Bound resourcePolicy.iterations reached.' : 'No successor: workflow quiescent.',
+        ...(unresolvedStageIds.length ? [`Required stage obligation(s) remain unresolved: ${unresolvedStageIds.join(', ')}.`] : []),
+        `iteration ${iteration}/${maxIterations}`].join(' ');
       const failedStages = Object.values(state.stages).filter(stage => stage.status === STAGE_STATUS.FAILED);
       const providerRefused = failedStages.some(stage => stage.attempts?.at(-1)?.providerFailure?.kind === 'refusal'
         || stage.providerFailure?.kind === 'refusal');
       state = await concludeRun(state, { status: RUN_STATUS.INCOMPLETE,
-        reasonCode: providerRefused ? 'provider_refusal' : 'bounded_attempts',
+        reasonCode: providerRefused ? 'provider_refusal' : endingDecision?.bound || legacyVisitBound || iteration === maxIterations && state.decisionGraph?.records.at(-1)?.outcome !== 'refused' ? 'bounded_attempts' : 'no_successor',
         detail, eventFields: () => ({ iteration, detail: state.status }), writeCampaignEntry });
-      log.info({ runId, iteration }, 'Admitted stage and repair attempts exhausted, run incomplete');
+      log.info({ runId, iteration }, 'Workflow stopped; recorded conclusion names the ending decision');
       return { kind: 'settled', state };
     }
 }

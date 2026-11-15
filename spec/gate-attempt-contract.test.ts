@@ -143,7 +143,7 @@ describe('explicit gate repairability', () => {
     expect(result.final.failureReason).toContain('Irreparable gate rejection');
     const retained = JSON.parse(readFileSync(runRecordPath(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
     expect(retained.audit_findings.findings[0].reason).toBe('Retained immutable fact');
-    expect(retained.repairability.disposition).toBe('irreparable');
+    expect(retained.outcome).toBe('rejected_irreparable');
   });
 
   it('keeps explicit repairable rejections on the bounded repair route', async () => {
@@ -314,7 +314,7 @@ describe('gate verdict and score contracts', () => {
     expect(citedPath).toBe(expected);
     expect(readFileSync(runRecordPath(result.runDirPath, 'stages', GATE_ID, 'output.md'), 'utf-8')).toContain(expected);
     expect(existsSync(expected)).toBe(true);
-    expect(JSON.parse(readFileSync(expected, 'utf-8'))).toMatchObject({ pass: false });
+    expect(JSON.parse(readFileSync(expected, 'utf-8'))).toMatchObject({ outcome: 'rejected_repairable' });
   });
 
   it('refuses a scored gate missing its required numeric value without dispatching product repair', async () => {

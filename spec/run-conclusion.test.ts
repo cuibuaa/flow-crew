@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { readRunEvents } from '../src/run-events.js';
-import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
+import { admitResourcePolicy, StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import { readOperationalProjection } from '../src/cli-events.js';
 import { mergeTaskWithRunState } from '../src/cli-daemon.js';
@@ -43,6 +43,17 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+it.each([undefined, 3])('snapshots the existing visit bound without enlarging it (recorded=%s)', recorded => {
+  const state = readRunState(project, runId);
+  state.maxRetries = recorded === undefined ? 5 : 2;
+  if (recorded !== undefined) state.decisionGraph = { records: [], enabled: {}, visits: {}, maxVisits: recorded };
+  const policy = admitResourcePolicy(state);
+  expect(policy.visits).toBe(recorded === undefined ? 5 : 2);
+  state.maxRetries = 9;
+  expect(admitResourcePolicy(state)).toBe(policy);
+  expect(policy.visits).toBe(recorded === undefined ? 5 : 2);
+});
+
 function expectOwnerConclusion(status: string) {
   const events = readRunEvents(project, runId);
   expect(events.filter(event => event.type === 'run_status_changed' && event.runStatus === status)).toHaveLength(1);
@@ -77,7 +88,7 @@ describe('terminal conclusions from settled evidence', () => {
       current: [], delta: [{ role: 'test', state: 'unresolved', reason: 'vitest ENOENT; failure identity/count is unavailable', newFailureIdentifiers: [] }],
     }));
     const state = await finishIteration();
-    expect(state).toMatchObject({ status: 'incomplete', reasonCode: 'bounded_attempts' });
+    expect(state).toMatchObject({ status: 'incomplete', reasonCode: 'no_successor' });
     expectOwnerConclusion('incomplete');
   });
 

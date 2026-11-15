@@ -52,7 +52,7 @@ describe('configured validation has one attempt owner and read-only gate binding
       reconcileCompletedStageAttempts: () => ({ violation: false, }),
     });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      return fixtureResult({ output: JSON.stringify({ pass: true, reason: 'Independent review passed.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+      return fixtureResult({ output: JSON.stringify({ outcome: 'accepted', reason: 'Independent review passed.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     const counts: number[] = [];
     for (let round = 0; round < 3; round++) {
@@ -84,7 +84,7 @@ describe('configured validation has one attempt owner and read-only gate binding
     let releasePeer!: () => void;
     const reviewClosed = new Promise<void>(resolve => { releasePeer = resolve; });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      return fixtureResult({ output: JSON.stringify({ pass: true, reason: 'Reviewed the original project.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'snapshot' }, opts);
+      return fixtureResult({ output: JSON.stringify({ outcome: 'accepted', reason: 'Reviewed the original project.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'snapshot' }, opts);
     } };
     await runner.runScopeSafeStageGroup([f.stage, peer], project, f.runId, 1, async stage => {
       if (stage.id === 'peer') {

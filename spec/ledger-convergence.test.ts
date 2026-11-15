@@ -410,12 +410,12 @@ describe('ledger convergence projection', () => {
 
     expect(counts).toEqual({
       executed: FC_TASK_STATUSES.length * expectedEngineCases,
-      aligned: 28,
-      wrap_up_required: 28,
+      aligned: 29,
+      wrap_up_required: 30,
       ledger_closed_engine_active: 7,
       not_comparable: 12,
       engineRunning: 6,
-      oldLedgerRunning: 25,
+      oldLedgerRunning: 26,
     });
     expect(reconcileFcTask(
       task('known-positive', 'in_progress', 1),

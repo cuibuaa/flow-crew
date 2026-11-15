@@ -10,7 +10,6 @@ import { runInNewContext } from 'node:vm';
 import * as net from 'node:net';
 import * as owner from '../src/adapters/base.js';
 import { runProjectCommand } from '../src/project-validation.js';
-import { startCommandRecorder } from '../src/recorded-command.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { cmdAuditReality } from '../src/reality-gate/audit-reality.js';
 import { runAllChecks, readRealityGateReport } from '../src/reality-gate/index.js';
@@ -103,36 +102,5 @@ describe('owned evidence waits for events unless its author declares an allowanc
     const log = readFileSync(runRecordPath(runDir, 'post_terminate_hook.log'), 'utf8');
     expect(log).toContain('hook receipt\n'); expect(log).toContain(`unfinished: ${seconds !== undefined}`);
     expect(log).toContain(`timeout_seconds: ${seconds ?? 'undeclared'}`);
-  });
-
-  it('recorder client and server retain a pending receipt beyond both former inactivity clocks', async () => {
-    const clientSocket = Object.assign(new EventEmitter(), { end: vi.fn(), destroy: vi.fn(), setTimeout: vi.fn(), write: vi.fn() });
-    const sent = deferred<string>();
-    const serverSocket = Object.assign(new EventEmitter(), { end: vi.fn((value: string) => sent.resolve(value)), destroy: vi.fn(), setTimeout: vi.fn(), setEncoding: vi.fn() });
-    let accept!: (socket: typeof serverSocket) => void;
-    vi.mocked(net.createServer).mockImplementation((_options, listener) => {
-      accept = listener as unknown as typeof accept;
-      const server = Object.assign(new EventEmitter(), {
-        listen: (_path: string, ready: () => void) => ready(), close: (done: () => void) => done(),
-      });
-      return server as unknown as net.Server;
-    });
-    const release = deferred<object>(), entered = deferred(), execute = vi.fn(async () => { entered.resolve(); return release.promise; });
-    const recorder = await startCommandRecorder(root(), execute);
-    try {
-      const paths = [...recorder.command.matchAll(/'([^']*)'/g)].map(match => match[1]);
-      runInNewContext(readFileSync(paths[1], 'utf8'), {
-        require: () => ({ connect: () => clientSocket }),
-        process: { argv: ['node', paths[1], paths[2], '{}'], stdout: { write: vi.fn() } }, console,
-      });
-      accept(serverSocket);
-      serverSocket.emit('data', JSON.stringify({ command: 'fixture', cwd: root(), shell: '/bin/sh' })); serverSocket.emit('end');
-      await entered.promise;
-      // Intercepting both socket APIs exercises their inactivity policy without wall time.
-      expect(clientSocket.setTimeout).not.toHaveBeenCalled(); expect(serverSocket.setTimeout).not.toHaveBeenCalled();
-      expect(serverSocket.end).not.toHaveBeenCalled();
-      release.resolve({ exitCode: 0, stdout: 'untouched receipt' });
-      expect(await sent.promise).toBe('{"exitCode":0,"stdout":"untouched receipt"}\n');
-    } finally { release.resolve({}); await recorder.close(); }
   });
 });

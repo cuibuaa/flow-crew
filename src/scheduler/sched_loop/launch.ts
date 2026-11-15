@@ -38,7 +38,7 @@ export function workflowContinuation(state: StoreState, projectDir: string, runI
     : [];
   const budgetContinuation = Object.values(state.stages).some(isContinuingStage);
   const iteration = currentIteration + Number(gateIds.length > 0 || budgetContinuation && state.maxContinuations === undefined);
-  const maxIterations = state.maxIterations ?? admitted?.defaults.max_iterations ?? loadDefaults().max_iterations;
+  const maxIterations = state.resourcePolicy?.iterations ?? state.maxIterations ?? admitted?.defaults.max_iterations ?? loadDefaults().max_iterations;
   if (budgetContinuation && continuationExhausted(state)) throw new Error('Cannot resume: declared continuation budget exhausted.');
   if (iteration > maxIterations) throw new Error(`Cannot resume: iteration budget exhausted (${currentIteration}/${maxIterations}); no admitted iteration remains.`);
   return { iteration, gateIds };
@@ -215,7 +215,7 @@ export function prepareWorkflowLaunch(
     for (const s of baseStages) {
       mkdirSync(runRecordPath(runDirPath, 'stages', s.id), { recursive: true });
     }
-    maxIterations = state.maxIterations ?? maxIterations;
+    maxIterations = state.resourcePolicy?.iterations ?? state.maxIterations ?? maxIterations;
     // Preserve the continuation's iteration, lifecycle clock and signals.
     resumingExistingRun = isResumableRunStatus(state.status);
     if (!resumingExistingRun) for (const s of baseStages) {

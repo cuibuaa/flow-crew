@@ -12,7 +12,7 @@ import { withRunProcessOwnership, runProcessAbortSignal, type Adapter, type Agen
 import { scheduleDeadline, type AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { type ResearchConfig, type StoreState, STAGE_STATUS, RUN_STATUS, continuationExhausted, isPausedRunStatus,
   isTerminalRunStatus, isContinuingStage, readRunState, readStageOutput, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
-import { type StageConfig, type WorkflowConfig, parseDispatchedStageConfig } from '../sched_admission/configuration.js';
+import { type StageConfig, type WorkflowConfig, admitResourcePolicy, parseDispatchedStageConfig } from '../sched_admission/configuration.js';
 import { createDispatchAdmission } from '../sched_admission/dispatch.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
@@ -44,11 +44,11 @@ export function admitResearchStages(research: ResearchConfig, stages: StageConfi
     criteria, projectDir, runDir: directory });
 }
 const save = (path: string, value: unknown) => atomicWrite(path, JSON.stringify(value, null, 2) + '\n');
-export function researchStopReason(state: ResearchInstrumentState): string | undefined {
+export function researchStopReason(state: ResearchInstrumentState, budget = state.config.budget): string | undefined {
   if (state.error) return 'instrument_execution_error';
   if (state.stop) return 'instrument_stop';
   if (state.deadline !== null && Date.now() >= state.deadline) return 'wall_budget_exhausted';
-  if (state.history.filter(h => h.phase !== 'initialize' && h.phase !== 'finalize').length >= state.config.budget.max_rounds) return 'round_budget_exhausted';
+  if (state.history.filter(h => h.phase !== 'initialize' && h.phase !== 'finalize').length >= budget.max_rounds) return 'round_budget_exhausted';
   return undefined;
 }
 export async function runResearchLoop(project: string, run: string, directory: string, workflow: WorkflowConfig,
@@ -56,7 +56,8 @@ export async function runResearchLoop(project: string, run: string, directory: s
   availableSkills?: string, attemptDeadlineClockFactory?: () => AttemptDeadlineClock): Promise<StoreState> {
   let state = readRunState(project, run);
   if (isTerminalRunStatus(state.status)) return state;
-  const research = state.research!;
+  const policy = admitResourcePolicy(state, workflow);
+  const research = { ...state.research!, budget: policy.research ?? state.research!.budget };
   if (research.protocol !== RESEARCH_PROTOCOL) throw new Error(`Active research requires ${RESEARCH_PROTOCOL}; legacy records are read-only`);
   const stages = workflow.stages;
   const recorded = readBriefCriteriaArtifact(directory);
@@ -69,12 +70,12 @@ export async function runResearchLoop(project: string, run: string, directory: s
   if (!continuing) save(runRecordPath(directory, 'brief_criteria.json'), criteria);
   recordAdmittedPlan(state, stages, directory, 'Versioned instrument declaration fixes author and optional project review', admission);
   state.stages = Object.fromEntries(stages.map(stage => [stage.id, state.stages[stage.id] ?? { status: STAGE_STATUS.PENDING, retries: 0 }]));
-  state.maxIterations = Math.max(state.maxIterations ?? 1, research.budget.max_rounds);
+  state.maxIterations = policy.iterations;
   writeRunState(project, run, state);
   const initialized = await initializeResearchInstrument(project, directory, research, state.startedAt);
   const wallExpired = () => initialized.deadline !== null && Date.now() >= initialized.deadline;
   const finish = async (reason: string, status: StoreState['status'] = RUN_STATUS.COMPLETE, detail = reason) => {
-    const reasonCode = status === RUN_STATUS.ESCALATED ? 'irreparable_gate_rejection' : status === RUN_STATUS.INCOMPLETE ? 'bounded_attempts' : status === RUN_STATUS.FAILED ? 'stage_failed' : 'workflow_complete';
+    const reasonCode = status === RUN_STATUS.ACCEPTED_BLOCKED ? 'accepted_blocked' : status === RUN_STATUS.ESCALATED ? 'irreparable_gate_rejection' : status === RUN_STATUS.INCOMPLETE ? 'bounded_attempts' : status === RUN_STATUS.FAILED ? 'stage_failed' : 'workflow_complete';
     const manifest = await finalizeResearchInstrument(directory, reason, { status, reasonCode, detail });
     const conclusion = manifest.conclusion ?? { status, reasonCode, detail };
     state = readRunState(project, run);
@@ -92,14 +93,14 @@ export async function runResearchLoop(project: string, run: string, directory: s
       if (isTerminalRunStatus(state.status)) return finish(state.reasonCode ?? state.status, state.status);
       if (isPausedRunStatus(state.status)) return state;
       if (Object.values(state.stages).some(isContinuingStage)) {
-        if (continuationExhausted(state, state.maxContinuations ?? state.maxIterations! - 1)) return finish('continuation_budget_exhausted', RUN_STATUS.INCOMPLETE);
+        if (continuationExhausted(state, policy.continuations ?? policy.iterations - 1)) return finish('continuation_budget_exhausted', RUN_STATUS.INCOMPLETE);
         rependContinuingStages(state, stages, project, run);
       }
       // Resume settles resource work before review or stop/finalization. Research
       // budgets bound authors; validation retains its separate resource allowance.
       if (!await validateSettledTree(project, run)) return readRunState(project, run);
       const measured = researchInstrumentState(directory);
-      const stop = researchStopReason(measured);
+      const stop = researchStopReason(measured, research.budget);
       if (stop) return finish(stop, measured.error ? RUN_STATUS.FAILED : RUN_STATUS.COMPLETE, measured.error ?? stop);
       const round = measured.history.filter(h => h.phase !== 'initialize' && h.phase !== 'finalize').length + 1;
       if (state.currentIteration !== round) for (const stage of stages) {
@@ -152,7 +153,8 @@ export async function runResearchLoop(project: string, run: string, directory: s
           if (isPausedRunStatus(state.status)) return state;
           const verdict = readGateEvaluation(project, reviewStage.id, run);
           review = { pass: verdict?.pass === true, reason: verdict?.reason ?? 'Project review unavailable', record: readGateVerdictDocument(directory, reviewStage.id)?.value };
-          irreparable = verdict?.repairability?.disposition === 'irreparable';
+          if (verdict?.pass && verdict.outcome === 'accepted_blocked') return finish('accepted_blocked', RUN_STATUS.ACCEPTED_BLOCKED, verdict.reason);
+          irreparable = verdict?.outcome === 'rejected_irreparable' || verdict?.repairability?.disposition === 'irreparable';
         }
         if (review?.pass === false) {
           recordResearchSubmission(directory, candidate, round, 'review_rejected', author, review);

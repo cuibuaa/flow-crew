@@ -15,10 +15,11 @@ import { runRecordPath } from '../src/run-layout.js';
 import { appendEvidence, captureProjectTree, readEvidence } from '../src/evidence-ledger.js';
 import { renderRunSummary } from '../src/run-summary.js';
 import { runDir, readRunState, readStageStatus, writeStageStatus } from '../src/store.js';
+
 import { runStage } from '../src/worker.js';
 import { createRun } from './test-support/create-run.js';
 import { settleGateEvaluation, readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { buildGateFixCorrectionContract, confirmedRepairFindings } from '../src/scheduler/sched_settlement/gate-archives.js';
+import { buildGateFixCorrectionContract } from '../src/scheduler/sched_settlement/gate-archives.js';
 
 let project: string, fixtureRoot: string;
 beforeEach(() => { fixtureRoot = mkdtempSync(join(tmpdir(), 'review-boundary-')); project = join(fixtureRoot, 'project'); mkdirSync(project); });
@@ -28,9 +29,8 @@ const finding = (kind: 'criterion_unmet' | 'regression' | 'advisory') => ({
   id: kind, class: kind, paths: ['value.txt'], reason: kind === 'advisory' ? 'Optional metadata hardening.' : 'The value must remain good.',
   criterion_ids: kind === 'criterion_unmet' ? ['value'] : [], invalidates_plan: false, repair_role: 'coder',
 });
-const verdict = (pass: boolean, findings: unknown[]) => ({ pass, reason: 'Independent review completed.',
+const verdict = (pass: boolean, findings: unknown[]) => ({ outcome: pass ? 'accepted' : 'rejected_repairable', reason: 'Independent review completed.',
   criteria: { value: { status: 'pass', evidence: 'Inspected value.txt.' } }, audit_findings: { version: 1, findings },
-  ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace the bad value.' } }),
 });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['value'] });
 describe('finding classes bound independent review', () => {
@@ -105,22 +105,7 @@ describe('finding classes bound independent review', () => {
       }
       const first = ++reviews === 1;
       const pass = kind === 'advisory' || !first;
-      let reproduction: number | undefined;
-      if (first) {
-        // Even a reproduced advisory receives no repair authority.
-        const command = kind === 'advisory' ? 'false' : kind === 'regression'
-          ? 'if test "$(git show HEAD:value.txt)" = good; then test "$(cat value.txt)" = good; else exit 0; fi'
-          : 'test "$(cat value.txt)" = good';
-        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-        const request = JSON.stringify({ command, cwd: project, shell: '/bin/sh' });
-        const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
-          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Independent value predicate', cwd: project, runDir: opts.runDir });
-        expect(response.exitCode).toBe(0);
-        const record = JSON.parse(response.stdout!).record;
-        expect(record.exitCode).toBe(1);
-        reproduction = record.sequence;
-      }
-      const findings = first ? [{ ...finding(kind), reproduction }, ...(kind === 'advisory' ? [] : [{ ...finding('advisory'), reproduction }])] : [];
+      const findings = first ? [{ ...finding(kind) }, ...(kind === 'advisory' ? [] : [{ ...finding('advisory') }])] : [];
       const record = verdict(pass, findings);
       record.criteria.value.status = kind === 'criterion_unmet' && first ? 'fail' : 'pass';
       return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 };
@@ -133,71 +118,18 @@ describe('finding classes bound independent review', () => {
     const summary = renderRunSummary(project, directory, final);
     if (kind === 'advisory') {
       expect(calls.map(call => call.stage)).toEqual(['implement', 'review']);
-      expect(final.stages.review.gate).toMatchObject({ pass: true, findings: { confirmed: [], unconfirmed: [], advisory: [finding('advisory')] } });
-      expect(readRunState(project, final.runId).stages.review.gate?.findings?.advisory).toHaveLength(1);
+      expect(final.stages.review.gate).toMatchObject({ outcome: 'accepted', pass: true });
       expect(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).toContain('Optional metadata hardening.');
-      expect(confirmedRepairFindings(directory, ['review'])).toEqual([]);
       expect(summary.toLowerCase()).toContain('advisory');
       expect(summary).toContain('Optional metadata hardening.');
     } else {
       expect(calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair_review', 'review']);
-      const obligations = confirmedRepairFindings(directory, ['review']);
-      expect(obligations.map(item => item.class)).toEqual([kind]);
       const repair = calls.find(call => call.stage === 'repair_review')!.prompt;
       const facts = JSON.parse(repair.split('# Gate repair facts\n')[1].split('\n')[0]);
-      expect(facts.confirmedFindings.review.map((item: { class: string }) => item.class)).toEqual([kind]);
       expect(facts.rejections.flatMap((rejection: { audit_findings: { findings: Array<{ class: string }> } }) => rejection.audit_findings.findings.map(item => item.class))).toEqual([kind]);
-      expect(readEvidence(directory).find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)).toMatchObject({ exitCode: 0 });
-      expect(readFileSync(runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1/engine_verdict_review.json'), 'utf8')).toContain('Optional metadata hardening.');
+      expect(readEvidence(directory).filter(entry => entry.kind === 'command')).toEqual([]);
+      expect(readFileSync(runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1/rejected_verdict_review.json'), 'utf8')).toContain('Optional metadata hardening.');
       expect(summary).toContain('Optional metadata hardening.');
-    }
-  });
-
-  it.each((['regression_absent', 'regression_passed', 'criterion_absent'] as const).flatMap(mode =>
-    (['reproduce', 'advisory', 'exhaust'] as const).map(correction => ({ mode, correction }))))(
-    'handles $mode via $correction in the existing attempt', async ({ mode, correction }) => {
-    const run = createRun(project, 'grounding', 'name: grounding\nstages: []\n', ['review'],
-      '---\ncriteria: [{id: value, text: Deliver the good value.}]\n---\nDeliver the good value.');
-    const record = verdict(false, [finding(mode === 'criterion_absent' ? 'criterion_unmet' : 'regression')]);
-    record.criteria.value.status = mode === 'criterion_absent' ? 'fail' : 'pass';
-    const treeHash = captureProjectTree(project, '', run.runDirPath).hash;
-    const command = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
-      commandId: 'passing', command: 'echo failed', exitCode: 0, outputDigest: 'exit-1-failure-prose',
-      context: { cwd: project, shell: '/bin/sh' }, treeHash, treeAfterHash: treeHash });
-    if (mode === 'regression_passed') Object.assign(record.audit_findings.findings[0]!, { reproduction: command.sequence });
-    let calls = 0;
-    const result = await runStage({ async run(prompt) {
-      calls++;
-      if (calls === 2) {
-        expect(prompt).toContain('Stage result correction');
-        expect(prompt).toContain('AUDIT_FINDINGS_INVALID: FINDING_REPRODUCTION_REQUIRED');
-        if (correction === 'advisory') {
-          Object.assign(record, { pass: true, audit_findings: { version: 1, findings: [finding('advisory')] } });
-          record.criteria.value.status = 'pass';
-          delete (record as Record<string, unknown>).repairability;
-        } else if (correction === 'reproduce') {
-          const failed = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
-            commandId: 'failed', command: 'false', exitCode: 1, outputDigest: 'failed',
-            context: { cwd: project, shell: '/bin/sh' }, treeHash, treeAfterHash: treeHash });
-          Object.assign(record.audit_findings.findings[0]!, { reproduction: failed.sequence });
-        }
-      }
-      return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 };
-    } }, {
-      stageId: 'review', role: { name: 'qa', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review.' },
-      dependsOn: [], promptTemplate: 'Review.', projectDir: project, runId: run.runId, runDir: run.runDirPath,
-      retries: 0, isGate: true, criterionRefs: ['value'], outputSchema: schema(),
-      artifactContract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json' }], reads: [], groups: [] },
-    });
-    expect(calls).toBe(2);
-    expect(readStageStatus(project, run.runId, 'review').attempts).toHaveLength(1);
-    expect(result.exitCode, result.friendlyError).toBe(correction === 'exhaust' ? 1 : 0);
-    if (correction === 'exhaust') {
-      expect(result.friendlyError).toContain('AUDIT_FINDINGS_INVALID: FINDING_REPRODUCTION_REQUIRED');
-      expect(existsSync(runRecordPath(run.runDirPath, 'verdict_review.json'))).toBe(false);
-    } else {
-      expect(readGateEvaluation(project, 'review', run.runId)).toMatchObject({ pass: correction === 'advisory',
-        findings: { confirmed: correction === 'reproduce' ? [expect.objectContaining({ class: mode === 'criterion_absent' ? 'criterion_unmet' : 'regression' })] : [], unconfirmed: [] } });
     }
   });
 
@@ -214,13 +146,7 @@ describe('finding classes bound independent review', () => {
     expect(validateFindingVerdict(advisory, [])).toBeUndefined();
     const regression = { ...verdict(false, [finding('regression')]), criteria: {} };
     expect(parseStageRecord(JSON.stringify(regression), empty)).toEqual(regression);
-    expect(validateFindingVerdict(regression, [])).toContain('FINDING_REPRODUCTION_REQUIRED');
-    const evidence = { ledger: [{ version: 1 as const, at: 'now', sequence: 1, kind: 'command' as const, owner: 'code' as const,
-      stageId: 'review', attemptIndex: 1, command: 'false', exitCode: 1, outputDigest: 'failed',
-      context: { cwd: project, shell: '/bin/sh' }, treeHash: 'tree', treeAfterHash: 'tree' }],
-      gate: { stageId: 'review', attemptIndex: 1, treeHash: 'tree' } };
-    Object.assign(regression.audit_findings.findings[0]!, { reproduction: 1 });
-    expect(validateFindingVerdict(regression, [], evidence)).toBeUndefined();
+    expect(validateFindingVerdict(regression, [])).toBeUndefined();
     const criterion = { ...verdict(false, [finding('criterion_unmet')]), criteria: {} };
     expect(validateFindingVerdict(criterion, [])).toMatch(/^AUDIT_FINDINGS_INVALID: FINDING_SHAPE_INVALID:/);
     expect(() => parseStageRecord(JSON.stringify(criterion), empty)).toThrow('STAGE_RECORD_INVALID:');
@@ -267,7 +193,8 @@ describe('finding classes bound independent review', () => {
   it('loads classless historical rejections without inventing a new class or rewriting their bytes', () => {
     const run = createRun(project, 'legacy', 'name: legacy\nstages: []\n', ['review']);
     const { class: _class, ...oldFinding } = finding('regression');
-    const old = { ...verdict(false, [oldFinding]), criteria: {} };
+    const { outcome: _outcome, ...answer } = verdict(false, [oldFinding]);
+    const old = { ...answer, pass: false, criteria: {} };
     const path = runRecordPath(run.runDirPath, 'verdict_review.json');
     const bytes = JSON.stringify(old); writeFileSync(path, bytes);
     writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0,
@@ -284,8 +211,6 @@ describe('finding classes bound independent review', () => {
       command: 'test legacy predicate', exitCode: 1 } };
     writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ engine_effective_pass: false,
       findings: { confirmed: [historical], unconfirmed: [] } }));
-    expect(confirmedRepairFindings(run.runDirPath, ['review'])).toEqual([historical]);
-    expect(confirmedRepairFindings(run.runDirPath, ['review'])[0]).not.toHaveProperty('class');
     expect(buildGateFixCorrectionContract(run.runDirPath, ['review'], { iteration: 1, round: 1 })).toContain(oldFinding.reason);
   });
 
@@ -296,7 +221,8 @@ describe('finding classes bound independent review', () => {
     const record = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
       commandId: 'old-probe', command: 'test legacy predicate', exitCode: 1, outputDigest: 'historical-output',
       context: { cwd: project, shell: '/bin/sh' }, treeHash, treeAfterHash: treeHash });
-    const { repairability: _repairability, ...old } = verdict(false, [{ ...oldFinding, reproduction: record.sequence }]);
+    const { outcome: _outcome, ...current } = verdict(false, [{ ...oldFinding, reproduction: record.sequence }]);
+    const old = { ...current, pass: false };
     const bytes = JSON.stringify({ ...old, criteria: {} });
     const path = runRecordPath(run.runDirPath, 'verdict_review.json'); writeFileSync(path, bytes);
     writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0, exitCode: 0,

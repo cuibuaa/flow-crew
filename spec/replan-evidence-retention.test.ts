@@ -188,7 +188,7 @@ describe('next-phase evidence retention', () => {
     expect(gate?.status.attempts).toHaveLength(1);
     expect(gate?.verdictPath).toBeTruthy();
     expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), gate!.verdictPath!), 'utf-8')))
-      .toMatchObject({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' });
+      .toMatchObject({ outcome: 'accepted', reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' });
     expect(existsSync(runRecordPath(runDir(projectDir, final.runId), gate!.statusPath))).toBe(true);
 
     const app = await startDashboard(projectDir, 0, { distDir: join(projectDir, 'missing-dist') });

@@ -93,7 +93,7 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
     const workflowDir = join(project, 'config/workflows'); mkdirSync(workflowDir, { recursive: true });
     if (condition === 'invalid') writeFileSync(join(workflowDir, 'changed.yaml'), 'stages: [');
     const mockFixtures = join(isolated.root, 'mock'); mkdirSync(mockFixtures);
-    writeFileSync(join(mockFixtures, 'work.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Both stages verified.',
+    writeFileSync(join(mockFixtures, 'work.json'), JSON.stringify({ output_text: JSON.stringify({ outcome: 'accepted', reason: 'Both stages verified.',
       criteria: Object.fromEntries(criteria.map(criterion => [criterion.id, { status: 'pass', evidence: 'Fixture stages completed.' }])),
       audit_findings: { version: 1, findings: [] },
     }) }));

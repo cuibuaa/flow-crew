@@ -8,14 +8,30 @@ import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
 export { loadDefaults };
 
-/** Operator-owned bound for technical timeout retries; plans cannot override it. */
-export function configuredTechnicalRetryLimit(): number {
-  return Math.max(0, Math.floor(Number(loadDefaults().stage_technical_retries)));
+/** Snapshot the existing operator bounds once; counters elsewhere are receipts,
+ * never independent limit owners. Legacy runs adopt their already-spent limits. */
+export function admitResourcePolicy(state: StoreState, workflow?: WorkflowConfig, adapterRetryDelays: readonly number[] = [30_000, 60_000, 120_000]): NonNullable<StoreState['resourcePolicy']> {
+  const defaults = loadDefaults();
+  const visits = Math.max(0, Math.floor(state.maxRetries ?? state.decisionGraph?.maxVisits ?? defaults.gate_retry_loops));
+  return state.resourcePolicy ??= {
+    iterations: Math.max(state.maxIterations ?? workflow?.defaults?.max_iterations ?? defaults.max_iterations, state.research?.budget.max_rounds ?? 0),
+    visits: Math.min(state.decisionGraph?.maxVisits ?? visits, visits),
+    plannerAttempts: state.dispatchAdmission?.maxRefusals ?? Math.max(0, Math.floor(defaults.plan_stage_retries)) + 1,
+    resultCorrections: 1, technicalRetries: Math.max(0, Math.floor(defaults.stage_technical_retries)),
+    failureRetries: Math.max(0, Math.floor(workflow?.defaults?.max_retries ?? defaults.stage_technical_retries)),
+    stageFailureRetries: Object.fromEntries((workflow?.stages ?? []).filter(stage => stage.max_retries !== undefined)
+      .map(stage => [stage.id, Math.max(0, Math.floor(stage.max_retries!))])),
+    adapterRetryDelays: [...adapterRetryDelays], continuations: state.maxContinuations,
+    ...(state.research ? { research: state.research.budget } : {}),
+  };
 }
-
-/** How often a stage that failed for an ordinary reason runs again; the same in the batch and in the gate loop. */
-export function failureRetryLimit(stage: StageConfig, workflow: WorkflowConfig): number {
-  return Math.max(0, Math.floor(Number(stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit())));
+export function configuredTechnicalRetryLimit(state?: StoreState, workflow?: WorkflowConfig): number {
+  return state ? admitResourcePolicy(state, workflow).technicalRetries : Math.max(0, Math.floor(loadDefaults().stage_technical_retries));
+}
+export function failureRetryLimit(stage: StageConfig, workflow: WorkflowConfig, state?: StoreState): number {
+  const policy = state && admitResourcePolicy(state, workflow);
+  return policy ? policy.stageFailureRetries[stage.id] ?? policy.failureRetries
+    : Math.max(0, Math.floor(stage.max_retries ?? workflow.defaults.max_retries ?? configuredTechnicalRetryLimit()));
 }
 
 const AgentConfigSchema = z.object({

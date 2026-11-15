@@ -8,7 +8,7 @@ import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { evaluateCondition } from '../../condition.js';
 import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
-import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, admitResourcePolicy, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
 import { selectRunnableBatch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { createContentSettlementContext } from '../sched_scope/frozen-inputs.js';
@@ -25,6 +25,7 @@ export async function executeReadyBatch(
   technicalRetries: Map<string, TechnicalRetryBudgetState>, skills?: string, taskDescription?: string,
   availableSkills?: string, attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<{kind: 'settled' | 'continue'; state: StoreState}> {
+  admitResourcePolicy(state, workflow);
     const ready = findAllReady(sorted, state);
 
     if (ready.length === 0) {
@@ -119,7 +120,7 @@ export async function executeReadyBatch(
 
     for (const { stage, result, currentRetries } of results) {
       if (parkProviderQuota(state, projectDir, runId, stage.id, result)) return { kind: 'settled', state };
-      const decision = decideStageRetry(result, stageRetryCharge(readStageStatus(projectDir, runId, stage.id), result, currentRetries), configuredTechnicalRetryLimit(), failureRetryLimit(stage, workflow));
+      const decision = decideStageRetry(result, stageRetryCharge(readStageStatus(projectDir, runId, stage.id), result, currentRetries), configuredTechnicalRetryLimit(state, workflow), failureRetryLimit(stage, workflow, state));
       if (decision === 'engine_void') throw new Error(result.friendlyError);
       const isAdapterFailure = !!result.providerFailure && result.providerFailure.kind !== 'refusal';
       if (decision === 'retry') {
@@ -164,7 +165,7 @@ export async function executeReadyBatch(
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
     }
     if (exhaustedAdapterFailure) {
-      const detail = `Upstream adapter failure exhausted technical recovery for ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
+      const detail = `Upstream adapter failure ended stage ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
       state = await concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: exhaustedAdapterFailure.kind === 'input_too_large' ? 'input_too_large' : 'adapter_failure', detail, eventFields: () => ({
         iteration: state.currentIteration ?? 1,
         stageId: exhaustedAdapterFailure.stageId,

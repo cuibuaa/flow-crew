@@ -202,7 +202,7 @@ describe('independent post-author review', () => {
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
     expect(readFileSync(frozenManifest, 'utf8')).toBe(trustedPreimage);
     const rejection = JSON.parse(readFileSync(runRecordPath(directory, `gate_reevaluation/iteration_1/round_1/rejected_verdict_review.json`), 'utf8'));
-    expect(rejection).toMatchObject({ pass: false, reason: 'Concrete defect.' });
+    expect(rejection).toMatchObject({ outcome: 'rejected_repairable', reason: 'Concrete defect.' });
     expect(state.stages.review.attempts![0]).toMatchObject({ status: 'complete', exitCode: 0 });
     expect(state.stages.review.gate?.pass).toBe(true);
   });
@@ -509,10 +509,9 @@ describe('planner-authored decomposition', () => {
         expect(current.stages.review.attempts ?? []).toHaveLength(1);
         expect(current.decisionGraph!.records.at(-1)).toMatchObject({ stageId: 'review', successor: 'repair', gateAccepted: false });
         const rejection = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'verdict_review.json'), 'utf8'));
-        expect(rejection.repairability.disposition).toBe('repairable');
+        expect(rejection.outcome).toBe('rejected_repairable');
         expect(rejection.audit_findings.findings).toHaveLength(1);
-        const confirmation = readEvidence(opts.runDir).find(entry => entry.sequence === rejection.audit_findings.findings[0].reproduction);
-        expect(confirmation).toMatchObject({ stageId: 'review', exitCode: 1 });
+        expect(readEvidence(opts.runDir).filter(entry => entry.kind === 'command')).toEqual([]);
         writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n');
         output = delivered;
       }

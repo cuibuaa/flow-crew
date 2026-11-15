@@ -106,7 +106,7 @@ describe('gate acceptance follows the full brief outcome contract', () => {
     expect(gateInputs[0]).toContain(conflicting);
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls).toEqual(['plan', 'implement', 'review']);
-    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8'))).toMatchObject({ pass: true });
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8'))).toMatchObject({ outcome: 'accepted' });
   });
 
   it('uses the same outcome contract in the direct workflow', async () => {
@@ -118,13 +118,13 @@ describe('gate acceptance follows the full brief outcome contract', () => {
   it.each(['measurement', 'bounds', 'criterion'] as const)('rejects missing required %s even when a negative outcome is allowed', async missing => {
     const { final, directory } = await reproduce({ missing });
     expect(final.status).not.toBe('complete');
-    if (missing !== 'criterion') expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+    if (missing !== 'criterion') expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).outcome).toBe('rejected_repairable');
   });
 
   it('still rejects a below-target result when the brief requires success', async () => {
     const { final, directory } = await reproduce({ fallback: false });
     expect(final.status).not.toBe('complete');
-    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).outcome).toBe('rejected_repairable');
   });
 
   it('accepts the allowed bounds outcome on reevaluation after repairing missing measurements', async () => {

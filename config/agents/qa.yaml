@@ -16,6 +16,5 @@ prompt: |
   in one verdict. Include each brief criterion exactly once: pass (met), fail (not met), not_assessed
   with a closed reason, or carried from an existing archived round. Carrying is your judgment when
   previously met evidence was untouched by repair; re-examine anything you consider necessary.
-  Return the scheduler's typed verdict with reproducible evidence references and, on rejection,
-  whether repair is possible.
+  Return the scheduler's typed verdict with reproducible evidence references.
 handoff_visibility: minimal

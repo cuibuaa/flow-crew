@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { join } from 'node:path';
 import { EventEmitter, once } from 'node:events';
 import { Duplex, PassThrough } from 'node:stream';
-import { spawn, type ChildProcess } from 'node:child_process';
+type ChildProcess = ReturnType<typeof import('../src/adapters/base.js').spawnOwnedCommand>['child'];
 import { GitStandIn, success } from './test-support/git-stand-in.js';
 
 const fixture = vi.hoisted(() => ({
@@ -43,7 +43,6 @@ import { Orchestrator } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { captureProjectTree } from '../src/evidence-ledger.js';
-import { startCommandRecorder } from '../src/recorded-command.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';
 import { runStage } from './test-support/stage-deadline.js';
 import { createRun } from './test-support/create-run.js';
@@ -303,60 +302,4 @@ it.each(['success', 'nonzero', 'signal', 'error'] as const)('terminal hook retai
   expect(text).toContain(completion === 'error' ? 'spawn error: Error: fixture launch error'
     : completion === 'signal' ? 'code: null\nsignal: SIGTERM' : `code: ${completion === 'success' ? 0 : 1}\nsignal: null`);
   expect(vi.getTimerCount()).toBe(0);
-});
-
-it.each(['before', 'after'] as const)('recorder preserves terminated %s-command inventory through close and a typed failing client response', async boundary => {
-  const directory = join(root, 'recording'); mkdirSync(directory);
-  let ran = false;
-  const recorder = await startCommandRecorder(directory, async () => {
-    if (boundary === 'before') terminate();
-    captureProjectTree(project);
-    ran = true;
-    if (boundary === 'after') terminate();
-    return captureProjectTree(project);
-  });
-  // Use the actual recorder client, without a backend or a real command.
-  const child = spawn(process.execPath, ['-e', 'require("node:child_process").execFileSync("/bin/sh", ["-c", process.argv[1]], { stdio: "inherit" });',
-    `${recorder.command} '${JSON.stringify({ command: 'true', cwd: project, shell: '/bin/sh' })}'`],
-    { cwd: project, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir() }, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = ''; child.stdout!.on('data', chunk => { stdout += chunk; });
-  let closed = false;
-  try {
-    const [code] = await once(child, 'close');
-    expect(JSON.parse(stdout)).toMatchObject({ code: 'GIT_NOT_ANSWERED' });
-    expect(code).toBe(1); expect(ran).toBe(boundary === 'after');
-    await expect(recorder.close()).rejects.toBeInstanceOf(GitNotAnswered);
-    closed = true;
-  } finally {
-    if (!closed) await recorder.close().catch(() => {});
-    retireRunScratch(directory);
-  }
-});
-
-it.each(['before', 'after'] as const)('the gate invocation fails with terminated %s-command inventory without a command receipt or verdict', async boundary => {
-  const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
-  const command = vi.spyOn(validation, 'runProjectCommand').mockImplementation(async () => {
-    terminate();
-    return { exitCode: 0, stdout: 'command answered' };
-  });
-  const role = { name: 'fixture', description: '', model: 'fixture', reasoning_effort: 'low', tools: [], prompt: 'Fixture' };
-  let clientExit: number | null | undefined;
-  const operation = runStage({ async run(prompt) {
-    const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-    if (boundary === 'before') terminate();
-    const request = JSON.stringify({ command: 'true', cwd: project, shell: '/bin/sh' }).replaceAll("'", "'\\''");
-    const child = spawn(process.execPath, ['-e', 'require("node:child_process").execFileSync("/bin/sh", ["-c", process.argv[1]], { stdio: "inherit" });', `${client} '${request}'`],
-      { cwd: project, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir() }, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout!.resume(); child.stderr!.resume();
-    [clientExit] = await once(child, 'close');
-    return { output: JSON.stringify({ pass: true, reason: 'Fixture' }), exitCode: 0, duration_ms: 0 };
-  } }, { ...created, projectDir: project, runDir: created.runDirPath, stageId: 'work', role, dependsOn: [],
-    promptTemplate: 'Review the work.', timeout_ms: 10_000, retries: 0, isGate: true,
-    artifactContract: { version: 1, produces: [], reads: [] } });
-  await expect(operation).rejects.toBeInstanceOf(GitNotAnswered);
-  expect(clientExit).toBe(1);
-  expect(command).toHaveBeenCalledTimes(boundary === 'before' ? 0 : 1);
-  expect(readEvidence(created.runDirPath).filter(entry => entry.kind === 'attempt' || entry.kind === 'decision'
-    || entry.kind === 'command' && entry.owner === 'code')).toEqual([]);
-  expect(readStageStatus(project, created.runId, 'work').attempts?.at(-1)?.status).toBe('running');
 });

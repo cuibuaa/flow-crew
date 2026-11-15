@@ -168,7 +168,7 @@ describe('independent engine-remediation verification', () => {
     const runDirectory = runDir(projectDir, final.runId);
     expect(stagesRun).toEqual(['fixture_work', 'qa']);
     expect(JSON.parse(readFileSync(runRecordPath(runDirectory, 'verdict_qa.json'), 'utf8'))).toMatchObject({
-      pass: true, criteria: { fixture_1: { status: 'pass' } },
+      outcome: 'accepted', criteria: { fixture_1: { status: 'pass' } },
     });
     expect(existsSync(runRecordPath(runDirectory, 'validation_baseline.json'))).toBe(true);
     const producedByScheduler = existsSync(runRecordPath(runDirectory, 'validation_delta_qa.json'));

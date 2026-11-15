@@ -97,24 +97,10 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       reviews++;
       const defect = options.input === 'introduced' ? readFileSync(join(target, 'data/value.txt'), 'utf8') !== 'GOOD'
         : options.introduce ? readFileSync(join(target, 'value.txt'), 'utf8').startsWith('introduced') : false;
-      let reproduction: number | undefined;
-      if (defect) {
-        const predicate = options.input === 'introduced'
-          ? "require('node:fs').readFileSync('data/value.txt','utf8')!=='GOOD'"
-          : "require('node:fs').readFileSync('value.txt','utf8').startsWith('introduced')";
-        const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?1:0)`)}`;
-        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-        const request = JSON.stringify({ command, cwd: target, shell: '/bin/sh' });
-        const probe = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
-          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Value reproduction', cwd: target });
-        expect(probe.exitCode).toBe(0);
-        const record = JSON.parse(probe.stdout!).record;
-        expect(record.exitCode).toBe(1); reproduction = record.sequence;
-      }
       const pass = !defect && (options.returnToFirstTree ? reviews > 2 : !options.rejectFirstReview || reviews > 1);
       return { output: JSON.stringify({ pass, reason: pass ? 'Independent acceptance.' : 'Check the value again.',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'value.txt' }])),
-        audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] },
+        audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] : [] },
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'value.txt' } } : {}) }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured', tokens_in: 1, tokens_out: 1 };
     }

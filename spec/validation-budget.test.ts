@@ -167,12 +167,7 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
       const test = results.executions[0].commands.find(command => command.role === 'test')!;
       expect(test.exitCode).toBe(1);
       if (!confirm) return success({ ...verdict(opts) });
-      const predicate = `require('fs').readFileSync('resource.txt','utf8')===${JSON.stringify(kind === 'cache' ? 'STATE' : '0-5')}`;
-      const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?0:1)`)}`, cwd: root, shell: '/bin/sh' };
-      const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-      const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`], display: 'Independent audit predicate', cwd: root, timeoutMs: 30000 });
-      expect(response.exitCode).toBe(0); const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1);
-      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]) });
+      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }]) });
     }
     if (opts.stageId === 'implement') {
       writeFileSync(join(root, 'contract.txt'), 'new'); if (kind === 'cpu') writeFileSync(join(root, 'resource.txt'), '6-7');
@@ -200,7 +195,7 @@ describe('declared project assertions survive engine ownership', () => {
       expect(result.validations[1].executions[0].commands[1].failureCount).toBe(2);
       expect(result.final.validation?.find(command => command.role === 'test')?.exitCode).toBe(1);
     }
-    expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf !== undefined && entry.exitCode === 0)).toBe(true);
+    expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf !== undefined && entry.exitCode === 0)).toBe(false);
     expect(evidenceContext(result.root, result.rd)).not.toContain('AUTHOR_TRANSCRIPT');
   });
 });

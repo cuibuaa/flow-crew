@@ -69,12 +69,12 @@ function brief(edit: (config: ResearchConfig) => void = () => {}) {
 }
 function verdict(config: ResearchConfig, pass = true) {
   const criteria = extractBriefCriteria(researchReviewContract(config)).criteria;
-  return JSON.stringify({ pass, reason: pass ? 'Project criteria hold.' : 'Project criterion failed.', remaining_work: [],
+  return JSON.stringify({ outcome: pass ? 'accepted' : 'rejected_repairable', reason: pass ? 'Project criteria hold.' : 'Project criterion failed.', remaining_work: [],
     criteria: Object.fromEntries(criteria.map(c => [c.id, { status: pass ? 'pass' : 'fail', evidence: 'Independent project property inspection.' }])),
-    audit_findings: { version: 1, findings: pass ? [] : [{ id: 'project_criterion', class: 'criterion_unmet', paths: ['candidate.json'], reason: 'Project criterion failed.', criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] }, ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'Another candidate can satisfy the project criterion.' } }) });
+    audit_findings: { version: 1, findings: pass ? [] : [{ id: 'project_criterion', class: 'criterion_unmet', paths: ['candidate.json'], reason: 'Project criterion failed.', criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] } });
 }
 /** Review catches are independent project predicates, not instrument scores.
- * Execute the selected property through the reviewer's ordinary recorder so
+ * Execute the selected property as an optional reviewer experiment so
  * these lifecycle fixtures retain a grounded rejection and its original class. */
 function groundReviewRejection(adapter: ScriptedAdapter, predicate: string): ScriptedAdapter {
   const execute = adapter.run.bind(adapter);
@@ -82,19 +82,14 @@ function groundReviewRejection(adapter: ScriptedAdapter, predicate: string): Scr
     const result = await execute(prompt, role, opts);
     if (opts.stageId !== 'review' || result.exitCode !== 0) return result;
     const record = JSON.parse(result.output);
-    if (record.pass !== false) return result;
+    if (record.outcome !== 'rejected_repairable' && record.outcome !== 'rejected_irreparable') return result;
     const source = `const candidate=JSON.parse(require('node:fs').readFileSync('candidate.json','utf8')); process.exit(${predicate}?0:1);`;
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
-    const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-    const request = JSON.stringify({ command, cwd: opts.workDir, shell: '/bin/sh' });
     const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
-      args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Independent project review predicate',
+      args: ['-c', command], display: 'Independent project review predicate',
       cwd: opts.workDir, runDir: opts.runDir });
-    expect(response.exitCode).toBe(0);
-    const reproduction = JSON.parse(response.stdout!).record;
-    expect(reproduction.exitCode).toBe(1);
-    for (const finding of record.audit_findings.findings) finding.reproduction = reproduction.sequence;
-    return { ...result, output: JSON.stringify(record) };
+    expect(response.exitCode).toBe(1);
+    return result;
   };
   return adapter;
 }
@@ -319,10 +314,36 @@ describe('versioned declaration-owned research loop', () => {
     expect(read(join(project, 'candidate.json')).value).toBe(80);
     expect(existsSync(join(project, 'reports/result.md'))).toBe(true);
   });
+  it('uses the gate outcome for non-executable research rejection, repair and acceptance', async () => {
+    const text = brief(config => { config.budget.max_rounds = 2; delete config.publication;
+      config.review = { role: 'paper_reviewer', criteria: ['The explanation follows the supplied evidence.'] }; });
+    const rc = parseBriefFrontmatter(text).research!;
+    const adapter = new ScriptedAdapter({ produce: [
+      { output: delivered, projectFiles: { 'candidate.json': '{"value":80}' } },
+      { output: delivered, projectFiles: { 'candidate.json': '{"value":70}' } },
+    ], review: [{ output: verdict(rc, false) }, { output: verdict(rc, true) }] });
+    const { state, directory } = await run(text, adapter);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['produce', 'review', 'produce', 'review']);
+    expect(researchInstrumentState(directory).history.map(item => item.outcome)).toEqual(['baseline', 'review_rejected', 'keep', 'finalized']);
+    expect(readEvidence(directory).filter(entry => entry.kind === 'command')).toEqual([]);
+  });
+  it('uses the same declared blocked acceptance in a research gate', async () => {
+    const text = brief(config => {
+      config.review = { role: 'paper_reviewer', criteria: ['External replication is assessed.'] }; })
+      .replace('---\n', '---\nallow_blocked_acceptance: true\n');
+    const adapter = new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":80}' } },
+      review: { output: JSON.stringify({ outcome: 'accepted_blocked', reason: 'Independent report documents the replication limit.',
+        criteria: { 'review-1': { status: 'not_assessed', reason: 'capability_unavailable', evidence: 'Required resource unavailable.' } },
+        audit_findings: { version: 1, findings: [] } }) } });
+    const { state } = await run(text, adapter);
+    expect(state.status, state.failureReason).toBe('accepted_blocked'); expect(state.reasonCode).toBe('accepted_blocked');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['produce', 'review']);
+  });
   it('preserves a declared irreparable review catch without making it a measurement', async () => {
     const text = brief(config => { config.budget.max_rounds = 3; config.review = { role: 'qa', criteria: ['The project once-only operation must not be repeated.'] }; });
     const review = JSON.parse(verdict(parseBriefFrontmatter(text).research!, false));
-    review.repairability = { version: 1, disposition: 'irreparable', evidence: 'Project once-only allowance was already spent.' };
+    review.outcome = 'rejected_irreparable';
     const adapter = groundReviewRejection(new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1,"once_only_operation_count":2}' } }, review: { output: JSON.stringify(review) } }), 'candidate.once_only_operation_count <= 1');
     const { state, directory } = await run(text, adapter);
     expect(state.status, state.failureReason).toBe('escalated'); expect(state.reasonCode).toBe('irreparable_gate_rejection');

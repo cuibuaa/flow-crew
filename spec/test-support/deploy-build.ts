@@ -64,7 +64,7 @@ if (args[0] === 'daemon') {
  const adapter = new ScriptedAdapter({
    plan:{output:'Proposed graph.',runFiles:{'dispatch.yaml':stringify(dispatch)}},
    work:{output:'Work complete.'},
-   review:{output:'Independent review.',runFiles:{'verdict_review.json':JSON.stringify({pass:true,reason:'Inspected surviving work.',criteria:{keep:{status:'pass',evidence:'Same task and result inspected.'}},audit_findings:{version:1,findings:[]}})}}
+   review:{output:'Independent review.',runFiles:{'verdict_review.json':JSON.stringify({outcome:'accepted',reason:'Inspected surviving work.',criteria:{keep:{status:'pass',evidence:'Same task and result inspected.'}},audit_findings:{version:1,findings:[]}})}}
  });
  writeFileSync(join(process.env.DEPLOY_FIXTURE_BARRIER,'task'),String(process.pid));
  const state = await runWorkflow(workflow,stringify(workflow),project,adapter,new Map(),undefined,join(import.meta.dirname,'../config/agents'),run,receipt.contract.brief,true,undefined,receipt);

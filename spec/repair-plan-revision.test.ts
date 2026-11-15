@@ -96,7 +96,7 @@ it('admits and finishes dependent repair slices at the last repair boundary befo
   expect(result.state.status, result.state.failureReason).toBe('complete');
   expect(result.calls).toEqual(['author', 'review', 'repair', 'measure', 'publish', 'review']);
   const archive = runRecordPath(result.directory, 'gate_reevaluation/iteration_1/round_1');
-  expect(JSON.parse(readFileSync(join(archive, 'rejected_verdict_review.json'), 'utf8')).pass).toBe(false);
+  expect(JSON.parse(readFileSync(join(archive, 'rejected_verdict_review.json'), 'utf8')).outcome).toBe('rejected_repairable');
   const diff = JSON.parse(readFileSync(join(archive, 'repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
   expect(diff).not.toHaveProperty('effectiveScopes');
@@ -118,7 +118,7 @@ it('does not release a failed slice to its successor or re-review', async () => 
   expect(result.calls).toEqual(['author', 'review', 'repair', 'measure']);
   expect(result.state.stages.measure.exitCode).toBe(7);
   expect(result.state.stages.publish.attempts ?? []).toHaveLength(0);
-  expect(JSON.parse(readFileSync(runRecordPath(result.directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+  expect(JSON.parse(readFileSync(runRecordPath(result.directory, 'verdict_review.json'), 'utf8')).outcome).toBe('rejected_repairable');
 });
 
 it('preserves the same gate and repair budget when review rejects the measured result', async () => {

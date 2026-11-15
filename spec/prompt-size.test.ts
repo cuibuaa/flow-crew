@@ -60,8 +60,8 @@ describe('size-independent adapter prompt delivery', () => {
     expect(parseStageRecord(JSON.stringify({ ...gap, blocks: null }), HANDOFF_SCHEMA)).toMatchObject({ blocks: null });
     expect(() => parseStageRecord('{"status":"delivered"}', HANDOFF_SCHEMA)).toThrow('required');
     const verdict = stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
-    expect(() => parseStageRecord('{"pass":true,"reason":"accepted"}', verdict)).toThrow('anyOf');
-    expect(() => parseStageRecord(JSON.stringify({ pass: false, reason: 'rejected', criteria: { criterion: { status: 'fail', evidence: 'spec/proof.test.ts' } }, audit_findings: { version: 1, findings: [] } }), verdict)).toThrow('anyOf');
+    expect(() => parseStageRecord('{"pass":true,"reason":"accepted"}', verdict)).toThrow('outcome');
+    expect(() => parseStageRecord(JSON.stringify({ pass: false, reason: 'rejected', criteria: { criterion: { status: 'fail', evidence: 'spec/proof.test.ts' } }, audit_findings: { version: 1, findings: [] } }), verdict)).toThrow('outcome');
   });
   it('preserves launch provenance when the stdin-backed Codex spawn fails', async () => {
     const root = temporaryRoot('flowcrew-prompt-missing-codex-');

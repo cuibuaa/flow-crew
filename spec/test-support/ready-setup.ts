@@ -1,3 +1,4 @@
+import { currentGateAnswers } from './confirmed-rejection.js';
 import { runWorkflow as executeWorkflow } from '../../src/scheduler.js';
 import { runRecordPath } from '../../src/run-layout.js';
 import { fcGlobalDir, readRunReservation, runDir } from '../../src/store.js';
@@ -76,5 +77,6 @@ export async function runPreparedWorkflow(...args: Parameters<typeof executeWork
       discovery, results: discovery.commands.map(command => ({ ...command, exitCode: 0, state: 'passed',
         durationMs: 0, output: '', failureIdentifiers: [], failureIdentity: 'none' })) });
   }
+  args[3] = currentGateAnswers(args[3]);
   return executeWorkflow(...args);
 }

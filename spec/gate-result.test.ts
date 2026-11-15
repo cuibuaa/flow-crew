@@ -80,8 +80,28 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
 }
 
 describe('typed gate recovery routes', () => {
+  it('keeps retired legacy repair flags from overruling a current gate outcome', () => {
+    const docs = join(projectDir, 'docs'); mkdirSync(docs);
+    writeFileSync(runRecordPath(docs, `verdict_${gateId}.json`), JSON.stringify({ outcome: 'accepted',
+      reason: 'Independent acceptance.', criteria: {}, audit_findings: { version: 1, findings: [] }, requires_repair: true }));
+    expect(readGateEvaluation(projectDir, gateId)).toMatchObject({ outcome: 'accepted', pass: true });
+  });
+
+  it.each(['rejected_repairable', 'rejected_irreparable'] as const)(
+    'preserves the gate outcome when reading an archived settled result (%s)', outcome => {
+      const archive = runRecordPath(runDirPath, 'gate_reevaluation/iteration_1/round_1');
+      mkdirSync(archive, { recursive: true });
+      const pass = false;
+      writeFileSync(join(archive, `rejected_verdict_${gateId}.json`), JSON.stringify({ outcome }));
+      writeFileSync(join(archive, `engine_verdict_${gateId}.json`), JSON.stringify({ outcome,
+        engine_effective_pass: pass, kind: pass ? 'pass' : outcome === 'rejected_irreparable' ? 'irreparable' : 'repairable' }));
+      const verdict = readGateEvaluation(projectDir, gateId, runId);
+      expect(verdict).toMatchObject({ outcome, pass });
+      if (outcome === 'rejected_irreparable') expect(classifyGateRecoveryFact(gateId, null, verdict).rejectionKind).toBe('irreparable_rejection');
+    });
+
   it.each([
-    ['validation_regression', 'Gate contract violation: unrelated wording', 'engine_contract_or_evidence_rejection'],
+    ['validation_regression', 'Gate contract violation: unrelated wording', 'repairable_failure'],
     ['validation_unresolved', 'Review omitted the research outcome', 'engine_contract_or_evidence_rejection'],
     ['research_outcome_absent', 'No prefix is required to describe this refusal', 'engine_contract_or_evidence_rejection'],
   ] as const)('routes %s by the engine refusal type', (kind, reason, rejectionKind) => {
@@ -100,7 +120,7 @@ describe('typed gate recovery routes', () => {
   });
 
   it.each(['criterion_evidence', 'audit_findings'] as const)(
-    'does not admit uncited authored FAIL to repair after a secondary %s refusal', kind => {
+    'does not admit malformed authored rejection to repair after a %s refusal', kind => {
       const authored: GateVerdict = { pass: false,
         repairability: { version: 1, disposition: 'repairable', evidence: 'Reproducible product defect' } };
       const docs = join(projectDir, 'docs');
@@ -114,15 +134,15 @@ describe('typed gate recovery routes', () => {
       const fact = classifyGateRecoveryFact(gateId, authored, effective);
       const gate = parseDispatchedStageConfig({ id: gateId, role: 'qa', is_gate: true });
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', retry_to: [gateId] });
-      expect(fact.rejectionKind).toBe('repairable_failure');
+      expect(fact.rejectionKind).toBe('engine_contract_or_evidence_rejection');
       expect(findGateRecoveryStages([gate, repair], [gateId], { [gateId]: fact })
         .map(stage => stage.id)).toEqual([]);
       const irreparable: GateVerdict = { ...effective,
         repairability: { version: 1, disposition: 'irreparable', evidence: 'Required GPU unavailable' } };
-      expect(classifyGateRecoveryFact(gateId, authored, irreparable).rejectionKind).toBe('irreparable_rejection');
+      expect(classifyGateRecoveryFact(gateId, authored, irreparable).rejectionKind).toBe('engine_contract_or_evidence_rejection');
       // Legacy author FAILs remain readable but do not establish confirmation.
       expect(classifyGateRecoveryFact(gateId, { pass: false }, { pass: false, refusal: { kind } }).rejectionKind)
-        .toBe('repairable_failure');
+        .toBe('engine_contract_or_evidence_rejection');
     },
   );
 
@@ -189,7 +209,7 @@ describe('settled gate results', () => {
     const status = readStageStatus(projectDir, runId, gateId);
     expect(status).toMatchObject({ status: 'complete', exitCode: 0,
       attempts: [{ status: 'complete', exitCode: 0 }],
-      gate: { pass: false, kind: 'audit_findings', verdictSha256, refusal: { kind: 'audit_findings' } } });
+      gate: { pass: false, kind: 'validation_regression', verdictSha256, refusal: { kind: 'validation_regression' } } });
     expect(classifyGateRecoveryFact(gateId, { pass: true }, status.gate!).rejectionKind)
       .toBe('repairable_failure');
   });
@@ -362,11 +382,11 @@ describe('stage group settlement boundaries', () => {
     expect(f.executed).toEqual(['first', gateId, 'deferred']);
     expect(readFileSync(join(projectDir, 'product.ts'), 'utf8')).toBe('regressed');
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
-      gate: { pass: false, kind: 'audit_findings' } });
-    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: false, kind: 'audit_findings' });
+      gate: { pass: false, kind: 'validation_regression' } });
+    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
     const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
     expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
-    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'audit_findings' });
+    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'validation_regression' });
     expect(f.reference).not.toHaveBeenCalled();
     expect(f.commands).toHaveBeenCalledOnce();
   });
@@ -433,7 +453,7 @@ describe('validation at the review boundary', () => {
       expect(final.stages.work.attempts).toHaveLength(1);
     } else {
       expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,
-        gate: { pass: outcome === 'repaired', kind: outcome === 'repaired' ? 'pass' : 'audit_findings' } });
+        gate: { pass: outcome === 'repaired', kind: outcome === 'repaired' ? 'pass' : 'validation_regression' } });
       expect(repairs).toHaveLength(outcome === 'repaired' ? 1 : 3);
       expect(commands).toHaveBeenCalledTimes(outcome === 'repaired' ? 2 : 1);
       // Engine nonzero facts are already reproductions. An unchanged repair

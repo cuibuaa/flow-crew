@@ -3,7 +3,7 @@ import { currentDispatchAdmissionReport, archiveDispatchAdmissionRefusal } from 
 import { existsSync, readFileSync } from 'node:fs';
 import { writeFileSync } from '../../engine-fs.js';
 /** Admit planner topology; ordinary dependencies and conditions own its DAG duties. */
-import { StageConfig, loadDefaults } from '../sched_admission/configuration.js';
+import { StageConfig, admitResourcePolicy } from '../sched_admission/configuration.js';
 import { attemptEventFields, recordRunEvent } from '../../run-events.js';
 import { STAGE_STATUS, StoreState, readRunState, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { injectDispatchedStages } from './services.js';
@@ -13,6 +13,7 @@ import { decisionKey } from './decisions.js';
 
 export function admitPlannerDispatches(sorted: StageConfig[], state: StoreState, project: string, run: string, directory: string,
   roles: Map<string, { name: string; description: string }>, injected: Set<string>): { kind: 'settled' | 'continue'; state: StoreState } {
+  const policy = admitResourcePolicy(state);
   for (const planner of [...sorted]) {
     if (!planner.dynamic_dispatch || injected.has(planner.id) || state.stages[planner.id]?.status !== STAGE_STATUS.COMPLETE) continue;
     // Historical snapshot ledgers are readable artifacts, never a second budget owner.
@@ -23,13 +24,14 @@ export function admitPlannerDispatches(sorted: StageConfig[], state: StoreState,
     const code = invalid ? 'dispatch_budget_invalid'
       : !budget && (existsSync(runRecordPath(directory, 'plan_retry_state.json'))
         || state.dispatchedStages !== undefined) ? 'legacy_retry_state_unsupported'
-      : budget && budget.refusals >= budget.maxRefusals ? 'dispatch_retry_exhausted' : undefined;
+      : budget && budget.refusals >= policy.plannerAttempts ? 'dispatch_retry_exhausted' : undefined;
     if (code) {
+      const detail = code === 'dispatch_retry_exhausted' ? `${code}: Bound resourcePolicy.plannerAttempts reached (${budget!.refusals}/${policy.plannerAttempts})` : code;
       writeFileSync(runRecordPath(directory, 'dispatch_admission.json'), JSON.stringify({ version: 1, pass: false,
-        checkedAt: new Date().toISOString(), errors: [{ code, field: 'dispatch', stageId: planner.id, message: code }], warnings: [] }));
-      return { kind: 'settled', state: concludeRun(state, { status: 'failed', reasonCode: 'dispatch_refused', detail: code }) };
+        checkedAt: new Date().toISOString(), errors: [{ code, field: 'dispatch', stageId: planner.id, message: detail }], warnings: [] }));
+      return { kind: 'settled', state: concludeRun(state, { status: 'failed', reasonCode: 'dispatch_refused', detail }) };
     }
-    state.dispatchAdmission ??= { refusals: 0, maxRefusals: Math.max(0, Math.floor(loadDefaults().plan_stage_retries)) + 1 };
+    state.dispatchAdmission ??= { refusals: 0, maxRefusals: policy.plannerAttempts };
     writeRunState(project, run, state);
     const stages = injectDispatchedStages(planner.id, roles, sorted, state, project, run);
     state = readRunState(project, run);
@@ -56,10 +58,10 @@ export function admitPlannerDispatches(sorted: StageConfig[], state: StoreState,
     const admission = currentDispatchAdmissionReport(directory);
     let archived: ReturnType<typeof archiveDispatchAdmissionRefusal> | undefined;
     try { archived = archiveDispatchAdmissionRefusal({ runDirPath: directory, stageId: planner.id, attemptIndex: count + 1, rawDispatchText: readFileSync(stageWorkPath(directory, 'dispatch.yaml'), 'utf8') }); } catch { /* missing/invalid YAML is retained by the ordinary output record */ }
-    if (budgetAfter.refusals >= budgetAfter.maxRefusals) {
+    if (budgetAfter.refusals >= policy.plannerAttempts) {
       let diagnostic = '';
       try { diagnostic = (JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8')).errors as Array<{message: string}>).map(error => error.message).join('; '); } catch { /* missing admission remains an explicit refusal */ }
-      return { kind: 'settled', state: concludeRun(state, { status: admission?.errors.some(error => error.code === 'stage_role_unknown') ? 'escalated' : 'failed', reasonCode: 'dispatch_refused', detail: `Planner dispatch refused after ${count + 1} attempts: ${record.reason}; ${diagnostic}; see ${runRecordPath(directory, 'dispatch_admission.json')}.` }) };
+      return { kind: 'settled', state: concludeRun(state, { status: admission?.errors.some(error => error.code === 'stage_role_unknown') ? 'escalated' : 'failed', reasonCode: 'dispatch_refused', detail: `Bound resourcePolicy.plannerAttempts reached (${count + 1}/${policy.plannerAttempts}): ${record.reason}; ${diagnostic}; see ${runRecordPath(directory, 'dispatch_admission.json')}.` }) };
     }
     const retryDetail = archived ? `${record.reason}\nDurable rejected proposal: ${runRecordPath(directory, archived.proposalPath)}\nDurable admission report: ${runRecordPath(directory, archived.admissionPath)}` : record.reason;
     state.stages[planner.id] = { ...rependStageStatus(state.stages[planner.id], count + 1, retryDetail), admissionFailure: { code: 'dispatch_refused', attemptIndex: state.stages[planner.id].attempts?.at(-1)?.index ?? 0 } };

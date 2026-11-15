@@ -237,13 +237,13 @@ describe('engine generalization runtime bindings', () => {
     expect(final.status).toBe(failure === 'authored-rejection' || confirmed ? 'incomplete' : 'complete');
     if (confirmed) {
       const rejected = failure === 'peer-regression' ? final.stages.peer_review : final.stages.qa;
-      expect(rejected.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
-      expect(rejected.gate?.findings?.confirmed).toHaveLength(3);
-      expect(rejected.gate?.findings?.confirmed[0].record).toMatchObject({ owner: 'code', exitCode: 1 });
+      expect(rejected.gate).toMatchObject({ pass: false, refusal: { kind: 'validation_regression' } });
+      expect(rejected.gate?.validation).toHaveLength(3);
+      expect(rejected.gate?.validation?.map(command => command.exitCode)).toEqual([1, 1, 1]);
     }
     const receipt = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
     expect(receipt.pass).toBe(failure !== 'regression');
-    if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: false, kind: 'audit_findings', validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
+    if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: false, kind: 'validation_regression', validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
     expect(final.stages.qa.status).toBe('complete');
     expect(reviews).toBe(1);
     expect(final.stages.qa.attempts).toHaveLength(1);
@@ -276,7 +276,7 @@ describe('engine generalization runtime bindings', () => {
     if (failure === 'post-write-regression') writeFileSync(join(projectDir, 'peer.ts'), 'changed after measurement');
     const verdict = readGateEvaluation(projectDir, 'qa', created.runId);
     expect(verdict?.pass).toBe(failure === 'post-write-regression');
-    const kind = semantic || failure === 'post-write-regression' ? undefined : 'audit_findings';
+    const kind = semantic || failure === 'post-write-regression' ? undefined : 'validation_regression';
     expect(verdict?.refusal?.kind).toBe(kind);
     for (let read = 0; read < 3; read++) expect(readGateEvaluation(projectDir, 'qa', created.runId)).toEqual(verdict);
     expect(commands).toBe(0);
@@ -472,7 +472,7 @@ describe('engine generalization runtime bindings', () => {
     ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: substantiveFact },
-    ).map((entry) => entry.id)).toEqual([]);
+    ).map((entry) => entry.id)).toEqual(['repair']);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: omittedFact },
     ).map((entry) => entry.id)).toEqual([]); // Retired result-slot omissions cannot rerun a producer.

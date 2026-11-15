@@ -12,8 +12,6 @@ import * as validationOwner from '../src/project-validation.js';
 import * as gateValidation from '../src/scheduler/sched_settlement/gate-validation.js';
 import { validationReport } from './test-support/structured-validation.js';
 import { createRun } from './test-support/create-run.js';
-import * as recorderOwner from '../src/recorded-command.js';
-import { assessFindings } from '../src/scoped-audit-repair.js';
 import { loadWorkflow, snapshotShipSetupValidationBaseline } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
 import { runDir, fcGlobalDir, readRunState, readStageStatus, writeStageStatus, updateRunState } from '../src/store.js';
@@ -351,44 +349,6 @@ describe('scheduler owns validation after author settlement', () => {
     expect(final.validation?.map(command => command.exitCode)).toEqual([9]);
     expect(readEvidence(runDir(root, final.runId)).filter(entry => entry.kind === 'validation').at(-1)?.pass).toBe(false);
   });
-
-  it('engine-runs-it: records one source-writing replay and validates its final tree before review', async () => {
-    setEngineDefaults({ validation_attempts: 3 });
-    const root = project(); projectValidation(root); const counter = join(project(), 'closure-count');
-    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-    const program = `const fs=require('node:fs'),v=fs.readFileSync('value.txt','utf8');if(v==='good'){const p=${JSON.stringify(counter)},n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8'))+1:1;fs.writeFileSync(p,String(n));fs.writeFileSync('stamp.txt',String(n));}process.exit(v==='good'?0:1);`;
-    const command = `nice -n 19 ${quote(process.execPath)} -e ${quote(program)}`;
-    let reviews = 0;
-    const final = await engineering(root, { async run(prompt, _role, opts) {
-      if (opts.stageId !== 'review') {
-        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair_review' ? 'good' : 'bad');
-        return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
-      }
-      const fact = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
-      expect(fact.treeHash).toBe(captureProjectTree(root, '', opts.runDir).hash);
-      const first = ++reviews === 1;
-      let reproduction: number | undefined;
-      if (first) {
-        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
-        const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', client + ' ' + quote(JSON.stringify({ command, cwd: root, shell: '/bin/sh' }))], display: 'independent reproduction', cwd: root });
-        const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1); reproduction = record.sequence;
-      }
-      const value = verdict(opts.runDir); value.pass = !first;
-      if (first) value.criteria.value = { status: 'fail', evidence: 'Independent predicate reproduced the bad value.' };
-      return { output: JSON.stringify({ ...value, ...(first ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace bad value' } } : {}),
-        audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Value should be good', reproduction, class: 'criterion_unmet' as const, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }),
-        exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-    } });
-    expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('1');
-    const ledger = readEvidence(runDir(root, final.runId));
-    const closures = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
-    expect(closures).toHaveLength(1);
-    const closure = closures.at(-1)!;
-    const validation = ledger.filter(entry => entry.kind === 'validation').at(-1)!;
-    expect(closure.sequence).toBeLessThan(validation.sequence); expect(closure.treeAfterHash).toBe(validation.treeHash);
-    expect(final.status).toBe('complete');
-    expect(final.stages.review.gate?.pass).toBe(true);
-  });
   it('engine-runs-it and review-reads-record: author and repair end first; each tree has one execution and independent review consumes it', async () => {
     const root = project(); projectValidation(root); const calls: string[] = [];
     const final = await engineering(root, { async run(prompt, role, opts) {
@@ -478,7 +438,7 @@ describe('scheduler owns validation after author settlement', () => {
     expect(await gateValidation.recordGateValidationDelta(root, runId, 'review')).toMatchObject({ pass: false,
       current: [], delta: [{ state: 'unverified', reason: 'No completed engine validation covers the current source tree' }] });
     expect(gateValidation.currentValidationResults(root, runId).map(command => command.exitCode)).toEqual([null]);
-    expect(gateValidation.currentValidationRegressions(root, runId)).toEqual([]);
+    expect(gateValidation.currentValidationFailures(root, runId)).toEqual([]);
     const passed = await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand });
     expect(passed).toMatchObject({ resourceState: 'complete', pass: true });
     expect(passed.treeHash).toBe(failed.treeHash); expect(passed.recordPath).not.toBe(failed.recordPath);
@@ -495,8 +455,8 @@ describe('scheduler owns validation after author settlement', () => {
     expect(retained).toMatchObject({ resourceState: 'complete', pass: false }); expect(executions).toBe(2);
     expect(await gateValidation.recordGateValidationDelta(root, runId, 'review')).toMatchObject({ pass: false, current: [{ exitCode: 7 }] });
     expect(gateValidation.currentValidationResults(root, runId)).toMatchObject([{ state: 'failed', exitCode: 7 }]);
-    expect(gateValidation.currentValidationRegressions(root, runId)).toMatchObject([{ reproduction: (retained as evidenceOwner.EvidenceEntry).sequence,
-      record: { exitCode: 7, validationRecord: (retained as evidenceOwner.EvidenceEntry).sequence } }]);
+    expect(gateValidation.currentValidationFailures(root, runId)).toMatchObject([{ ...command(7), exitCode: 7 }]);
+
   });
 
   it('engine-runs-it: validation keeps its resource allowance after the author clock has expired', async () => {
@@ -522,72 +482,6 @@ describe('scheduler owns validation after author settlement', () => {
     const record = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'validation') as ValidationFact;
     expect(record.executions[0].commands.map(command => command.exitCode)).toEqual([0, 0, 0]);
     expect(record.resourceState).toBe('complete'); expect(final.stages.implement.attempts).toHaveLength(1);
-  });
-
-  it('unfinished command cannot confirm repair despite a positive raw exit', () => {
-    const record: evidenceOwner.EvidenceEntry = { version: 1, sequence: 1, at: 'recorded', kind: 'command', owner: 'code', stageId: 'review',
-      attemptIndex: 1, commandId: 'fixture', command: 'predicate', exitCode: 7, unfinished: true,
-      context: { cwd: '/workspace', shell: '/bin/sh' }, outputDigest: 'digest', treeHash: 'tree', treeAfterHash: 'tree' };
-    const finding = { id: 'value', paths: ['value.txt'], reason: 'Opaque predicate', reproduction: 1,
-      class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
-    const gate = { stageId: 'review', attemptIndex: 1, treeHash: 'tree' };
-    expect(assessFindings([finding], [record], gate).confirmed).toEqual([]);
-    expect(assessFindings([finding], [{ ...record, unfinished: false }], gate).confirmed).toHaveLength(1);
-  });
-
-  it.each([null, 7])('recorded command copies unfinished with raw exit %s and supplies no implicit duration', async exitCode => {
-    const root = project(); projectValidation(root);
-    vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
-    const command = vi.spyOn(validationOwner, 'runProjectCommand').mockResolvedValue({ exitCode, unfinished: true, error: 'auxiliary diagnostic', stdout: 'partial reporter bytes' });
-    let execute!: Parameters<typeof recorderOwner.startCommandRecorder>[1];
-    vi.spyOn(recorderOwner, 'startCommandRecorder').mockImplementation(async (_directory, callback) => {
-      execute = callback; return { command: 'fixture-recorder', close: async () => {} };
-    });
-    const final = await engineering(root, { async run(_prompt, _role, opts) {
-      if (opts.stageId === 'review') {
-        const response = await execute({ command: 'finite experiment', cwd: root, shell: '/bin/sh' }, new AbortController().signal) as { record: evidenceOwner.EvidenceEntry };
-        expect(command.mock.calls[0][0].timeoutMs).toBeUndefined();
-        expect(response.record).toMatchObject({ kind: 'command', exitCode, unfinished: true });
-        expect(readEvidence(opts.runDir).find(entry => entry.sequence === response.record.sequence)).toEqual(response.record);
-        const finding = { id: 'observation', paths: ['value.txt'], reason: 'Opaque command facts', reproduction: response.record.sequence,
-          class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
-        expect(assessFindings([finding], readEvidence(opts.runDir), { stageId: opts.stageId, attemptIndex: 1,
-          treeHash: captureProjectTree(root, '', opts.runDir).hash }).confirmed).toEqual([]);
-        return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-      }
-      writeFileSync(join(root, 'value.txt'), 'good');
-      return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
-    } });
-    expect(final.status).toBe('complete');
-  });
-
-  it('repair replay copies unfinished as a review fact without overriding a passing verdict', async () => {
-    const root = project(); projectValidation(root); let reviews = 0;
-    vi.spyOn(validationOwner, 'runValidationCommand').mockResolvedValue({ exitCode: 0 });
-    const command = vi.spyOn(validationOwner, 'runProjectCommand').mockResolvedValueOnce({ exitCode: 1 })
-      .mockResolvedValue({ exitCode: 0, unfinished: true });
-    let execute!: Parameters<typeof recorderOwner.startCommandRecorder>[1];
-    vi.spyOn(recorderOwner, 'startCommandRecorder').mockImplementation(async (_directory, callback) => {
-      execute = callback; return { command: 'fixture-recorder', close: async () => {} };
-    });
-    const final = await engineering(root, { async run(_prompt, _role, opts) {
-      if (opts.stageId !== 'review') {
-        writeFileSync(join(root, 'value.txt'), opts.stageId === 'repair_review' ? 'good' : 'bad');
-        return { output: JSON.stringify({ status: 'delivered', summary: 'Done', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: ['value.txt'], writeAttribution: 'structured' };
-      }
-      const first = ++reviews === 1;
-      const response = first ? await execute({ command: 'independent predicate', cwd: root, shell: '/bin/sh' }, new AbortController().signal) as { record: evidenceOwner.EvidenceEntry } : undefined;
-      const value = verdict(opts.runDir); value.pass = !first;
-      if (first) value.criteria.value = { status: 'fail', evidence: 'Completed independent predicate reproduced the bad value.' };
-      return { output: JSON.stringify({ ...value,
-        ...(first ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Completed independent predicate' } } : {}),
-        audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Replace bad value', reproduction: response!.record.sequence,
-          class: 'criterion_unmet' as const, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
-    } });
-    const closure = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
-    expect(closure).toMatchObject({ exitCode: 0, unfinished: true });
-    expect(command.mock.calls[1][0].timeoutMs).toBeUndefined();
-    expect(final.status).toBe('complete'); expect(reviews).toBe(2);
   });
 
   it('unfinished reporter bytes are retained without interpreting completed-test totals', async () => {

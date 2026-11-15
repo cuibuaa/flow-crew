@@ -127,6 +127,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       }
     }
     for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
+      if (terminalStatus === RUN_STATUS.ACCEPTED_BLOCKED) {
+        notMatchedReasons.push(`${terminalStatus}: requires an explicitly permitted gate outcome`);
+        continue;
+      }
       const accepting = isSuccessfulRunStatus(terminalStatus);
       for (const path of entry.paths) {
 

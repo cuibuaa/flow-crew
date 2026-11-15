@@ -72,6 +72,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
     expect(settled).toMatchObject({ status: 'incomplete', currentIteration: 1, maxIterations: 1 });
     updateRunState(project, created.runId, state => {
       state.maxIterations = iterations;
+      if (state.resourcePolicy) state.resourcePolicy.iterations = iterations;
       state.failureReason = 'Persisted premature incomplete fixture.';
     });
     return readRunState(project, created.runId);

@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { runStage } from '../src/worker.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -13,7 +14,7 @@ import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.j
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
 import { createRun } from './test-support/create-run.js';
 import { runDir } from '../src/store.js';
-import { runStage } from '../src/worker.js';
+
 import type { AgentConfig } from '../src/adapters/base.js';
 
 const roots: string[] = [];
@@ -53,7 +54,7 @@ describe('artifact locations and historical observations', () => {
     for (const name of ['coder', 'qa']) writeFileSync(join(agentsDir, `${name}.yaml`), JSON.stringify(agent(name)));
     const state = await runWorkflow(workflow, '', f.project, { run: async (_prompt, _role, opts) => {
       invoked.push(opts.stageId);
-      return fixtureResult({ output: opts.stageId === 'review' ? JSON.stringify({ pass: true, reason: 'Fixture passed', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'Fixture delivered', exitCode: 0, duration_ms: 1 }, opts);
+      return fixtureResult({ output: opts.stageId === 'review' ? JSON.stringify({ outcome: 'accepted', reason: 'Fixture passed', criteria: {}, audit_findings: { version: 1, findings: [] } }) : 'Fixture delivered', exitCode: 0, duration_ms: 1 }, opts);
     } }, new Map(['coder', 'qa'].map(name => [name, agent(name)])));
     expect(state.status, state.failureReason).toBe('complete');
     expect(invoked).toEqual(expect.arrayContaining(['work', 'review']));

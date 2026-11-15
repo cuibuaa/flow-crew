@@ -1,3 +1,4 @@
+import { currentGateAnswers } from './confirmed-rejection.js';
 import type { AttemptDeadlineClock } from '../../src/attempt-deadline.js';
 import { runStage as executeStage } from '../../src/worker.js';
 import { runPreparedWorkflow as executeWorkflow } from './ready-setup.js';
@@ -12,7 +13,7 @@ export function stationaryStageClock(): AttemptDeadlineClock {
 }
 
 export function runStage(...[adapter, opts]: Parameters<typeof executeStage>) {
-  return executeStage(adapter, { ...opts, deadlineClock: opts.deadlineClock ?? stationaryStageClock() });
+  return executeStage(currentGateAnswers(adapter), { ...opts, deadlineClock: opts.deadlineClock ?? stationaryStageClock() });
 }
 
 export async function runWorkflow(...args: Parameters<typeof executeWorkflow>) {

@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
-import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
+import { currentGateAnswer, withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -352,8 +352,8 @@ describe('live guidance and command controls', () => {
     }
     // Re-review may reject a previously met criterion, while still covering the whole brief.
     const published = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8'));
-    expect(published).toMatchObject(verdict);
-    if (history === 'rejected') expect(published.audit_findings.findings[0].reproduction).toEqual(expect.any(Number));
+    expect(published).toMatchObject(currentGateAnswer(verdict));
+    if (history === 'rejected') expect(published.audit_findings.findings[0].class).toBe('criterion_unmet');
   });
 
 });

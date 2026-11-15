@@ -10,6 +10,7 @@ import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdi
 import { fcGlobalDir, setFcGlobalDir, runDir, writeRunState, type StoreState } from '../src/store.js';
 import { parseDispatchedStageConfig } from '../src/scheduler.js';
 
+vi.hoisted(() => vi.resetModules());
 const carrier = vi.hoisted(() => ({ path: '', reads: 0, first: '', later: '' }));
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs')>();

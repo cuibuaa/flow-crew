@@ -1,7 +1,7 @@
 import { gateReviewedAuthorIds } from '../../repair-topology.js';
 export { gateReviewedAuthorIds } from '../../repair-topology.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
-// Boundary: Collect gate facts and choose confirmed recovery routes. Contract refusal receives only the campaign publisher.
+// Boundary: Collect gate facts and choose admitted recovery routes. Contract refusal receives only the campaign publisher.
 import { GateVerdict, RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 
@@ -50,10 +50,11 @@ export function classifyGateRecoveryFact(
   effectiveVerdict: GateRecoveryFact['effectiveVerdict'],
 ): GateRecoveryFact {
   const kind = effectiveVerdict?.refusal?.kind;
-  const rejectionKind: GateRecoveryFact['rejectionKind'] = kind === 'repairability'
+  const rejectionKind: GateRecoveryFact['rejectionKind'] = ['repairability', 'audit_findings', 'criterion_evidence'].includes(kind ?? '')
     ? 'engine_contract_or_evidence_rejection'
-    : effectiveVerdict?.repairability?.disposition === 'irreparable'
+    : effectiveVerdict?.outcome === 'rejected_irreparable' || effectiveVerdict?.repairability?.disposition === 'irreparable'
     ? 'irreparable_rejection'
+    : kind === 'validation_regression' ? 'repairable_failure'
     : effectiveVerdict?.pass === false
       && (effectiveVerdict.repairability?.disposition === 'repairable' || authoredVerdict?.pass === false)
     ? 'repairable_failure'
@@ -128,7 +129,7 @@ export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: st
   return allStages.filter(s => referencesFailedGate(s, id => failedSet.has(id)));
 }
 
-/** Confirmed independent findings alone authorize admitted repair routes. */
+/** The gate outcome authorizes admitted repair routes. */
 export function findGateRecoveryStages(
   allStages: StageConfig[],
   rejectedGateIds: string[],
@@ -141,14 +142,11 @@ export function findGateRecoveryStages(
 
     if (rejectionKind === 'irreparable_rejection') continue;
 
-    // Repair admission depends only on confirmed reviewer reproductions.
-    // Comparison and other acceptance evidence do not enter this judgment.
-    if (fact?.effectiveVerdict?.findings?.confirmed.length) {
+    // The rejecting gate owns repair authority; evidence commands are optional.
+    if (rejectionKind === 'repairable_failure') {
       for (const repair of findAllRetryToStages(allStages, [gateId])) selected.set(repair.id, repair);
       continue;
     }
-
-
   }
   return [...selected.values()];
 }
@@ -171,7 +169,7 @@ export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir
     if (isTerminalRunStatus(state.status)) return true;
     if (irreparable.length > 0) archiveRejectedGateRuntimeFacts(runDir(projectDir, runId), gateArchiveCoordinate(iteration, 1), facts);
     const detail = irreparable.length > 0
-      ? irreparable.map((entry) => `${entry.id}: ${entry.effectiveVerdict?.reason ?? 'gate rejected'}; ${entry.effectiveVerdict?.repairability?.evidence}`).join('; ')
+      ? irreparable.map((entry) => `${entry.id}: ${entry.effectiveVerdict?.reason ?? 'gate rejected'}${entry.effectiveVerdict?.repairability?.evidence ? `; ${entry.effectiveVerdict.repairability.evidence}` : ''}`).join('; ')
       : facts.contractRefusals
       .map((refusal) => `${refusal.id}: ${refusal.reason}`)
       .join('; ');

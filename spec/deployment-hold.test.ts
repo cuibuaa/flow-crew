@@ -89,7 +89,7 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
   let runId = '';
   const adapter = { async run(_prompt: string, _role: unknown, opts: Parameters<typeof fixtureResult>[1]) {
     calls.push(opts.stageId); runId = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'run.json'), 'utf8')).runId;
-    if (opts.stageId === 'producer') updateRunState(project, runId, state => { state.maxRetries = 1; });
+    if (opts.stageId === 'producer') updateRunState(project, runId, state => { state.maxRetries = 1; if (state.resourcePolicy) state.resourcePolicy.visits = 1; });
     if (opts.stageId === 'active_a') { enteredA.resolve(); await releaseA.promise; }
     if (opts.stageId === 'active_b') { enteredB.resolve(); await releaseB.promise; }
     if (opts.stageId === 'review') writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass: !gate, reason: gate ? 'Independent rejection remains binding.' : 'Independently accepted.', criteria: { [criterion]: { status: gate ? 'fail' : 'pass', evidence: 'Completed producer and later work inspected.' } } }));
@@ -520,7 +520,7 @@ it.each([2, 99])('settles a lost scheduler through existing recovery under a hol
   const created = createRun(project, config.name, stringify(config), config.stages.map(stage => stage.id), brief);
   updateRunState(project, created.runId, state => {
     state.taskDescription = brief;
-    state.currentIteration = 1; state.maxIterations = 2; state.maxRetries = 1;
+    state.currentIteration = 1; state.maxIterations = 2; state.maxRetries = 1; if (state.resourcePolicy) state.resourcePolicy.visits = 1;
     recordAdmittedPlan(state, config.stages, created.runDirPath, 'Admitted recovery fixture.');
     state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: 999_999_999, processStart: undefined };
     Object.assign(state.engineCheckpoint, { version });

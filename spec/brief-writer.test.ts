@@ -256,7 +256,7 @@ function launchFixtures(root: string, brief: string): string {
   writeFileSync(join(fixtures, 'plan.json'), JSON.stringify(mockEntryPlan));
   const ids = extractBriefCriteria(brief).criteria.map(c => c.id);
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'The greeting is available.' }));
-  writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Verified.',
+  writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ outcome: 'accepted', reason: 'Verified.',
     criteria: Object.fromEntries(ids.map(id => [id, { status: 'pass', evidence: 'The greeting is available.' }])),
     audit_findings: { version: 1, findings: [] } }) }));
   return fixtures;
@@ -285,7 +285,7 @@ it('raw text reaches the single entry with evidence attached', async () => {
   writeFileSync(join(fixtures, 'plan.json'), JSON.stringify({ output_text: 'Plan ready.',
     write_files: { 'dispatch.yaml': JSON.stringify(dispatch) } }));
   fixture('implement', 'The greeting is available.');
-  fixture('review', { pass: true, reason: 'Greeting verified.',
+  fixture('review', { outcome: 'accepted', reason: 'Greeting verified.',
     criteria: Object.fromEntries(ids.map(id => [id, { status: 'pass', evidence: 'The greeting is available.' }])),
     audit_findings: { version: 1, findings: [] } });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),

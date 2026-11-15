@@ -1,9 +1,9 @@
+import { readAdmittedContract } from '../../brief-criteria.js';
 import { gateCriterionRefs } from '../../handoff.js';
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
-import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult } from '../../project-validation.js';
-import { assessFindings, AuditFindingsSchema, projectLegacyFindings, validateFindingVerdict, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
+import { GATE_OUTCOMES, projectLegacyFindings, validateFindingVerdict, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
 import { StageConfig, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
@@ -17,13 +17,14 @@ import { join } from 'node:path';
 import { GateContract, loadGateContract, validateVerdictAgainstContract } from './gate-contract.js';
 import { projectGateVerdict, readGateVerdictDocument, GateVerdictDocument, validateSettledGateVerdict, explicitPassContradiction, validateGateCriterionEvidence, validateGateRepairability, assignedGateCriterionRefs } from './gate-evidence.js';
 import { archivedGateRejections } from './gate-archives.js';
-import { currentValidationResults, currentValidationRegressions } from './gate-validation.js';
+import { currentValidationResults, currentValidationFailures } from './gate-validation.js';
 
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
   const base = runDir(projectDir, runId);
   try {
     const parsed = JSON.parse(readFileSync(runRecordPath(base, `verdict_${stageId}.json`), 'utf-8')) as Record<string, unknown>;
-    if (isTerminalStudyCompletionArtifact(parsed) && !('repairability' in parsed)) return parsed;
+    const verdict = projectGateVerdict(parsed);
+    if ((!verdict.outcome || verdict.pass) && isTerminalStudyCompletionArtifact(parsed) && !('repairability' in parsed)) return parsed;
   } catch { /* optional */ }
   return null;
 }
@@ -60,16 +61,17 @@ export function readGateEvaluation(
       if (record.kind === 'validation_regression' || record.kind === 'validation_unresolved') {
         const bytes = readFileSync(archived!.verdictPath);
         const authored = new GateVerdictDocument(bytes);
-        return settleFindingAssessment(evaluateGateVerdict(authored, projectDir, stageId, runId, contract, true), authored, projectDir, stageId, runId);
+        return settleDeclaredValidation(evaluateGateVerdict(authored, projectDir, stageId, runId, contract, true), authored, projectDir, stageId, runId);
       }
       if (typeof record.engine_effective_pass === 'boolean') return { pass: record.engine_effective_pass,
         reason: record.engine_rejection_reason,
+        ...(GATE_OUTCOMES.includes(record.outcome) ? { outcome: record.outcome } : {}),
         ...(record.kind && !['pass', 'repairable', 'irreparable'].includes(record.kind) ? { refusal: { kind: record.kind } } : {}),
         ...(record.repairability ? { repairability: record.repairability } : {}),
         ...(record.findings ? { findings: record.findings } : {}) };
     } catch { /* No live verdict or readable archived conclusion. */ }
   }
-  return settleFindingAssessment(evaluateGateVerdict(document, projectDir, stageId, runId, contract, true), document, projectDir, stageId, runId);
+  return settleDeclaredValidation(evaluateGateVerdict(document, projectDir, stageId, runId, contract, true), document, projectDir, stageId, runId);
 }
 
 /** Old settled verdicts predate the derived projection. Read it without
@@ -77,10 +79,11 @@ export function readGateEvaluation(
 export function projectLegacyGateAssessment(projectDir: string, runId: string, stageId: string, verdict: GateVerdict): GateVerdict {
   const document = readGateVerdictDocument(runDir(projectDir, runId), stageId);
   const kind = verdict.refusal?.kind ?? ('kind' in verdict ? verdict.kind : undefined);
-  if (kind === 'validation_regression' || kind === 'validation_unresolved') {
-    return settleFindingAssessment(evaluateGateVerdict(document, projectDir, stageId, runId, undefined, true), document, projectDir, stageId, runId)
+  if ((kind === 'validation_regression' || kind === 'validation_unresolved') && !verdict.validation) {
+    return settleDeclaredValidation(evaluateGateVerdict(document, projectDir, stageId, runId, undefined, true), document, projectDir, stageId, runId)
       ?? { pass: false, refusal: { kind: 'missing_verdict' }, reason: 'Historical validation refusal has no independent gate verdict' };
   }
+  if (verdict.outcome) return verdict;
   return projectLegacyFindings({ ...verdict, ...(verdict.validation ? { validation: verdict.validation.map(result => ({
     ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result),
   })) } : {}) }, document?.value.audit_findings);
@@ -94,27 +97,18 @@ export function settleGateEvaluation(projectDir: string, runId: string, stageId:
   const document = readGateVerdictDocument(runDir(projectDir, runId), stageId);
   const rawVerdict = evaluateGateVerdict(document, projectDir, stageId, runId, state.research ? null : loadGateContract(projectDir, runId, state.campaignStorageKey))
     ?? { pass: false, refusal: { kind: 'missing_verdict' as const }, reason: 'Gate did not produce a verdict' };
-  const verdict = settleFindingAssessment(rawVerdict, document, projectDir, stageId, runId)!;
+  const verdict = settleDeclaredValidation(rawVerdict, document, projectDir, stageId, runId)!;
   if (status.status === STAGE_STATUS.FAILED) return;
-  status.gate = { ...projectGateVerdict(verdict as unknown as Record<string, unknown>), ...(verdict.refusal ? { refusal: verdict.refusal } : {}), ...(verdict.findings ? { findings: verdict.findings } : {}), ...(verdict.validation ? { validation: verdict.validation } : {}), kind: verdict.refusal?.kind ?? (verdict.pass ? 'pass' : verdict.repairability?.disposition ?? 'repairable'), verdictSha256: document?.digest ?? null };
+  status.gate = { ...verdict, kind: verdict.refusal?.kind ?? (verdict.pass ? 'pass' : verdict.outcome === 'rejected_irreparable' ? 'irreparable' : verdict.repairability?.disposition ?? 'repairable'), verdictSha256: document?.digest ?? null };
   writeStageStatus(projectDir, runId, stageId, status);
 }
 
-/** The authored verdict remains intact; this projection owns confirmation and
- * receipt interpretation in run.json, the public facts view and reports. */
-function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerdictDocument | null,
+/** Preserve the gate outcome; declared validation exits supply the operator floor. */
+function settleDeclaredValidation(verdict: GateVerdict | null, document: GateVerdictDocument | null,
   projectDir: string, stageId: string, runId?: string): GateVerdict | null {
   if (!verdict || !document || !runId) return verdict;
-  const base = runDir(projectDir, runId), ledger = readEvidence(base);
-  const parsed = AuditFindingsSchema.safeParse(verdict.refusal?.kind === 'audit_findings' ? undefined : document.value.audit_findings);
-  let attemptIndex = 0;
-  try { attemptIndex = readStageStatus(projectDir, runId, stageId).attempts?.at(-1)?.index ?? 0; } catch { /* legacy verdict without stage status: no confirmed finding */ }
-  const treeHash = captureProjectTree(projectDir, '', base).hash;
-  const historical = !parsed.success && verdict.refusal?.kind !== 'audit_findings'
-    ? projectLegacyFindings(verdict, document.value.audit_findings).findings : undefined;
-  const findings = historical ?? assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
-  const regressions = currentValidationRegressions(projectDir, runId);
-  findings.confirmed.push(...regressions);
+  const findings = document.project().outcome ? undefined : projectLegacyFindings(verdict, document.value.audit_findings).findings;
+  const regressions = currentValidationFailures(projectDir, runId);
   const results = currentValidationResults(projectDir, runId);
   const validation = results.map(result => ({
     role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, totals: result.totals, testsRun: result.testsRun, failureCount: result.failureCount, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed,
@@ -123,11 +117,10 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const unverified = validation.filter(result => result.measurement === 'unverified');
   const validationNote = unverified.length ? ` Validation unverified: ${unverified.map(result => `${result.display ?? result.role} (exit ${result.exitCode ?? 'absent'})`).join('; ')}.` : '';
   const { findings: _findings, validation: _validation, ...authored } = verdict;
-  const reason = `${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${validationNote}`;
-  return { ...authored, ...(regressions.length && !authored.repairability ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Completed engine validation has a nonzero command exit' } } : {}),
-    ...(regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
-    ...(parsed.success || historical || regressions.length ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
-
+  const reason = `${verdict.reason ?? ''}${regressions.length ? ` Engine validation rejected: ${regressions.map(command => command.display ?? command.command).join('; ')}.` : ''}${validationNote}`;
+  return { ...authored,
+    ...(regressions.length ? { pass: false, refusal: { kind: 'validation_regression' as const } } : {}),
+    ...(findings ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
 }
 
 function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: string, stageId: string, runId?: string,
@@ -135,11 +128,8 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   const raw = document?.value;
   if (!raw) return null;
-  const v = raw;
-  const accepted = raw.repairability !== undefined && runId && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId] : undefined;
-  if (document?.value.repairability && accepted && (!runId || validateSettledGateVerdict(base, runId, stageId, accepted.attempts?.at(-1), document.digest))) {
-    return { pass: false, refusal: { kind: 'repairability' }, reason: 'Gate contract violation: repairability requires the unchanged canonical verdict and protected receipt of the current settled completed gate execution; rerun the gate' };
-  }
+  const projected = projectGateVerdict(raw), currentOutcome = projected.outcome;
+  const v: Record<string, unknown> = { ...raw, ...projected };
 
   if (runId && v.pass === true && existsSync(runRecordPath(base, 'run.json'))) {
     const state = readRunState(projectDir, runId);
@@ -159,7 +149,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   }
   const repairabilityViolation = validateGateRepairability(raw);
   if (repairabilityViolation) return { pass: false, reason: repairabilityViolation, refusal: { kind: 'repairability' } };
-  if (raw.repairability && isTerminalStudyCompletionArtifact(raw)) {
+  if (!currentOutcome && raw.repairability && isTerminalStudyCompletionArtifact(raw)) {
     return { pass: false, reason: 'Gate contract violation: rejected repairability and terminal study completion success are incompatible outcome declarations; remove one conflicting declaration', refusal: { kind: 'repairability' } };
   }
   // A secondary refusal cannot turn an irreversible rejected fact into repair
@@ -171,25 +161,23 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   const classless = archived?.length && archived.every(finding => finding.class === undefined);
   const violation = classless
     ? v.pass === true ? 'AUDIT_FINDINGS_INVALID: historical findings reject under the original contract' : undefined
-    : validateFindingVerdict(v, gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId)), v.audit_findings !== undefined && runId ? {
-      ledger: readEvidence(base), gate: { stageId,
-        attemptIndex: existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId]?.attempts?.at(-1)?.index ?? 0 : 0,
-        treeHash: captureProjectTree(projectDir, '', base).hash },
-    } : undefined);
+    : validateFindingVerdict(raw, gateCriterionRefs(base, assignedGateCriterionRefs(base, stageId)),
+      !!runId && currentOutcome && readAdmittedContract(base).declaration.allow_blocked_acceptance === true);
   if (violation) return reject('audit_findings', violation);
-  const contradiction = explicitPassContradiction(v, 'verdict');
-  if (contradiction) {
-    log.warn({ stageId, runId, contradiction }, 'Gate verdict rejected because its structured fields contradict pass=true');
-    return { pass: false, refusal: { kind: 'contradiction' }, reason: contradiction };
-  }
-  const criterionViolation = validateGateCriterionEvidence(base, stageId, v);
+  const contradiction = !currentOutcome && explicitPassContradiction(raw, 'verdict');
+  if (contradiction) return reject('contradiction', contradiction);
+  const criterionViolation = validateGateCriterionEvidence(base, stageId, raw);
   if (criterionViolation) {
     log.warn({ stageId, runId, criterionViolation }, 'Gate verdict rejected by canonical criterion coverage contract');
     return reject('criterion_evidence', criterionViolation);
   }
-  if (runId && isTerminalStudyCompletionArtifact(v)) {
+  if (!currentOutcome && runId && isTerminalStudyCompletionArtifact(v)) {
     writeTerminalStudyCompletionArtifacts(projectDir, runId, stageId, v);
     return { pass: true, reason: 'study_complete_without_model_success' };
+  }
+  const accepted = (currentOutcome !== undefined || raw.repairability !== undefined) && runId && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId] : undefined;
+  if ((currentOutcome || raw.repairability) && accepted && (!runId || validateSettledGateVerdict(base, runId, stageId, accepted.attempts?.at(-1), document.digest))) {
+    return { pass: false, refusal: { kind: 'repairability' }, reason: 'Gate contract violation: outcome requires the unchanged canonical verdict and protected receipt of the current settled completed gate execution; rerun the gate' };
   }
   // Contract enforcement: if a contract is provided, validate the verdict against it.
   if (contract && runId) {
@@ -205,6 +193,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   // Preserve the public reader's legacy fields; only engine refusals can carry
   // the private classification marker into runtime facts.
   const verdict = { ...v };
+  if (!currentOutcome) delete verdict.outcome;
   delete verdict.contractViolation;
   delete verdict.refusal;
   delete verdict.findings;

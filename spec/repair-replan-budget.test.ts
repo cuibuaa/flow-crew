@@ -126,7 +126,7 @@ describe('admitted repair routes and budgets', () => {
     expect(result.state.currentIteration).toBe(1);
     expect([result.plans, result.repairs, result.reviews]).toEqual([1, 3, 4]);
     expect(result.log.match(/Gate re-evaluations used: 3\/3/g)).toHaveLength(1);
-    expect(result.state.failureReason).toContain(maxIterations === 1 ? 'Workflow iteration budget exhausted' : 'gate re-evaluations used: 3/3');
+    expect(result.state.failureReason).toContain('Bound resourcePolicy.visits reached (3/3)');
     expect(result.state.failureReason).toContain(`iteration 1/${maxIterations}`);
     if (maxIterations > 1) expect(result.state.failureReason).not.toContain('iteration budget exhausted');
     expect(result.events.filter(event => event.type === 'run_completed')).toEqual([

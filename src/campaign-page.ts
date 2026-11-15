@@ -1205,6 +1205,7 @@ export const RUN_STATUS_EXPLANATIONS = {
   [RUN_STATUS.RUNNING]: 'Executing',
   [RUN_STATUS.PARKED]: 'Run paused; inspect the recorded lifecycle reason',
   [RUN_STATUS.COMPLETE]: 'Engineering DAG completed',
+  [RUN_STATUS.ACCEPTED_BLOCKED]: 'Gate accepted the declared blocked or limited outcome',
   [RUN_STATUS.FAILED]: 'Execution failed',
   [RUN_STATUS.SHIPPED]: 'Research or declared gate confirmed delivery',
   [RUN_STATUS.CEILING_HIT]: 'Honest ceiling reached without a better result',

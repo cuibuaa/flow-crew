@@ -15,7 +15,7 @@ expresses human wrap-up intent and may link to an exact daemon task; it is optio
 | `pending` | Queued, not executing |
 | `running` | Executing; inspect process identity as well as stored status |
 | `parked` | Paused for a decision or proven resumable interruption; not terminal |
-| `complete` | Terminal engineering completion or a completed instrument loop; project research conclusions remain in the instrument record |
+| `complete`, `accepted_blocked` (the gate accepted a declared limited outcome) | Terminal engineering completion or a completed instrument loop; project research conclusions remain in the instrument record |
 | `shipped` | Recorded historical project ship decision |
 | `ceiling_hit` | Recorded historical process-level ceiling; not a metric win |
 | `failed`, `reality_gate_failed` | Terminal execution/check failure |

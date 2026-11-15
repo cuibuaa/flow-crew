@@ -87,8 +87,8 @@ describe('published declaration inputs', () => {
       expect(validateFindingVerdict({ pass: false, criteria: { criterion: { status: 'fail' } },
         audit_findings: { version: 1, findings: [{ id: 'defect', class: 'criterion_unmet', paths: ['output.txt'],
           reason: 'Missing required content.', criterion_ids: ['criterion'], invalidates_plan: false,
-          repair_role: 'coder', reproduction: null }] } }, ['criterion']), 'unconfirmed rejecting finding still refused')
-        .toContain('FINDING_REPRODUCTION_REQUIRED');
+          repair_role: 'coder', reproduction: null }] } }, ['criterion']), 'non-executable rejecting finding is admitted')
+        .toBeUndefined();
     } finally { owned.cleanup(); }
   });
 

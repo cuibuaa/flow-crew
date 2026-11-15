@@ -32,8 +32,8 @@ let root: string, project: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'fc-single-author-')); project = join(root, 'project'); mkdirSync(project); });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 function completed(opts: RunOpts, summary: string): RunResult {
-  const refs = opts.outputSchema?.anyOf?.[0].properties?.criteria.required ?? [];
-  return opts.outputSchema?.anyOf ? { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: true, reason: summary,
+  const refs = opts.outputSchema?.properties?.criteria?.required ?? [];
+  return opts.outputSchema?.properties?.outcome ? { exitCode: 0, duration_ms: 1, output: JSON.stringify({ outcome: 'accepted', reason: summary,
       criteria: Object.fromEntries(refs.map(id => [id, { status: 'pass', evidence: 'Synthetic fixture evidence.' }])), audit_findings: { version: 1, findings: [] } }) }
     : fixtureResult({ exitCode: 0, output: summary, duration_ms: 1 }, opts) as RunResult;
 }
@@ -103,7 +103,7 @@ describe('single-author admission and historical competition records', () => {
     expect(await cancel.cancelRun(created.runId)).toMatchObject({ ok: true, status: 'cancelled' });
     const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
     writeFileSync(join(fixtures, 'work.json'), JSON.stringify({ output_text: JSON.stringify({ status: 'delivered', summary: 'Retained work completed.', checks: [], caveats: [] }) }));
-    writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Retained work inspected.',
+    writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ outcome: 'accepted', reason: 'Retained work inspected.',
       criteria: { criterion_acceptance_criteria_1_b3246557: { status: 'pass', evidence: 'The retained predecessor and new work both completed.' } }, audit_findings: { version: 1, findings: [] } }) }));
     const cli = join(import.meta.dirname, '../dist/cli.js');
     new TaskRegistry({baseDir:fcGlobalDir()}).create({projectDir:project,run_id:created.runId,brief_text:legacyBrief,
