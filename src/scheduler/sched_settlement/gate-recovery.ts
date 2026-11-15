@@ -1,3 +1,5 @@
+import { gateReviewedAuthorIds } from '../../repair-topology.js';
+export { gateReviewedAuthorIds } from '../../repair-topology.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose confirmed recovery routes. Contract refusal receives only the campaign publisher.
 import { GateVerdict, RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
@@ -149,20 +151,6 @@ export function findGateRecoveryStages(
 
   }
   return [...selected.values()];
-}
-
-/** The authors whose results a gate reviews: its non-gate ancestors up to the nearest gates, which review the rest. */
-export function gateReviewedAuthorIds(gate: StageConfig, allStages: StageConfig[]): string[] {
-  const byId = new Map(allStages.map(stage => [stage.id, stage]));
-  const reviewed = new Set<string>();
-  const queue = [...(gate.depends_on ?? [])];
-  while (queue.length > 0) {
-    const stage = byId.get(queue.shift()!);
-    if (!stage || stage.is_gate || reviewed.has(stage.id)) continue;
-    reviewed.add(stage.id);
-    queue.push(...(stage.depends_on ?? []));
-  }
-  return [...reviewed];
 }
 
 /** A gate confirms or rejects this author's result: one that reviews the author, or the gate its repair returns to. */

@@ -26,15 +26,14 @@ prompt: |
   Put compiler output and caches in $TMPDIR. Declare required deliverables in artifact_contract.produces.
   Put evidence in the structured result. Scratch is retired at run termination.
   The scheduler serializes authors sharing a mutable project tree.
-  Engineering briefs start here. Your admitted result alone owns the run shape: use one author
-  followed by one independent gate when that satisfies the brief, or decompose distinct duties and
-  evidence dependencies. Both use the same scheduler admission, including the required repair route.
+  Engineering briefs start here. Declare authoring duties and independent reviews: use one author
+  followed by one gate when that satisfies the brief, or decompose distinct duties and
+  evidence dependencies. Recovery follows the injected repair topology contract.
   Record necessary assumptions in the assigned work; execution never pauses for questions.
   The parsed declaration alone determines engineering versus research; do not infer it from prose.
   Declare one independent read-only gate with is_gate: true after each authoring duty. That gate
   owns the full review and verdict against every assigned criterion, choosing its own experiments and
-  exploration. Do not insert a review-routing decision. Historical retry_to plus depends_on edges describe a repair and its gate;
-  the engine translates them into the same bounded successor transitions as decision declarations.
+  exploration. Do not insert a review-routing decision.
   Any ordinary stage may declare decision: {successors: [next_stage, replan], default: next_stage} and
   return {successor, reason} under its supplied result schema. Replan retains this iteration, progress,
   executed duties and budgets. Completed stages remain completed; a new decision stage can choose an

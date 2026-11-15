@@ -345,7 +345,11 @@ describe('in-iteration replanning through the revision authority', () => {
           expect(createHash('sha256').update(readFileSync(firstPath)).digest('hex')).toBe(firstHash);
           expect(before.startedAt).toBe(startedAt); expect(before.currentIteration).toBe(1);
           // Full candidate retains every executed identity and all result obligations.
-          writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: before.planControl!.stages.filter(stage => !stage.dynamic_dispatch) }));
+          writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: [
+            ...before.planControl!.stages.filter(stage => !stage.dynamic_dispatch),
+            { id: 'followup_author', role: 'coder', artifact_contract: contract },
+            { id: 'followup_review', role: 'qa', depends_on: ['followup_author'], is_gate: true, artifact_contract: contract },
+          ] }));
         }
       } else if (opts.stageId === 'work') {
         const before = readRunState(project, opts.runDir.split('/').at(-1)!);
@@ -353,7 +357,7 @@ describe('in-iteration replanning through the revision authority', () => {
         firstHash = createHash('sha256').update(readFileSync(firstPath)).digest('hex');
         output = choice('replan', 'Reread progress and confirm the remaining plan.');
       }
-      else if (opts.stageId === 'review') output = gate(opts);
+      else if (opts.stageId === 'review' || opts.stageId === 'followup_review') output = gate(opts);
       return { output, exitCode: 0, duration_ms: 1, tokens_in: 2, tokens_out: 3,
         ...(opts.stageId === 'plan' ? { writes: ['run:work/dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
     } };
@@ -370,6 +374,10 @@ describe('in-iteration replanning through the revision authority', () => {
     expect(state.stages.work.attempts).toHaveLength(1);
     expect(state.decisionGraph!.visits['1/replan']).toBe(1);
     expect(state.stages.review.status).toBe('complete');
+    expect(state.stages.followup_review.status).toBe('complete');
+    expect(state.planControl!.stages.find(stage => stage.id === 'repair_followup_review')).toMatchObject({
+      role: 'coder', depends_on: ['followup_review'], retry_to: ['followup_review'],
+    });
     expect(state.decisionGraph!.records.find(record => record.stageId === 'work')).toMatchObject({ successor: 'replan', planRevision: 0 });
     expect(committedWithoutPendingChoice).toBe(true);
     expect(acceptedCalls).toBe(legacyGap ? 2 : 1);

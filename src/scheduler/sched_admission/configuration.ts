@@ -127,7 +127,6 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
     raw = { ...fields, prompt_template: fields.prompt_template ?? task };
   }
   const stage = StageConfigSchema.parse(raw);
-  if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
   normalizeStageContracts([stage]);
   delete stage.max_retries;
   return stage;

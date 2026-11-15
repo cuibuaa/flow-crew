@@ -18,7 +18,7 @@ rejects unknown fields, and offers these optional stage keys:
 | `prompt_template` | Stage task text; `task` remains an accepted alias |
 | `condition` | Parsed execution predicate; [condition parser](../src/condition.ts) is the grammar |
 | `is_gate` | Independent verification stage |
-| `retry_to` | Repair's return gates; gates cannot declare this themselves |
+| `retry_to` | Explicit ordinary repair's return gates; see [repair topology](../src/repair-topology.ts) |
 | `criterion_refs` | Canonical IDs; empty/omitted conservatively covers the whole brief |
 | `skills` | Stage skill names |
 | `dynamic_dispatch` | Runtime plan expansion |
@@ -27,8 +27,8 @@ rejects unknown fields, and offers these optional stage keys:
 Whole-plan admission checks roles, graph, criterion coverage and
 read reachability before execution. Ordinary authors need downstream independent
 gates. Gates are read-only in both static and dispatched graphs; product changes belong to authors
-and repairs. Existing-work audits can consist of read-only gates with separate repairs. A malformed
-proposal is diagnosed rather than executed partially. The scheduler owns admission; optional
+and repairs. [Repair topology](../src/repair-topology.ts) owns recovery derivation and its live contract.
+A malformed proposal is diagnosed rather than executed partially. The scheduler owns admission; optional
 `plan-check` is diagnostic, using the same proposal inspector and recorded-run context selection.
 It does not certify revision commit eligibility (fresh state, attempt identity, idle boundary,
 executed duties); its synthetic brief mode cannot supply earlier run artifacts. Scope estimates
@@ -64,7 +64,7 @@ the operator guidance ledger. The run stores one admission refusal count and its
 replanning, iteration changes, planner identities and resume do not reset either. Historical
 retry-ledger runs remain readable; admission refuses their continuation with
 `legacy_retry_state_unsupported` because their old counters cannot prove a run-wide budget.
-New dependencies on rejected gates require an explicit repair return route;
+New dependencies on rejected gates require an admitted repair return route;
 the result and dispatch schemas remain single-sourced in the stage contract.
 When the admitted brief exists, `{task_description}` names its readable path instead
 of printing a second copy; standalone callers without a brief retain inline text. The ledger on
@@ -263,8 +263,7 @@ when the final tree's record is complete with exit 0 for every declared command.
 not decide whether a failing or unfinished command may stand. Setup measures and shows every declared command once. If any command has no completed exit 0,
 first launch requires the launching operator’s explicit acknowledgement of that measured setup.
 An acknowledged base changes launch permission only; final validation must still exit 0.
-An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
-skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
+A passing gate skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.
 
 `repairability: {version: 1, disposition: repairable|irreparable, evidence: <nonblank>}` is
@@ -363,7 +362,8 @@ A settled stage can submit `work/stages/<id>/plan_revision_request.json` with ve
 attempt identity, `attemptStartedAt`, `baseRevision`, `baseDigest`, `reason` and the complete
 proposed `stages` list. Revisions require all stages idle. Preserve admitted result obligations
 and executed history; unstarted declared tactics may be replaced. Path estimates may change with the tactics. Whole-plan admission
-runs again. A decision projection without matching journaled history cannot authorize a revision.
+runs again through the same [repair topology owner](../src/repair-topology.ts). A decision projection
+without matching journaled history cannot authorize a revision.
 Removing an obligation requires a new initial plan rather than an amendment.
 
 Repair batches use this same idle-boundary admission. Newly appended repair stages

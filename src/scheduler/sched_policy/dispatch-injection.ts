@@ -115,12 +115,6 @@ export function inspectDispatchProposal(
   if (itemList.length === 0) skippedReasons.push(admissionError('dispatch_stages_empty', 'dispatch contains no stages', 'stages'));
 
   normalizeStageContracts(dispatched);
-  // Model-emitted repairs retain their choice; fixed plans retain author results.
-  for (const repair of dispatched) {
-    if (state.workflowName === 'entry' && state.stages[dispatchStageId]?.attempts?.length && !repair.is_gate && repair.retry_to?.length) {
-      repair.decision ??= { kind: 'successor', successors: [...repair.retry_to, 'replan'], default: repair.retry_to[0] };
-    }
-  }
   resolveDispatchDependencies(dispatched, dispatchStageId);
   let criteria: BriefCriteriaArtifact | undefined;
   try {
@@ -153,6 +147,12 @@ export function inspectDispatchProposal(
     projectDir,
     runDir: runDirPath,
   });
+  // Both declared and derived repairs retain the entry workflow's replan choice.
+  for (const repair of dispatched) {
+    if (state.workflowName === 'entry' && state.stages[dispatchStageId]?.attempts?.length && !repair.is_gate && repair.retry_to?.length) {
+      repair.decision ??= { kind: 'successor', successors: [...repair.retry_to, 'replan'], default: repair.retry_to[0] };
+    }
+  }
   admission.proposalDigest = proposalDigest;
   const draftChecks = stageWorkPath(runDirPath, 'reality_checks.md');
   const checksPath = existsSync(draftChecks) ? draftChecks : runRecordPath(runDirPath, 'reality_checks.md');

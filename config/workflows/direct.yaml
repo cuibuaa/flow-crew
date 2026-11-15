@@ -20,8 +20,3 @@ dispatch:
     depends_on: [implement]
     is_gate: true
     scope: []
-  - id: repair
-    role: coder
-    depends_on: [review]
-    retry_to: [review]
-    scope: ["."]

@@ -55,6 +55,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     if (!state.planControl && !bootstrap && sorted.every((stage) => stage.artifact_contract)) {
       const admission = admitRevisionCandidate(sorted, state, projectDir, directory, roles);
       if (admission.pass) {
+        for (const stage of sorted) state.stages[stage.id] ??= { status: STAGE_STATUS.PENDING, retries: 0 };
         refreshRunQueryState(state, sorted);
         recordAdmittedPlan(state, sorted, directory, 'Initial typed workflow admitted', admission);
         writeRunState(projectDir, runId, state);

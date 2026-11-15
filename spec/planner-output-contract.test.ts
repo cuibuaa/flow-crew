@@ -39,7 +39,7 @@ describe('planner results contain consumed dispatch fields', () => {
     expect(admission.errors.map(error => error.message)).toEqual(expect.arrayContaining(graph.errors.map(error => error.message)));
     stages[0].depends_on = [];
     expect(inspectStageGraph(stages).errors).toEqual([]);
-    expect(topoSort(stages.reverse()).map(stage => stage.id)).toEqual(['work', 'review']);
+    expect(topoSort(stages.reverse()).map(stage => stage.id)).toEqual(['work', 'review', 'repair_review']);
   });
 
   it('admits a minimal author, gate and repair plan through the real validators', () => {

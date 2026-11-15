@@ -76,7 +76,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
       const pass = !options.alwaysReject && repairs > 0;
       writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass, reason: pass ? 'Cleanup verified.' : 'Report needs cleanup.',
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Correct report.md and review it again.' } } : {}) }));
-    } else if (opts.stageId === 'repair') {
+    } else if (opts.stageId === 'repair' || opts.stageId === 'repair_review') {
       repairs++;
       writeFileSync(join(projectDir, 'report.md'), 'Report corrected.\n');
     } else throw new Error(`Unexpected stage ${opts.stageId}`);
@@ -90,15 +90,16 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
 }
 
 describe('admitted repair routes and budgets', () => {
-  it('rejects an author/gate plan lacking a repair route before any work executes', async () => {
-    const result = await scenario({ negotiation: true, includeRepair: false });
-    expect(result.state.status, result.state.failureReason).toBe('failed');
+  it('derives a repair for an author/gate plan and executes it after rejection on the first planner attempt', async () => {
+    const result = await scenario({ includeRepair: false });
+    expect(result.state.status, result.state.failureReason).toBe('complete');
     expect(result.state.currentIteration).toBe(1);
-    expect([result.plans, result.repairs, result.reviews]).toEqual([1, 0, 0]);
-    expect(result.state.failureReason).toContain('review: missing repair route');
-    expect(result.state.failureReason).toContain('retry_to: [review]');
-    expect(result.state.failureReason).toContain('depends_on: [review]');
-    expect(result.state.stages).not.toHaveProperty('author');
+    expect([result.plans, result.repairs, result.reviews]).toEqual([1, 1, 2]);
+    expect(result.state.planControl!.stages.find(stage => stage.id === 'repair_review')).toMatchObject({
+      role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['report.md'],
+    });
+    expect(result.state.stages.repair_review.attempts).toHaveLength(1);
+    expect(readFileSync(join(projectDir, 'report.md'), 'utf8')).toBe('Report corrected.\n');
     expect(readFileSync(join(projectDir, 'input.txt'), 'utf8')).toBe('frozen evidence\n');
   });
 

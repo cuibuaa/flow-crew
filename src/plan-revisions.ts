@@ -134,11 +134,11 @@ export function applyPlanRevision(input: {
         if (previous && canonicalJson(raw) === canonicalJson(previous)) return structuredClone(previous);
         return input.parseStage(raw);
       });
-      const ids = new Set(candidate.map((stage) => stage.id));
-      if (ids.size !== candidate.length) fail('PLAN_REVISION_DUPLICATE_ID: every stage ID must be unique');
       // Admission may fill declarations for new work. It must not mutate the
       // current authority or change an executed duty after its identity check.
       const admission = input.admit(candidate, state);
+      const ids = new Set(candidate.map((stage) => stage.id));
+      if (ids.size !== candidate.length) fail('PLAN_REVISION_DUPLICATE_ID: every stage ID must be unique');
       decision.errors.push(...admission.errors);
       if (!admission.pass && !admission.errors.length) fail('PLAN_REVISION_ADMISSION_FAILED: candidate was not admitted');
       const candidateDuties = new Set(candidate.flatMap(resultDuties));

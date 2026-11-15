@@ -1,0 +1,78 @@
+{
+  "stages": [
+    {
+      "id": "fix",
+      "role": "coder",
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3",
+        "requirement-4"
+      ],
+      "task": "Repair the declared implementation and verify every assigned criterion.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "package",
+            "kind": "directory",
+            "nonempty": true
+          },
+          {
+            "root": "project",
+            "path": "tests/test_update.py",
+            "id": "write_refresh_tests",
+            "kind": "file",
+            "nonempty": true
+          }
+        ],
+        "reads": []
+      }
+    },
+    {
+      "id": "review",
+      "role": "qa",
+      "depends_on": [
+        "fix"
+      ],
+      "is_gate": true,
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3",
+        "requirement-4"
+      ],
+      "task": "Independently review every assigned criterion using reproducible evidence.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [],
+        "reads": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "package",
+            "kind": "directory",
+            "source": {
+              "kind": "stage",
+              "stage": "fix",
+              "artifact": "package"
+            }
+          },
+          {
+            "root": "project",
+            "path": "tests/test_update.py",
+            "id": "write_refresh_tests",
+            "kind": "file",
+            "source": {
+              "kind": "stage",
+              "stage": "fix",
+              "artifact": "write_refresh_tests"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -16,7 +16,6 @@ import * as configuration from '../src/scheduler/sched_admission/configuration.j
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { log } from '../src/scheduler/sched_admission/shared.js';
-import { buildRetryPreamble } from '../src/scheduler/sched_admission/dispatch-retry.js';
 
 const root = resolve(import.meta.dirname, '..');
 const fixture = join(root, 'spec/fixtures/planner-admission');
@@ -98,28 +97,22 @@ describe('optional planner proposal diagnostics', () => {
     expect(renderPlanInterface()).toContain('dispatch.yaml');
   });
 
-  it('reports the missing repair route while admitting report then review topology', async () => {
+  it('admits report then review by deriving repair without mutating diagnostic files', async () => {
     const ctx = setup();
     const snapshot = () => Object.fromEntries(readdirSync(ctx.directory, { recursive: true }).map(String)
       .filter(name => statSync(join(ctx.directory, name)).isFile()).map(name => [name, readFileSync(join(ctx.directory, name), 'utf8')]));
     const before = snapshot();
     const { exitCode, report } = await check(ctx);
-    expect(exitCode).toBe(1);
-    expect(report.errors).toHaveLength(1);
-    expect(report.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review', field: 'retry_to' }));
-    expect(report.errors.map(error => error.message)).toContain('review: missing repair route (no ordinary stage declares retry_to: [review], depends_on: [review]); repair rounds are bounded by gate_retry_loops.');
+    expect(exitCode).toBe(0);
+    expect(report.errors).toEqual([]);
     expect(snapshot()).toEqual(before);
     expect(report.errors).toEqual(inject(ctx).errors);
-    mkdirSync(runRecordPath(ctx.directory, 'stages/plan'), { recursive: true });
-    writeFileSync(runRecordPath(ctx.directory, 'stages/plan/status.json'), JSON.stringify({ admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: `invalid dispatch.yaml: dispatch admission rejected the complete proposal before stage injection.\nExact admission errors:\n${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}` }));
-    const retry = buildRetryPreamble(1, 1000, ctx.directory, 'plan');
-    expect(retry).toContain('RE-PLAN');
-    const facts = JSON.parse(retry.split('# Dispatch admission facts\n')[1].split('\n')[0]);
-    for (const error of report.errors) expect(facts.errors).toEqual(expect.arrayContaining([expect.objectContaining({ message: error.message })]));
   });
 
-  it('lets the planner correct a missing repair route within its own read-only plan-check', async () => {
-    const ctx = setup();
+  it('lets the planner declare explicit repair for a conditional author within read-only plan-check', async () => {
+    const conditional = structuredClone(rejected);
+    conditional.stages[0].condition = 'plan.status == complete';
+    const ctx = setup(conditional);
     updateRunState(ctx.project, ctx.runId, state => { delete state.terminalStates; });
     rmSync(runRecordPath(ctx.directory, 'brief_criteria.json'));
     writeFileSync(runRecordPath(ctx.directory, 'task_brief.md'), '# Review the report\n');
@@ -127,7 +120,7 @@ describe('optional planner proposal diagnostics', () => {
     expect(refused.exitCode).toBe(1);
     expect(refused.report.errors).toEqual([expect.objectContaining({ field: 'retry_to', stageId: 'review', message: expect.stringContaining('review: missing repair route') })]);
     expect(refused.report.errors).toEqual(inject(ctx).errors);
-    const corrected = structuredClone(rejected);
+    const corrected = structuredClone(conditional);
     corrected.stages.push({ id: 'repair', role: 'coder', scope: ['results/report.md'], depends_on: ['review'], retry_to: ['review'] });
     // A second planner also owns dispatch.yaml; order that output after plan
     // so this probe isolates whether a planner can count as ordinary repair.

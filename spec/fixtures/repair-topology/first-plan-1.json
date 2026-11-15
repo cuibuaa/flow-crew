@@ -1,0 +1,78 @@
+{
+  "stages": [
+    {
+      "id": "repair_cache_get",
+      "role": "coder",
+      "scope": [
+        "package"
+      ],
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3",
+        "requirement-4",
+        "requirement-5",
+        "requirement-6",
+        "requirement-7"
+      ],
+      "task": "Repair the declared implementation and verify every assigned criterion.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "bounded_cache_package",
+            "kind": "directory",
+            "nonempty": true
+          }
+        ],
+        "reads": []
+      }
+    },
+    {
+      "id": "review_cache_get",
+      "role": "qa",
+      "depends_on": [
+        "repair_cache_get"
+      ],
+      "is_gate": true,
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3",
+        "requirement-4",
+        "requirement-5",
+        "requirement-6",
+        "requirement-7"
+      ],
+      "task": "Independently review every assigned criterion using reproducible evidence.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [],
+        "reads": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "repaired_package",
+            "kind": "directory",
+            "source": {
+              "kind": "stage",
+              "stage": "repair_cache_get",
+              "artifact": "bounded_cache_package"
+            }
+          },
+          {
+            "root": "project",
+            "path": "tests",
+            "id": "visible_tests",
+            "kind": "directory",
+            "source": {
+              "kind": "input"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

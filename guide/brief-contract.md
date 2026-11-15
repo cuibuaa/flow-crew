@@ -61,7 +61,7 @@ validation:
 
 Follow it with stage-readable goal, constraints and acceptance prose. Engineering starts at the
 planner, whose admitted graph may be one author followed by an independent gate or a decomposition.
-Both pass through the same scheduler admission and required repair routing. A `research` block with
+Both use scheduler admission and its [repair topology](../src/repair-topology.ts). A `research` block with
 `protocol: research-instrument/v1` constructs an author and an optional declared project
 review directly. No model chooses the research workflow. Legacy active declarations,
 including `objective:`, are refused with a diagnostic naming the required version.

@@ -3,9 +3,11 @@ import { engineDirectory, runRecordPath, stageWorkPath } from './run-layout.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { type Schema } from './reality-gate/checks/json-schema-match.js';
 import { REALITY_CHECK_TYPES } from './reality-gate/types.js';
+import { REPAIR_TOPOLOGY_SCHEMA, REPAIR_TOPOLOGY_CONTRACT, REPAIR_TOPOLOGY_EXAMPLE } from './repair-topology.js';
 
 const strings: Schema = { type: 'array', items: { type: 'string' } };
 export const PLAN_STAGE_SCHEMA: Schema = {
+  ...REPAIR_TOPOLOGY_SCHEMA,
   type: 'object', required: ['id', 'role'], additionalProperties: false,
   properties: {
     id: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' },
@@ -33,7 +35,7 @@ export const RECORDED_PLAN_STAGE_SCHEMA: Schema = { ...PLAN_STAGE_SCHEMA, proper
   race: { type: 'boolean' }, // Historical records only.
   dependency_reasons: { type: 'object', additionalProperties: { type: 'string' } },
   max_retries: { type: 'number' }, timeout_ms: {}, timeout_total_ms: {}, resources: {},
-} };
+}, anyOf: undefined };
 export const RECORDED_PLAN_SCHEMA: Schema = { ...PLAN_SCHEMA, additionalProperties: true, properties: {
   stages: { ...PLAN_SCHEMA.properties!.stages, items: RECORDED_PLAN_STAGE_SCHEMA },
 } };
@@ -42,6 +44,8 @@ export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
     + 'Write the complete plan to work/dispatch.yaml below the run envelope as a JSON object {stages: [...], reality_checks?: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
+    + REPAIR_TOPOLOGY_CONTRACT + '\n'
+    + 'Minimal plan (empty criterion_refs inherit the brief): ' + JSON.stringify(REPAIR_TOPOLOGY_EXAMPLE) + '\n'
     + 'Use PLAN_SCHEMA above for the plan shape; plan-check is an optional proposal diagnostic. '
     + 'Declare optional deterministic checks in reality_checks; omission inherits admitted checks, while [] clears them. '
     + 'A sibling fenced-YAML reality_checks.md remains a read alias for one release.';

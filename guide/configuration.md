@@ -143,7 +143,7 @@ See [content settlement](../src/scheduler/sched_scope/reconciliation.ts).
 
 A brief declaring `research.protocol: research-instrument/v1` constructs its author and optional declared project reviewer directly. The frozen project instrument owns verdicts and final report content.
 Engineering briefs enter `entry.yaml` at the planner. Its admitted graph may contain one author
-and an independent gate or a decomposition; both use the same admission and required repair routes.
+and an independent gate or a decomposition. Recovery follows the [repair topology owner](../src/repair-topology.ts).
 The parsed declaration alone decides research versus engineering. Each planned author result receives
 one full independent read-only review. The reviewer chooses its exploration and owns the verdict.
 There is no preliminary review-routing decision. Historical review-routing runs remain readable;

@@ -82,12 +82,12 @@ describe('direct workflow', () => {
       }
     });
     expect(result.status).toBe('complete');
-    expect(captured.map(call => call.id)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(captured.map(call => call.id)).toEqual(['implement', 'review', 'repair_review', 'review']);
     for (const call of captured) {
       expect(call.system).toContain(task.trim());
       expect(call.system).toContain('## Review contract');
       expect(call.system).toContain('Never read or expose secrets');
-      if (call.id === 'repair') {
+      if (call.id === 'repair_review') {
         expect(call.user).toContain('rejected_verdict_review.json');
         expect(call.user).toContain('# Gate repair facts');
       } else {
@@ -135,7 +135,7 @@ describe('direct workflow', () => {
     const accepting = adapter([], false);
     const final = await runWorkflow(config, raw, projectDir, {
       async run(prompt, role, opts) {
-        if (opts.stageId === 'implement' || opts.stageId === 'repair') {
+        if (opts.stageId === 'implement' || opts.stageId === 'repair_review') {
           return fixtureResult({ output: 'delivered', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
         }
         return accepting.run(prompt, role, opts);
@@ -156,7 +156,7 @@ describe('direct workflow', () => {
     const admission = JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; criterionGateRefs: Record<string, string[]> };
 
     expect(final.status).toBe('complete');
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(final.stages.plan).toMatchObject({ status: 'complete' });
     expect(final.stages.plan.attempts ?? []).toEqual([]);
     expect(criteria).toHaveLength(2);
@@ -192,7 +192,7 @@ describe('direct workflow', () => {
           criteria: { ...criteria, stable }, audit_findings: { version: 1, findings },
           ...(defects.length ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace both bad values' } } : {}) }), exitCode: 0, duration_ms: 1 };
       }
-      if (opts.stageId === 'repair') {
+      if (opts.stageId === 'repair_review') {
         const facts = JSON.parse(prompt.split('# Gate repair facts\n')[1].split('\n')[0]);
         const original = JSON.parse(readFileSync(facts.rejections[0].verdictPath, 'utf8'));
         expect(facts.rejections[0].criteria).toEqual(original.criteria);
@@ -200,7 +200,7 @@ describe('direct workflow', () => {
         expect(original.audit_findings.findings.map((finding: { id: string }) => finding.id)).toEqual(['one', 'two']);
         expect(Object.values(original.criteria as Record<string, { status: string }>).filter(entry => entry.status === 'fail')).toHaveLength(2);
       } else writeFileSync(join(projectDir, 'stable.txt'), 'stable');
-      for (const name of ['one', 'two']) writeFileSync(join(projectDir, name), opts.stageId === 'repair' ? 'good' : 'bad');
+      for (const name of ['one', 'two']) writeFileSync(join(projectDir, name), opts.stageId === 'repair_review' ? 'good' : 'bad');
       mkdirSync(join(projectDir, 'docs'), { recursive: true });
       writeFileSync(join(projectDir, 'docs/report.md'), opts.stageId);
       return { output: JSON.stringify({ status: 'delivered', summary: 'Complete author work', caveats: [], remaining_work: [], blocks: null }),
@@ -208,7 +208,7 @@ describe('direct workflow', () => {
     } };
     const final = await runWorkflow(config, raw, projectDir, withConfirmedRejections(completeReviewer), new Map(), undefined, agentsDir, undefined, task, true);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     const directory = runDir(projectDir, final.runId);
     expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).criteria.stable)
       .toMatchObject({ status: 'carried', from: { iteration: 1, round: 1 } });
@@ -227,7 +227,7 @@ describe('direct workflow', () => {
     const calls: string[] = [];
     const final = await runDirect(brief('inputs:\n  - {path: notes.md, frozen: true}\n  - {path: evidence, frozen: true}\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', calls, true);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls).toEqual(['implement', 'review', 'repair_review', 'review']);
     expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
   });
@@ -236,7 +236,7 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
     for (const args of [['init', '-q', '--separate-git-dir', join(fixtureRoot, 'git')], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=' + ['fixture', 'example.invalid'].join('@'), 'commit', '-qm', 'Pinned frozen input']]) isolatedProjectCommand('git', args, projectDir, fixtureRoot);
     const final = await runDirect(brief('inputs: [{path: notes.md, frozen: true}]\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
-      if (opts.stageId === 'implement' || opts.stageId === 'repair') {
+      if (opts.stageId === 'implement' || opts.stageId === 'repair_review') {
         writeFileSync(join(projectDir, 'notes.md'), 'unauthorized\n');
       }
     });
@@ -263,7 +263,7 @@ describe('direct workflow', () => {
       ]) execFileSync('git', args);
     `], { cwd: projectDir, env: { ...process.env, HOME: fixtureRoot, FC_HOME: join(fixtureRoot, 'private-store') } });
     const final = await runDirect(brief('inputs:\n  - {path: notes.md, frozen: true}\n  - {path: evidence, frozen: true}\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
-      if (opts.stageId === 'implement' || opts.stageId === 'repair') writeFileSync(join(projectDir, path), 'unauthorized\n');
+      if (opts.stageId === 'implement' || opts.stageId === 'repair_review') writeFileSync(join(projectDir, path), 'unauthorized\n');
     });
     expect(final.status).not.toBe('complete');
     expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');

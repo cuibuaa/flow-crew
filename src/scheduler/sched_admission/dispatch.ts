@@ -14,6 +14,7 @@ import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, typ
 import { inspectStageGraph, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
+import { admitRepairTopology } from '../../repair-topology.js';
 
 function finiteStatusConditionDomainError(
   stageId: string,
@@ -216,6 +217,13 @@ export function createDispatchAdmission() {
     runDir?: string;
   }): DispatchAdmissionReport {
     const errors: DispatchAdmissionError[] = [];
+    const criterionIds = new Set((input.criteria?.criteria ?? []).map(criterion => criterion.id));
+    // Fill whole-brief obligations before deriving the repair's author/gate union.
+    for (const stage of input.dispatched) {
+      if (!stage.dynamic_dispatch && (stage.is_gate || !stage.retry_to?.length) && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
+    }
+    errors.push(...admitRepairTopology(input.dispatched, input.baseStages, Boolean(input.research)));
+    normalizeStageContracts(input.dispatched);
     const all = [...input.baseStages, ...input.dispatched];
     const byId = new Map(all.map(stage => [stage.id, stage]));
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
@@ -247,9 +255,6 @@ export function createDispatchAdmission() {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: unknown successor ${successor}`, 'decision.successors', stage.id));
         }
       }
-      if (stage.is_gate && !input.research && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
-        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route (no ordinary stage declares retry_to: [${stage.id}], depends_on: [${stage.id}]); repair rounds are bounded by gate_retry_loops.`, 'retry_to', stage.id));
-      }
       if (stage.condition?.trim()) {
         try {
           const parsed = parseCondition(stage.condition);
@@ -260,7 +265,7 @@ export function createDispatchAdmission() {
           errors.push(admissionError('stage_condition', `${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`, 'condition', stage.id));
         }
       }
-      if (stage.retry_to?.length) {
+      if (!stage.is_gate && stage.retry_to?.length) {
         const retrySet = new Set(stage.retry_to);
         for (const gateId of retrySet) {
           const gate = byId.get(gateId);
@@ -277,12 +282,6 @@ export function createDispatchAdmission() {
         .filter((record) => record.briefDigest === input.criteria?.briefDigest)
         .map((record) => [record.criterionId, record]),
     );
-    const criterionIds = new Set(criteria.map((criterion) => criterion.id));
-    // Empty refs mean conservative whole-brief responsibility. Explicit subsets
-    // keep large plans precise without making small plans repeat generated IDs.
-    for (const stage of input.dispatched) {
-      if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
-    }
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {
         if (!criterionIds.has(ref)) errors.push(admissionError('stage_criterion_refs', `${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`, `criterion_refs.${ref}`, stage.id));

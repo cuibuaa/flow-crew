@@ -1,0 +1,58 @@
+{
+  "stages": [
+    {
+      "id": "fix_chunked",
+      "role": "coder",
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3"
+      ],
+      "task": "Repair the declared implementation and verify every assigned criterion.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "package",
+            "kind": "directory",
+            "nonempty": true
+          }
+        ],
+        "reads": []
+      }
+    },
+    {
+      "id": "review_chunked",
+      "role": "qa",
+      "depends_on": [
+        "fix_chunked"
+      ],
+      "is_gate": true,
+      "criterion_refs": [
+        "requirement-1",
+        "requirement-2",
+        "requirement-3"
+      ],
+      "task": "Independently review every assigned criterion using reproducible evidence.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [],
+        "reads": [
+          {
+            "root": "project",
+            "path": "package",
+            "id": "package",
+            "kind": "directory",
+            "source": {
+              "kind": "stage",
+              "stage": "fix_chunked",
+              "artifact": "package"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
