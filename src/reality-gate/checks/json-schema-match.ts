@@ -3,6 +3,10 @@ import { readJsonFile, result } from './_utils.js';
 import { isDeepStrictEqual } from 'node:util';
 
 export interface Schema {
+  $ref?: string;
+  $defs?: Record<string, Schema>;
+  const?: unknown;
+  oneOf?: Schema[];
   anyOf?: Schema[];
   /** A single JSON Schema type name, or a union of them. JSON Schema allows both, and a
    *  union is the standard way to say "nullable" — `type: [string, "null"]`. Declaring this
@@ -15,6 +19,7 @@ export interface Schema {
   required?: string[];
   additionalProperties?: boolean | Schema;
   pattern?: string;
+  format?: string;
   minLength?: number;
   minItems?: number;
   maxItems?: number;
@@ -59,9 +64,28 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
 /** Pure validator shared by reality checks and structured stage records.
  * Returns a list of human-readable path errors. */
 export function validate(value: unknown, schema: Schema, path: string): string[] {
+  return validateSchema(value, schema, path, schema);
+}
+
+function validateSchema(value: unknown, schema: Schema, path: string, root: Schema): string[] {
   const errors: string[] = [];
+  if (schema.$ref) {
+    // Generated declarations use local JSON Pointers for recursive inline schemas.
+    const target = schema.$ref.startsWith('#/') ? schema.$ref.slice(2).split('/').reduce<unknown>(
+      (part, key) => part && typeof part === 'object' ? (part as Record<string, unknown>)[key.replace(/~1/g, '/').replace(/~0/g, '~')] : undefined, root,
+    ) : undefined;
+    if (!target || typeof target !== 'object') errors.push(`${path} unresolved schema reference ${schema.$ref}`);
+    else errors.push(...validateSchema(value, target as Schema, path, root));
+  }
+  if (Object.hasOwn(schema, 'const') && !isDeepStrictEqual(value, schema.const)) errors.push(`${path} differs from const`);
+  if (schema.oneOf) {
+    const variants = schema.oneOf.map(variant => validateSchema(value, variant, path, root));
+    if (variants.filter(variant => variant.length === 0).length !== 1) {
+      errors.push(`${path} must match exactly one oneOf variant`, ...(variants.sort((a, b) => a.length - b.length)[0] ?? []));
+    }
+  }
   if (schema.anyOf) {
-    const variants = schema.anyOf.map(variant => validate(value, variant, path));
+    const variants = schema.anyOf.map(variant => validateSchema(value, variant, path, root));
     if (!variants.some(variant => variant.length === 0)) {
       errors.push(`${path} matches no anyOf variant`, ...(variants.sort((a, b) => a.length - b.length)[0] ?? []));
     }
@@ -70,6 +94,9 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
     errors.push(`${path} expected ${describeType(schema.type)}`);
   }
   if (typeof value === 'string') {
+    if (schema.format === 'regex') {
+      try { new RegExp(value); } catch { errors.push(`${path} invalid regular expression`); }
+    }
     if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(`${path} does not match ${schema.pattern}`);
     if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${path} below minLength`);
   }
@@ -86,17 +113,17 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
     for (const key of Object.keys(obj)) {
       if (Object.hasOwn(schema.properties ?? {}, key)) continue;
       if (schema.additionalProperties === false) errors.push(`${path}.${key} unknown field`);
-      else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') errors.push(...validate(obj[key], schema.additionalProperties, `${path}.${key}`));
+      else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') errors.push(...validateSchema(obj[key], schema.additionalProperties, `${path}.${key}`, root));
     }
     for (const key of schema.required ?? []) {
       if (!(key in obj)) errors.push(`${path}.${key} required`);
     }
     for (const [key, child] of Object.entries(schema.properties ?? {})) {
-      if (key in obj) errors.push(...validate(obj[key], child, `${path}.${key}`));
+      if (key in obj) errors.push(...validateSchema(obj[key], child, `${path}.${key}`, root));
     }
   }
   if (Array.isArray(value) && schema.items) {
-    value.forEach((item, index) => errors.push(...validate(item, schema.items as Schema, `${path}[${index}]`)));
+    value.forEach((item, index) => errors.push(...validateSchema(item, schema.items as Schema, `${path}[${index}]`, root)));
   }
   return errors;
 }
@@ -127,6 +154,7 @@ function matchesOneType(value: unknown, type: string): boolean {
 /** Codex requires a closed root object; anyOf is supported only below it. */
 export function generationCompatibleSchema(schema: Schema): boolean {
   const compatible = (part: Schema): boolean => {
+    if (part.$ref || part.oneOf) return false;
     if (part.type === 'object' && !part.anyOf && (part.additionalProperties !== false
       || Object.keys(part.properties ?? {}).some(key => !part.required?.includes(key)))) return false;
     return [...Object.values(part.properties ?? {}), ...(part.anyOf ?? []), ...(part.items ? [part.items] : [])].every(compatible);

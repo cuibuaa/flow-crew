@@ -2,7 +2,7 @@
 import { loadEngineDefaults as loadDefaults } from '../../config.js';
 import { z } from 'zod';
 import { type AgentConfig } from '../../adapters/base.js';
-import { ArtifactContractSchema, RecordedArtifactContractSchema, artifactActivation } from '../../artifact-declarations.js';
+import { RecordedArtifactContractSchema, artifactActivation } from '../../artifact-declarations.js';
 import { type StoreState } from '../../store.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
@@ -37,33 +37,8 @@ export function parseAgent(raw: unknown, stageContract = true): AgentConfig {
   return stageContract ? applySharedRoleContract(agent) : agent;
 }
 
-const StageFields = z.object({
-  id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
-  role: z.string().min(1),
-  depends_on: z.array(z.string()).optional().default([]),
-  /** Optional work-division note, passed to the stage unchanged. */
-  scope: z.array(z.string()).optional(),
-  /** Optional historical dependency prose; graph edges carry execution order. */
-  dependency_reasons: z.record(z.string(), z.string()).optional(),
-  condition: z.string().optional(),
-  prompt_template: z.string().optional().default(''),
-  max_retries: z.number().optional(),
-  skills: z.array(z.string()).optional().default([]),
-  dynamic_dispatch: z.boolean().optional().default(false),
-  is_gate: z.boolean().optional().default(false),
-  retry_to: z.array(z.string()).optional(),
-  /** Declared run-time edges. continue releases ordinary dependencies; replan retains this iteration. */
-  decision: z.object({
-    successors: z.array(z.string().min(1)).min(1), default: z.string().min(1),
-    kind: z.literal('successor').optional(),
-  }).strict().refine(value => value.successors.includes(value.default), 'default must be a declared successor').optional(),
-  /** Canonical IDs from the run-local brief_criteria.json artifact. */
-  criterion_refs: z.array(z.string()).optional().default([]),
-  /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
-  artifact_contract: ArtifactContractSchema.optional(),
-});
-
-export const StageConfigSchema = StageFields;
+export { StageFields as StageConfigSchema } from '../../plan-declarations.js';
+import { StageFields } from '../../plan-declarations.js';
 
 /** Read-only history retains the ownership marker; it never enables execution. */
 export const RecordedStageConfigSchema = StageFields.extend({
@@ -126,7 +101,7 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
     const { task, ...fields } = raw as Record<string, unknown>;
     raw = { ...fields, prompt_template: fields.prompt_template ?? task };
   }
-  const stage = StageConfigSchema.parse(raw);
+  const stage = StageFields.parse(raw);
   normalizeStageContracts([stage]);
   delete stage.max_retries;
   return stage;

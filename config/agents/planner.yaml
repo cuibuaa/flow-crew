@@ -31,7 +31,6 @@ prompt: |
   Record necessary assumptions in the assigned work; execution never pauses for questions.
   Gates own the full review against every assigned criterion, choosing their own experiments and exploration.
   {verdict_contract}
-  {artifact_contract_schema}
   No separate audit proof, replay or intermediate freshness protocol is required.
 
   # Optional reality checks

@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 
@@ -7,9 +7,11 @@ export type ArtifactLocation = { root: 'project' | 'run'; path: string };
 
 // Locations are literal filesystem names. Scope expressions own glob syntax;
 // punctuation here never expands into other paths or grants additional writes.
-const literalRelativePath = /^(?!\.{1,2}(?:\/|$))[^/\\\0]+(?:\/(?!\.{1,2}(?:\/|$))[^/\\\0]+)*$/;
-export const ArtifactPathSchema = z.string().min(1).refine(
-  path => !isAbsolute(path) && literalRelativePath.test(path),
+const literalRelativePath = new RegExp(
+  (sep === '\\' ? '^(?![A-Za-z]:/)' : '^')
+  + String.raw`(?!\.{1,2}(?:/|$))[^/\\\0]+(?:/(?!\.{1,2}(?:/|$))[^/\\\0]+)*$`,
+);
+export const ArtifactPathSchema = z.string().min(1).regex(literalRelativePath,
   'declare a literal, confined relative path');
 
 export function artifactRootContains(root: string, path: string): boolean {

@@ -10,43 +10,8 @@ import type { StageStatus } from './store.js';
 import { fcGlobalDir, runsRoot, STAGE_STATUS } from './store.js';
 import { physicalRoot, withinPhysicalRoot, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
-import { id, location, when, ArtifactReadSchema } from './artifact-read-schema.js';
-export { ArtifactReadSchema } from './artifact-read-schema.js';
-const produced = location.extend({
-  id,
-  kind: z.enum(['file', 'directory']).default('file'),
-  nonempty: z.boolean().default(false),
-  when: when.optional(),
-}).strict();
-export const ArtifactContractSchema = z.object({
-  version: z.literal(1),
-  produces: z.array(produced),
-  reads: z.array(ArtifactReadSchema),
-  groups: z.array(z.object({ id, mode: z.literal('exactly_one'), members: z.array(id).min(2) }).strict()).default([]),
-}).strict().superRefine((contract, context) => {
-  const ids = new Set<string>();
-  for (const artifact of [...contract.produces, ...contract.reads]) {
-    if (ids.has(artifact.id)) context.addIssue({ code: 'custom', path: ['artifacts', `${artifact.root}:${artifact.path}`, 'id'], message: 'artifact IDs must be unique within this stage' });
-    ids.add(artifact.id);
-  }
-  const paths = new Set<string>();
-  for (const artifact of contract.produces) {
-    const path = `${artifact.root}:${artifact.path}`;
-    if (paths.has(path)) context.addIssue({ code: 'custom', path: ['produces', path, 'path'], message: 'produced locations must be unique within this stage' });
-    paths.add(path);
-  }
-  const grouped = new Set<string>();
-  const groupIds = new Set<string>();
-  for (const group of contract.groups) {
-    if (groupIds.has(group.id)) context.addIssue({ code: 'custom', path: ['groups', group.id, 'id'], message: 'group IDs must be unique' });
-    groupIds.add(group.id);
-    for (const member of group.members) {
-      const artifact = contract.produces.find((entry) => entry.id === member);
-      if (!artifact || artifact.when || grouped.has(member)) context.addIssue({ code: 'custom', path: ['groups', group.id, 'members', member], message: `group member ${member} must name one unconditional produced artifact and occur in only one group` });
-      grouped.add(member);
-    }
-  }
-});
+import { ArtifactContractSchema, ArtifactReadSchema } from './plan-declarations.js';
+export { ArtifactContractSchema, ArtifactReadSchema } from './plan-declarations.js';
 // Declarations carry capability/ownership metadata, not an extra verification
 // protocol.
 // Only the retired replay declaration is ignored when reading persisted contracts.

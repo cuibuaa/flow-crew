@@ -60,9 +60,11 @@ describe('engine-owned repair topology', () => {
     ]) expect(planner, `planner-field-schema-owner: ${duplicate}`).not.toContain(duplicate);
     expect(planner, 'independent-review judgement').toContain('choosing their own experiments and exploration');
     expect(planner, 'property-equivalence judgement').toContain('equivalent property');
-    for (const contract of ['{verdict_contract}', '{artifact_contract_schema}', '{project_contract}']) {
+    for (const contract of ['{verdict_contract}', '{project_contract}']) {
       expect(planner, 'output-schema contracts retained').toContain(contract);
     }
+    expect(planner, 'artifact shape now belongs to the injected plan schema').not.toContain('{artifact_contract_schema}');
+    expect(PLAN_SCHEMA.properties!.stages.items!.properties!.artifact_contract.required).toEqual(['version', 'produces', 'reads']);
     const illegal = structuredClone(REPAIR_TOPOLOGY_EXAMPLE);
     Object.assign(illegal.stages[1], { retry_to: ['author'] });
     const rejected = admit(illegal.stages.map(parseDispatchedStageConfig));

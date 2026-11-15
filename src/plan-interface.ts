@@ -2,36 +2,28 @@ import { engineDirectory, runRecordPath, stageWorkPath } from './run-layout.js';
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { type Schema } from './reality-gate/checks/json-schema-match.js';
-import { REALITY_CHECK_TYPES } from './reality-gate/types.js';
+import { z } from 'zod';
+import { StageFields, BriefRealityCheckSchema } from './plan-declarations.js';
 import { REPAIR_TOPOLOGY_SCHEMA, REPAIR_TOPOLOGY_CONTRACT, REPAIR_TOPOLOGY_EXAMPLE } from './repair-topology.js';
 
-const strings: Schema = { type: 'array', items: { type: 'string' } };
-export const PLAN_STAGE_SCHEMA: Schema = {
-  ...REPAIR_TOPOLOGY_SCHEMA,
-  type: 'object', required: ['id', 'role'], additionalProperties: false,
-  properties: {
-    id: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' },
-    role: { type: 'string', minLength: 1 }, scope: strings, depends_on: strings,
-    prompt_template: { type: 'string' }, task: { type: 'string' }, condition: { type: 'string' },
-    decision: { type: 'object', required: ['successors', 'default'], additionalProperties: false, properties: { successors: strings, default: { type: 'string' }, kind: { type: 'string', enum: ['successor'] } } },
-    is_gate: { type: 'boolean' }, retry_to: strings, criterion_refs: strings,
-    skills: strings, dynamic_dispatch: { type: 'boolean' },
-    // Optional output/input locations supply write capabilities and ownership metadata.
-    artifact_contract: { type: 'object' },
+// Live dispatch omits inert historical metadata and retains the task alias.
+const plannerStage = StageFields.omit({ dependency_reasons: true, max_retries: true })
+  .extend({ task: z.string().optional() }).strict();
+export const PLAN_SCHEMA: Schema = z.toJSONSchema(z.object({
+  stages: z.array(plannerStage).min(1),
+  reality_checks: z.array(BriefRealityCheckSchema).optional(),
+}).strict(), {
+  io: 'input',
+  override: ({ zodSchema, jsonSchema }) => {
+    if (zodSchema === plannerStage) Object.assign(jsonSchema, REPAIR_TOPOLOGY_SCHEMA);
   },
-};
-export const PLAN_SCHEMA: Schema = { type: 'object', required: ['stages'], additionalProperties: false, properties: {
-  stages: { type: 'array', minItems: 1, items: PLAN_STAGE_SCHEMA },
-  reality_checks: { type: 'array', items: { type: 'object', required: ['name', 'type', 'reads'], properties: {
-    name: { type: 'string' }, type: { type: 'string', enum: [...REALITY_CHECK_TYPES] },
-    reads: { type: 'array', items: { type: 'object' } },
-    params: { type: 'object' }, advisory: { type: 'boolean' },
-  } } },
-} };
+}) as Schema;
+export const PLAN_STAGE_SCHEMA = PLAN_SCHEMA.properties!.stages.items!;
 
 // Recorded readers retain historical metadata; generation describes consumed fields.
 export const RECORDED_PLAN_STAGE_SCHEMA: Schema = { ...PLAN_STAGE_SCHEMA, properties: {
   ...PLAN_STAGE_SCHEMA.properties,
+  artifact_contract: { type: 'object' }, // Historical readers remain tolerant.
   race: { type: 'boolean' }, // Historical records only.
   dependency_reasons: { type: 'object', additionalProperties: { type: 'string' } },
   max_retries: { type: 'number' }, timeout_ms: {}, timeout_total_ms: {}, resources: {},

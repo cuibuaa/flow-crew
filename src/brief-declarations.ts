@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { ResearchInstrumentSchema } from './research-instrument.js';
 import { TERMINAL_STATUSES } from './lifecycle-status.js';
-import { ArtifactReadSchema } from './artifact-read-schema.js';
+import { BriefRealityCheckSchema } from './plan-declarations.js';
+export { BriefRealityCheckSchema } from './plan-declarations.js';
 import { isAbsolute } from 'node:path';
 import { ArtifactPathSchema } from './artifact-location.js';
 import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
@@ -52,29 +53,6 @@ const terminalObject = z.object({
     timeout_seconds: seconds.optional(), env: z.record(z.string(), z.string()).optional() }).strict().optional(),
 }).strict();
 const terminalEntry = z.union([inputPath, z.array(inputPath).min(1), terminalObject]);
-// JSON schema is a closed recursive language; only properties/enum carry user keys/data.
-const jsonType = z.enum(['null', 'boolean', 'object', 'array', 'number', 'integer', 'string']);
-const inlineSchema: z.ZodType<import('./reality-gate/checks/json-schema-match.js').Schema> = z.lazy(() => z.object({
-  anyOf: z.array(inlineSchema).min(1).optional(), type: z.union([jsonType, z.array(jsonType).min(1)]).optional(),
-  required: z.array(z.string()).optional(), additionalProperties: z.union([z.boolean(), inlineSchema]).optional(),
-  pattern: z.string().refine(v => { try { new RegExp(v); return true; } catch { return false; } }, 'invalid regular expression').optional(),
-  minLength: z.number().int().nonnegative().optional(), minItems: z.number().int().nonnegative().optional(),
-  maxItems: z.number().int().nonnegative().optional(), uniqueItems: z.boolean().optional(),
-  properties: z.record(z.string(), inlineSchema).optional(), items: inlineSchema.optional(), enum: z.array(z.json()).optional(),
-  minimum: z.number().finite().optional(), maximum: z.number().finite().optional(),
-}).strict());
-const checkFields = { name: z.string().min(1), reads: z.array(z.lazy(() => ArtifactReadSchema)), advisory: z.boolean().optional() };
-export const BriefRealityCheckSchema = z.discriminatedUnion('type', [
-  z.object({ ...checkFields, type: z.literal('exec-script-exit-zero'), params: z.object({
-    script: z.string().min(1), args: z.array(z.string()).optional(), timeout_seconds: seconds.min(1).optional(),
-  }).strict() }).strict(),
-  z.object({ ...checkFields, type: z.literal('file-exists-nonempty'), params: z.object({
-    paths: z.union([z.array(z.string().min(1)).min(1), z.object({ from_manifest: z.string().min(1), field: z.string().min(1) }).strict()]),
-  }).strict() }).strict(),
-  z.object({ ...checkFields, type: z.literal('json-schema-match'), params: z.object({ file: z.string().min(1),
-    schema: z.union([z.object({ file: z.string().min(1) }).strict(), inlineSchema]),
-  }).strict() }).strict(),
-]);
 export const BriefDeclarationsSchema = z.object({
   max_continuations: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   stage_duration_ms: positiveInteger.optional(), input_limit_chars: positiveInteger.optional(),
