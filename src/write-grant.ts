@@ -1,14 +1,15 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { closeSync, mkdirSync, openSync, publishEngineFiles, writeFileSync } from './engine-fs.js';
+import { closeSync, mkdirSync, mkdtempSync, openSync, publishEngineFiles, rmSync, writeFileSync } from './engine-fs.js';
 import { stageWorkPath } from './run-layout.js';
 import { resolveArtifactLocation } from './artifact-location.js';
 import { gitSync } from './git-facts.js';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { createInvocationScratch, retireRunScratch } from './invocation-scratch.js';
 import type { ArtifactContract } from './artifact-declarations.js';
 
 export const WriteGrantCapabilitySchema = z.discriminatedUnion('kind', [
@@ -33,10 +34,57 @@ export type WriteGrantFailure =
   | { kind: 'unsafe_path'; path: string }
   | { kind: 'git_preparation_failed'; path: string };
 export class WriteGrantError extends Error {
-  constructor(readonly outcome: WriteGrantFailure, options?: ErrorOptions) {
-    super(`WRITE_GRANT_REFUSED: ${JSON.stringify(outcome)}`, options);
+  constructor(readonly outcome: WriteGrantFailure, options?: ErrorOptions & { detail?: string }) {
+    super(`WRITE_GRANT_REFUSED: ${JSON.stringify(outcome)}${options?.detail ? ` ${options.detail}` : ''}`, options);
     this.name = 'WriteGrantError';
   }
+}
+
+/** Exercise the runtime grant, including its native bridge, in the selected run
+ * store. No layout policy lives in setup or in a persisted READY receipt. */
+export function assertWriteGrantReady(projectDir: string, runRoot: string, externalDirectories: readonly string[] = []): void {
+  let run: string | undefined;
+  try {
+    try {
+      const contract = admitWriteGrant(projectDir);
+      mkdirSync(runRoot, { recursive: true });
+      run = mkdtempSync(join(runRoot, '.grant-'));
+      writeFileSync(join(run, 'run.json'), JSON.stringify({ storageLayout: 2 }));
+      const scratch = createInvocationScratch(run).path;
+      if (contract.capability.kind !== 'landlock') return; // Same ungranted mode as runtime.
+      const grant = prepareWriteGrant({ contract, projectDir, runDir: run, stageId: 'probe',
+        externalDirectories, home: join(run, 'work', 'stages', 'probe', 'home') }, scratch)!;
+      const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', writeGrantExecPython,
+        JSON.stringify(grant), '/usr/bin/python3', '-I', '-S', '-B', '-c', 'pass'], {
+        cwd: projectDir, env: { ...gitEnvironment(), ...grant.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch }, encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'],
+      });
+      const receipt = readWriteGrantReceipt(result.output[4] ?? '', grant.abi);
+      if (receipt.failure || result.status !== 0 || !receipt.applied) throw new WriteGrantError(receipt.failure ?? { kind: 'application_failed', errno: null });
+    } finally {
+      if (run) { try { retireRunScratch(run); } finally { rmSync(run, { recursive: true, force: true }); } }
+    }
+  } catch (cause) {
+    if (cause instanceof WriteGrantError) throw cause;
+    const errno = (cause as NodeJS.ErrnoException).errno;
+    throw new WriteGrantError({ kind: 'application_failed', errno: typeof errno === 'number' ? Math.abs(errno) : null }, { cause });
+  }
+}
+
+/** The native bridge's private descriptor has one decoder for launch and readiness. */
+export function readWriteGrantReceipt(receipt: string, abi: number): { applied: boolean; failure?: WriteGrantFailure } {
+  const result: { applied: boolean; failure?: WriteGrantFailure } = { applied: false };
+  try {
+    for (const line of receipt.trim().split('\n')) {
+      const outcome = JSON.parse(line);
+      if (outcome.kind === 'applied' && outcome.abi === abi && outcome.linkedFileCount === 0) { result.applied = true; continue; }
+      result.failure = outcome.kind === 'linked_files' && Number.isSafeInteger(outcome.count) && outcome.count > 0
+        || outcome.kind === 'exec_failed' && Number.isSafeInteger(outcome.errno) && typeof outcome.path === 'string'
+        || outcome.kind === 'unsafe_path' && typeof outcome.path === 'string'
+        ? outcome : { kind: 'application_failed', errno: outcome.kind === 'application_failed' ? outcome.errno : null };
+    }
+  } catch { result.failure = { kind: 'application_failed', errno: null }; }
+  return result;
 }
 
 /** The existing research syscall bridge, shared by measurement and stage exec.
@@ -236,7 +284,11 @@ function prepareStageGit(grant: StageWriteGrant, writable: WriteGrantRoot[], sha
     return {};
   }
   const common = literalPath(dirname(repository.commonDir), repository.commonDir, false);
-  if ([...writable.map(root => root.path), ...shared].some(path => contains(path, common) || contains(common, path))) throw new WriteGrantError({ kind: 'unsafe_path', path: common });
+  if ([...writable.map(root => root.path), ...shared].some(path => contains(path, common) || contains(common, path))) {
+    throw new WriteGrantError({ kind: 'unsafe_path', path: common }, {
+      detail: `Writable layout ${grant.projectDir} overlaps the shared Git directory ${common}; use a linked worktree.`,
+    });
+  }
   const namespace = createHash('sha256').update(realpathSync(grant.runDir)).digest('hex');
   const branch = `fc/${namespace}/${grant.stageId}/head`;
   const metadata = stageWorkPath(grant.runDir, 'stages', grant.stageId, 'git');

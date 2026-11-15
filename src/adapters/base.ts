@@ -13,7 +13,7 @@ import { processGroupIsAlive, processStartToken } from '../process-liveness.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
-import { currentStageWriteGrant, prepareWriteGrant, writeGrantExecPython, WriteGrantError, type PreparedWriteGrant, type WriteGrantFailure } from '../write-grant.js';
+import { currentStageWriteGrant, prepareWriteGrant, readWriteGrantReceipt, writeGrantExecPython, WriteGrantError, type PreparedWriteGrant, type WriteGrantFailure } from '../write-grant.js';
 
 export type { ChildProcess } from 'node:child_process';
 
@@ -76,20 +76,9 @@ function spawnRunCommand(command: string, args: string[], options: SpawnOptions,
     let receipt = '';
     child.stdio[4]!.on('data', bytes => { receipt += bytes.toString(); });
     child.stdio[4]!.on('end', () => {
-      try {
-        for (const line of receipt.trim().split('\n')) {
-          const applied = JSON.parse(line) as { kind: string; abi?: number; linkedFileCount?: number };
-          if (applied.kind === 'applied' && applied.abi === grant.abi && applied.linkedFileCount === 0) {
-            appliedGrants.set(child, { abi: grant.abi, linkedFileCount: 0 });
-            continue;
-          }
-          const outcome = applied as WriteGrantFailure;
-          grantFailures.set(child, outcome.kind === 'linked_files' && Number.isSafeInteger(outcome.count) && outcome.count > 0
-            || outcome.kind === 'exec_failed' && Number.isSafeInteger(outcome.errno) && typeof outcome.path === 'string'
-            || outcome.kind === 'unsafe_path' && typeof outcome.path === 'string'
-            ? outcome : { kind: 'application_failed', errno: outcome.kind === 'application_failed' ? outcome.errno : null });
-        }
-      } catch { grantFailures.set(child, { kind: 'application_failed', errno: null }); }
+      const decoded = readWriteGrantReceipt(receipt, grant.abi);
+      if (decoded.applied) appliedGrants.set(child, { abi: grant.abi, linkedFileCount: 0 });
+      if (decoded.failure) grantFailures.set(child, decoded.failure);
     });
   }
   const gate = child.stdio[3] as import('node:stream').Duplex;

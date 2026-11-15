@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type {
   ProjectValidationBaseline,
   ValidationCommand,
@@ -9,7 +9,9 @@ import type {
 } from './project-validation.js';
 import { canonicalJson } from './canonical-json.js';
 import type { BriefAdmissionRecord } from './brief-admission.js';
-import { fcGlobalDir } from './store.js';
+import { fcGlobalDir, runsRoot } from './store.js';
+import { assertWriteGrantReady } from './write-grant.js';
+import { extractBriefOutputDeclarations } from './ship-inputs.js';
 
 const VALIDATION_ROLES = new Set<ValidationRole>(['build', 'test', 'lint']);
 const RESULT_STATES = new Set<string>([
@@ -203,6 +205,8 @@ export function assertMeasuredSetupLaunch(targetDir: string, brief: string, admi
     throw new SetupLaunchRefusal('setup_acknowledgement_required',
       'Some declared validation command has no completed exit 0. Review the measured setup results, then launch with --acknowledge-brief-warnings.');
   }
+  assertWriteGrantReady(targetDir, runsRoot(), extractBriefOutputDeclarations(brief)
+    .filter(output => isAbsolute(output.path)).map(output => output.path));
   return facts;
 }
 

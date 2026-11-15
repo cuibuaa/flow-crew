@@ -371,7 +371,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state).toBe(inPlace ? 'refused' : 'ready');
     expect(report.sourceOutputInventory.blocking).toHaveLength(inPlace ? 1 : 0);
     expect(git).toHaveBeenCalledTimes(inPlace ? 0 : 1);
-    expect(existsSync(path)).toBe(false);
+    expect(existsSync(path)).toBe(!inPlace);
     const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work'], readFileSync(fixture.brief, 'utf8'));
     writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
     const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work',
@@ -394,7 +394,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     }
   });
 
-  it.each([false, true])('reports external outputs in setup (forbidden=%s) without creating the durable root', async forbidden => {
+  it.each([false, true])('prepares allowed external output grants in setup (forbidden=%s)', async forbidden => {
     const path = join(forbidden ? fixture.state : fixture.root, 'durable-results');
     writeBrief(['---', 'outputs:', `  - path: ${path}`, '    type: directory', '---', '# Goal', 'Retain per-item results.']);
     const git = successfulGit();
@@ -405,7 +405,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     }]);
     if (!forbidden) expect(report.targetOutputInventory?.entries[0].blocking).toBe(false);
     expect(git).toHaveBeenCalledTimes(forbidden ? 0 : 1);
-    expect(existsSync(path)).toBe(false);
+    expect(existsSync(path)).toBe(!forbidden);
   });
 
   it('reports worktree progress without a checkout deadline and rolls back a real Git error', async () => {

@@ -24,6 +24,7 @@ import {
 } from './ship-inputs.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
+import { assertWriteGrantReady, WriteGrantError } from './write-grant.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -1181,6 +1182,12 @@ export async function runShipSetup(
     })));
   }
 
+  try { assertWriteGrantReady(targetCanonicalDir, join(deps.globalDir(), 'runs'),
+    targetOutputInventory.declarations.filter(output => isAbsolute(output.path)).map(output => output.path)); }
+  catch (error) {
+    return refuse([{ phase: 'target', code: error instanceof WriteGrantError ? error.outcome.kind : undefined,
+      reason: errorMessage(error), repair: 'Resolve the runtime write-grant refusal, then rerun ship-setup.' }]);
+  }
   const validationFs = { exists: deps.fs.exists, readText: deps.fs.readText };
   const validationBaseline = await runProjectValidationBaseline(targetDir, {
     fs: validationFs, declaredCommands: declaredValidation.commands, runCommand: deps.runValidationCommand,
