@@ -170,14 +170,14 @@ describe('installer-owned front-end integration', () => {
       await daemonFile(slot, () => readdirSync(directory).length === 0 ? true : undefined, signal);
       expect(readdirSync(directory)).toEqual([]);
       // The worker is a grandchild: Node cannot subscribe to its close event.
-      // Yield until this known PID retires, without a poll count or time verdict.
-      while (processIsAlive(worker!)) await new Promise<void>(resolve => setImmediate(resolve));
+      // Check this known PID at a fixed cadence until it retires; no poll count or time verdict.
+      while (processIsAlive(worker!)) await sleep(20);
       expect(processIsAlive(worker!)).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       await done;
       // The worker observes host death itself; no PID guessing or broad signals.
-      if (worker) while (processIsAlive(worker)) await new Promise<void>(resolve => setImmediate(resolve));
+      if (worker) while (processIsAlive(worker)) await sleep(20);
     }
   });
 
