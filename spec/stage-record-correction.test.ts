@@ -8,6 +8,8 @@ import { type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { ArtifactPathSchema, resolveArtifactLocation } from '../src/artifact-location.js';
 import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { AuditFindingsSchema } from '../src/scoped-audit-repair.js';
+import { appendEvidence, captureProjectTree } from '../src/evidence-ledger.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 import { readRunEvents } from '../src/run-events.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
@@ -37,9 +39,10 @@ function manualClock() {
   } };
 }
 let time: ReturnType<typeof manualClock>;
+let reproduction: number;
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review independently.' };
 const sessionId = '11111111-1111-4111-8111-111111111111';
-const finding = () => ({ id: 'report', paths: ['docs/report.md'], reason: 'The report needs repair.', criterion_ids: ['criterion'], invalidates_plan: false, repair_role: 'coder' });
+const finding = () => ({ id: 'report', paths: ['docs/report.md'], reason: 'The report needs repair.', class: 'criterion_unmet' as const, criterion_ids: ['criterion'], invalidates_plan: false, repair_role: 'coder', reproduction });
 const rejected = () => ({ pass: false, reason: 'Reproduced a report defect.', criteria: { criterion: { status: 'fail', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [finding()] }, repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the report.' } });
 const passed = () => ({ pass: true, reason: 'The report meets the brief.', criteria: { criterion: { status: 'pass', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [] } });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
@@ -47,13 +50,23 @@ const options = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate:
   retries: 0, timeout_ms: 10000, deadlineClock: time.clock, isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
   artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'work/verdict_review.json', kind: 'file' as const }], reads: [], groups: [] } });
 
-beforeEach(() => {
+beforeEach(async () => {
   time = manualClock();
   root = mkdtempSync(join(tmpdir(), 'stage-record-spec-'));
   projectDir = join(root, 'project'); mkdirSync(projectDir);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review']));
+  ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review'], '---\ncriteria: [{id: criterion, text: Deliver the complete report.}]\n---\nDeliver the complete report.'));
   writeFileSync(runRecordPath(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
+  // This fixture's criterion requires the report. Record the actual failing
+  // predicate; a citation alone must never manufacture repair authority.
+  const treeHash = captureProjectTree(projectDir, '', runDir).hash;
+  const command = 'test -s docs/report.md';
+  const result = await stageFixtureCommand({ role: 'test', command: '/bin/sh', args: ['-c', command],
+    display: 'Required report exists', cwd: projectDir });
+  expect(result.exitCode).toBe(1);
+  reproduction = appendEvidence(runDir, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
+    commandId: 'required-report', command, context: { cwd: projectDir, shell: '/bin/sh' },
+    exitCode: result.exitCode, outputDigest: 'missing-report', treeHash, treeAfterHash: treeHash }).sequence;
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
@@ -77,15 +90,15 @@ describe('stage record constraints before settlement', () => {
 
   it('refuses empty finding paths in the supplied schema and at consumption', () => {
     const record = rejected(); record.audit_findings.findings[0].paths = [];
-    expect(() => parseStageRecord(JSON.stringify(record), schema())).toThrow();
+    expect(() => parseStageRecord(JSON.stringify(record), schema())).toThrow('STAGE_RECORD_INVALID');
     expect(AuditFindingsSchema.safeParse(record.audit_findings).success).toBe(false);
   });
 
   it('expresses closed criterion values and no open findings in the supplied schema', () => {
     const failedCriterion = passed(); failedCriterion.criteria.criterion.status = 'invented';
-    expect(() => parseStageRecord(JSON.stringify(failedCriterion), schema())).toThrow();
+    expect(() => parseStageRecord(JSON.stringify(failedCriterion), schema())).toThrow('STAGE_RECORD_INVALID');
     const openFinding = { ...passed(), audit_findings: { version: 1, findings: [finding()] } };
-    expect(() => parseStageRecord(JSON.stringify(openFinding), schema())).toThrow();
+    expect(() => parseStageRecord(JSON.stringify(openFinding), schema())).toThrow('STAGE_RECORD_INVALID');
   });
 
   it('retains the nonblank path rule and reports the rejected field through gate variants', () => {
@@ -117,7 +130,7 @@ describe('informational citations preserve independent refusals', () => {
     expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     // Accepting the citation must preserve the real unmet-outcome rejection.
     expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: expect.stringContaining(record.reason),
-      findings: { confirmed: [], unconfirmed: [expect.objectContaining({ reason: record.reason })] } });
+      findings: { confirmed: [expect.objectContaining({ reason: record.reason, reproduction })], unconfirmed: [] } });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
     // The same string remains unusable as a writable artifact capability.
     expect(ArtifactPathSchema.safeParse(path).success).toBe(false);
@@ -134,11 +147,15 @@ describe('record correction uses the existing attempt', () => {
     ['invalid repairability', () => JSON.stringify({ ...rejected(), repairability: { version: 2 } })],
     ['unknown criterion status', () => JSON.stringify({ ...passed(), criteria: { criterion: { status: 'invented', evidence: 'fixture' } } })],
     ['passing open findings', () => JSON.stringify({ ...passed(), audit_findings: rejected().audit_findings })],
+    ['rejecting advisory only', () => JSON.stringify({ ...rejected(), audit_findings: { version: 1, findings: [{ ...finding(), class: 'advisory' }] } })],
+    ['rejecting no findings', () => JSON.stringify({ ...rejected(), audit_findings: { version: 1, findings: [] } })],
+    ['unknown finding class', () => JSON.stringify({ ...rejected(), audit_findings: { version: 1, findings: [{ ...finding(), class: 'hardening' }] } })],
+    ['unknown finding criterion', () => JSON.stringify({ ...rejected(), audit_findings: { version: 1, findings: [{ ...finding(), criterion_ids: ['invented'] }] } })],
     ['unknown field', () => JSON.stringify({ ...rejected(), unexpected: true })],
     ['malformed JSON', () => '{"pass":'],
   ];
 
-  it.each(malformed)('corrects %s without rerunning or losing the review', async (_name, output) => {
+  it.each(malformed)('corrects %s without rerunning or losing the review', async (name, output) => {
     const original = output(), invocations: RunOpts[] = [];
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts);
@@ -147,6 +164,8 @@ describe('record correction uses the existing attempt', () => {
       if (invocations.length === 1) time.advanceTo((options().timeout_ms - 1) - 1);
       if (invocations.length === 2) {
         expect(prompt).toContain('Stage result correction');
+        expect(prompt).toContain(['rejecting advisory only', 'rejecting no findings'].includes(name)
+          ? 'AUDIT_FINDINGS_INVALID' : 'STAGE_RECORD_INVALID');
         expect(prompt).toContain(JSON.stringify(original));
         expect(prompt).toContain('Do not repeat the completed work');
         expect(opts.resumeSessionId).toBeUndefined();
@@ -198,7 +217,7 @@ describe('record correction uses the existing attempt', () => {
       { status: 'not_assessed', evidence: 'No receipt', reason: 'evidence_unavailable' },
       { status: 'carried', evidence: 'Reviewer elects to carry', from: { iteration: 2, round: 3 } },
     ]) {
-      const record = { ...rejected(), criteria: { criterion: entry } };
+      const record = { ...passed(), criteria: { criterion: entry } };
       const result = await runStage({ async run() { return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 }; } }, options());
       expect(result.exitCode, result.friendlyError).toBe(0);
       expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);

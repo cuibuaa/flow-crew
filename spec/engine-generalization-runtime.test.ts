@@ -231,7 +231,7 @@ describe('engine generalization runtime bindings', () => {
       writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
       return fixtureResult({ output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' }, opts);
     } };
-    const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
+    const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir,
       created.runId, '# Require accepted gates.', true);
     const confirmed = failure === 'regression' || failure === 'peer-regression';
     expect(final.status).toBe(failure === 'authored-rejection' || confirmed ? 'incomplete' : 'complete');

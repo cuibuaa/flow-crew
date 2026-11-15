@@ -42,7 +42,7 @@ export function withConfirmedRejections(adapter: Adapter, timeoutMs?: number): A
     verdict.audit_findings = { version: 1, findings: existing?.length
       ? existing.map((finding: Record<string, unknown>) => ({ ...finding, reproduction }))
       : [{ id: 'fixture_defect', paths: ['fixture'], reason: 'Scripted fixture predicate is present',
-        criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] };
+        class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] };
     return { ...result, output: JSON.stringify(verdict) };
   } };
 }

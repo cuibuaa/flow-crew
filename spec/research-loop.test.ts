@@ -22,6 +22,7 @@ import { reconcileResearchConclusion, cancelRunStateAtPath, projectResearchConcl
 import { captureEngineCheckpoint, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { createRun } from './test-support/create-run.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import * as engineFiles from '../src/engine-fs.js';
 import * as commands from '../src/adapters/base.js';
@@ -70,7 +71,32 @@ function verdict(config: ResearchConfig, pass = true) {
   const criteria = extractBriefCriteria(researchReviewContract(config)).criteria;
   return JSON.stringify({ pass, reason: pass ? 'Project criteria hold.' : 'Project criterion failed.', remaining_work: [],
     criteria: Object.fromEntries(criteria.map(c => [c.id, { status: pass ? 'pass' : 'fail', evidence: 'Independent project property inspection.' }])),
-    audit_findings: { version: 1, findings: [] }, ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'Another candidate can satisfy the project criterion.' } }) });
+    audit_findings: { version: 1, findings: pass ? [] : [{ id: 'project_criterion', class: 'criterion_unmet', paths: ['candidate.json'], reason: 'Project criterion failed.', criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] }, ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'Another candidate can satisfy the project criterion.' } }) });
+}
+/** Review catches are independent project predicates, not instrument scores.
+ * Execute the selected property through the reviewer's ordinary recorder so
+ * these lifecycle fixtures retain a grounded rejection and its original class. */
+function groundReviewRejection(adapter: ScriptedAdapter, predicate: string): ScriptedAdapter {
+  const execute = adapter.run.bind(adapter);
+  adapter.run = async (prompt, role, opts) => {
+    const result = await execute(prompt, role, opts);
+    if (opts.stageId !== 'review' || result.exitCode !== 0) return result;
+    const record = JSON.parse(result.output);
+    if (record.pass !== false) return result;
+    const source = `const candidate=JSON.parse(require('node:fs').readFileSync('candidate.json','utf8')); process.exit(${predicate}?0:1);`;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
+    const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+    const request = JSON.stringify({ command, cwd: opts.workDir, shell: '/bin/sh' });
+    const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
+      args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Independent project review predicate',
+      cwd: opts.workDir, runDir: opts.runDir });
+    expect(response.exitCode).toBe(0);
+    const reproduction = JSON.parse(response.stdout!).record;
+    expect(reproduction.exitCode).toBe(1);
+    for (const finding of record.audit_findings.findings) finding.reproduction = reproduction.sequence;
+    return { ...result, output: JSON.stringify(record) };
+  };
+  return adapter;
 }
 const proposal = (value?: number, extra = {}) => new ScriptedAdapter({ produce: { output: delivered,
   ...(value === undefined ? {} : { projectFiles: { 'candidate.json': JSON.stringify({ value, ...extra }) } }) } });
@@ -271,9 +297,9 @@ describe('versioned declaration-owned research loop', () => {
     expect(read(runRecordPath(directory, 'research_manifest.json')).engine_stop_reason).toBe('round_budget_exhausted');
   });
   it.each([true, false])('runs only a declared review with its project criteria (pass=%s)', async pass => {
-    const text = brief(config => { config.review = { role: 'qa', criteria: ['Candidate retains the project property explicitly selected here.'] }; });
+    const text = brief(config => { config.review = { role: 'qa', criteria: [pass ? 'Candidate value is positive.' : 'Candidate value remains 100.'] }; });
     const rc = parseBriefFrontmatter(text).research!;
-    const adapter = new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1}' } }, review: { output: verdict(rc, pass) } });
+    const adapter = groundReviewRejection(new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1}' } }, review: { output: verdict(rc, pass) } }), 'candidate.value === 100');
     const { state, directory } = await run(text, adapter);
     expect(state.status, state.failureReason).toBe('complete'); expect(adapter.calls.map(c => c.stageId)).toEqual(['produce', 'review']);
     expect(adapter.calls[1].prompt).toContain(rc.review!.criteria[0]);
@@ -296,7 +322,7 @@ describe('versioned declaration-owned research loop', () => {
     const text = brief(config => { config.budget.max_rounds = 3; config.review = { role: 'qa', criteria: ['The project once-only operation must not be repeated.'] }; });
     const review = JSON.parse(verdict(parseBriefFrontmatter(text).research!, false));
     review.repairability = { version: 1, disposition: 'irreparable', evidence: 'Project once-only allowance was already spent.' };
-    const adapter = new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1}' } }, review: { output: JSON.stringify(review) } });
+    const adapter = groundReviewRejection(new ScriptedAdapter({ produce: { output: delivered, projectFiles: { 'candidate.json': '{"value":1,"once_only_operation_count":2}' } }, review: { output: JSON.stringify(review) } }), 'candidate.once_only_operation_count <= 1');
     const { state, directory } = await run(text, adapter);
     expect(state.status, state.failureReason).toBe('escalated'); expect(state.reasonCode).toBe('irreparable_gate_rejection');
     expect(researchInstrumentState(directory).history.map(h => h.outcome)).toEqual(['baseline', 'review_rejected', 'finalized']);
@@ -378,21 +404,23 @@ describe('versioned declaration-owned research loop', () => {
     expect(read(join(project, 'candidate.json')).value).toBe(25);
   });
   it('finishes a retained project review before evaluating the submitted snapshot', async () => {
-    const text = brief(config => { config.review = { role: 'qa', criteria: ['Preserve the declared project property.'] }; });
+    const text = brief(config => { config.review = { role: 'qa', criteria: ['Candidate value remains 100.'] }; });
     const rc = parseBriefFrontmatter(text).research!, stages = researchStages(rc);
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml')); config.stages = stages;
     const created = createRun(project, 'research', stringify(config), stages.map(s => s.id), text);
     await initializeResearchInstrument(project, created.runDirPath, rc);
     const state = readRunState(project, created.runId); state.research = rc; state.currentIteration = 1;
+    // Recreate the resumed scheduler's ownership before review launches its probe.
+    state.engineCheckpoint = captureEngineCheckpoint(project, state.runId);
     state.stages.produce = { status: 'complete', retries: 0 };
     state.stages.review = { status: 'complete', retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'work/stages/review/output_attempt_1.md' } };
     for (const stage of stages) writeStageStatus(project, state.runId, stage.id, state.stages[stage.id]);
     writeStageOutput(project, state.runId, 'produce', delivered); writeStageOutput(project, state.runId, 'review', verdict(rc));
     writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), verdict(rc));
     writeRunState(project, state.runId, state); writeFileSync(join(project, 'candidate.json'), '{"value":50}');
-    const adapter = new ScriptedAdapter({ review: { output: verdict(rc, false) } });
+    const adapter = groundReviewRejection(new ScriptedAdapter({ review: { output: verdict(rc, false) } }), 'candidate.value === 100');
     const result = await runResearchLoop(project, state.runId, created.runDirPath, config, adapter, new Map(), agents, undefined, text);
-    expect(result.status).toBe('complete'); expect(adapter.calls.map(c => c.stageId)).toEqual(['review']);
+    expect(result.status, result.failureReason).toBe('complete'); expect(adapter.calls.map(c => c.stageId)).toEqual(['review']);
     expect(researchInstrumentState(created.runDirPath).history.map(h => h.outcome)).toEqual(['baseline', 'review_rejected', 'finalized']);
     expect(read(join(project, 'candidate.json')).value).toBe(100);
   });

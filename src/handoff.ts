@@ -1,3 +1,4 @@
+import { auditFindingsJsonSchema, FINDING_POLICY_TEXT } from './scoped-audit-repair.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { ValidationSelectionSchema } from './project-validation.js';
 import { runRecordPath, stageWorkPath } from './run-layout.js';
@@ -69,17 +70,9 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   if (!opts.isGate) return HANDOFF_SCHEMA;
   const refs = opts.runDir ? gateCriterionRefs(opts.runDir, opts.criterionRefs) : opts.criterionRefs ?? [];
   const criteria = object(Object.fromEntries(refs.map(id => [id, CRITERION_ENTRY_SCHEMA])));
-  const audit_findings = object({ version: { type: 'integer', enum: [1] }, findings: { type: 'array', items: object({
-    id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' },
-    paths: { type: 'array', minItems: 1, items: text }, reason: text,
-    reproduction: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
-    criterion_ids: strings, invalidates_plan: { type: 'boolean' }, repair_role: text,
-  }) } });
-  const findingSchema = audit_findings.properties!.findings.items as Schema;
-  findingSchema.required = findingSchema.required!.filter(key => key !== 'reproduction');
-  const pass = object({ reason: text, criteria, audit_findings: { ...audit_findings,
-    properties: { ...audit_findings.properties, findings: { ...audit_findings.properties!.findings, maxItems: 0 } },
-  }, pass: { type: 'boolean', enum: [true] } }, completion);
+  const audit_findings = auditFindingsJsonSchema(refs);
+  const pass = object({ reason: text, criteria, audit_findings: auditFindingsJsonSchema(refs, true),
+    pass: { type: 'boolean', enum: [true] } }, completion);
   const fail = object({ reason: text, criteria, audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
     version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
   }) }, completion);
@@ -88,7 +81,9 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
 }
 
 export function parseStageRecord(output: string, schema: Schema): Record<string, unknown> {
-  const record: unknown = JSON.parse(output);
+  let record: unknown;
+  try { record = JSON.parse(output); }
+  catch { throw new Error('STAGE_RECORD_INVALID: malformed JSON'); }
   // Optional model judgments confer authority only through their own fixed
   // schema. Bad judgment output stays unknown; it cannot void the independent
   // verdict or the completed author work around it. Keep the raw record for audit.
@@ -147,8 +142,9 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     context,
     body,
     criterionBlock,
+    opts.isGate ? FINDING_POLICY_TEXT : '',
     '## Environment gaps\nIf your active result schema offers the environment_gap status and this environment cannot supply a capability or resource needed for the work, report status: "environment_gap", with summary stating what is missing, what you observed, and what remains. Set blocks to { criterion_ids: [...], paths: [...] } naming exactly the criteria and project-relative paths this gap blocks, independently of your stage responsibility mapping. Nonempty dimensions jointly constrain the blocked work; an empty dimension is unconstrained. Use null when the blocked work is unknown. Null, legacy omission or wholly empty blocks are reported as unknown to the gate. This is a structured declaration, not a work failure. The engine sends it to the independent gate without retrying it. Only the gate decides acceptance under its criteria. Do not use it merely because work is unfinished.',
-    opts.isGate ? '## Reproduced findings and validation\nA finding outside configured validation to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. Read configured validation exits and structured totals only from the engine record for this tree. A completed nonzero exit rejects and goes to repair without another suite. Unfinished validation is engine resource work, never a review rejection. Never request a base suite. Keep the project read-only and run your own experiments in private scratch.' : '',
+    opts.isGate ? '## Reproduced findings and validation\nA finding outside configured validation to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree makes a rejecting finding invalid: correct its reproduction or reclassify it as advisory. Do not run configured validation inside the gate. Read configured validation exits and structured totals only from the engine record for this tree. A completed nonzero exit rejects and goes to repair without another suite. Unfinished validation is engine resource work, never a review rejection. Never request a base suite. Keep the project read-only and run your own experiments in private scratch.' : '',
     anchor,
     skillsContent,
   ].filter(Boolean);

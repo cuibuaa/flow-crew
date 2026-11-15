@@ -157,7 +157,7 @@ async function partialWorkflow(confirmed: boolean) {
         ...(reject ? { repairability: { version: 1, disposition: 'repairable', evidence: `ledger #${reproduction}` } } : {}),
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: reject ? 'fail' : 'pass', evidence: 'Read value' }])),
         audit_findings: { version: 1, findings: reject ? [{ id: 'value', paths: ['docs/value.txt'], reason: 'Value predicate failed',
-          criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] } });
+          class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] } });
     }
     mkdirSync(join(root, 'docs'), { recursive: true });
     writeFileSync(join(root, 'docs/value.txt'), opts.stageId === 'repair' ? 'repaired' : 'bad');

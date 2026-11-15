@@ -1,5 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -324,14 +325,16 @@ describe('live guidance and command controls', () => {
         repaired: { status: 'pass', evidence: 'The current tree meets this outcome.' },
         reexamined: { status: history === 'rejected' ? 'fail' : 'pass', evidence: 'Independent current-tree evidence.' },
       },
-      audit_findings, remaining_work: [],
+      audit_findings: { version: 1, findings: history === 'rejected' ? [{ id: 'reexamined', class: 'criterion_unmet',
+        paths: ['docs'], reason: 'Independent current-tree evidence disproves the previously met outcome.',
+        criterion_ids: ['reexamined'], invalidates_plan: false, repair_role: 'coder' }] : [] }, remaining_work: [],
       ...(history === 'rejected' ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the newly found defect.' } } : {}),
     };
     const adapter: Adapter = { async run(prompt) {
       prompts.push(prompt);
       return { output: JSON.stringify(verdict), exitCode: 0, duration_ms: 1 };
     } };
-    const result = await runStage(adapter, { ...stageOptions(created, 'qa'), isGate: true,
+    const result = await runStage(withConfirmedRejections(adapter), { ...stageOptions(created, 'qa'), isGate: true,
       artifactContract: fixtureArtifactContract('qa', true), criterionRefs: ['repaired'],
       outputSchema: stageRecordSchema({ isGate: true, criterionRefs: ['repaired'], runDir: created.runDirPath }),
     });
@@ -348,7 +351,9 @@ describe('live guidance and command controls', () => {
       expect(facts.rejections).toEqual([]);
     }
     // Re-review may reject a previously met criterion, while still covering the whole brief.
-    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8'))).toEqual(verdict);
+    const published = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8'));
+    expect(published).toMatchObject(verdict);
+    if (history === 'rejected') expect(published.audit_findings.findings[0].reproduction).toEqual(expect.any(Number));
   });
 
 });

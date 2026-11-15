@@ -9,14 +9,13 @@ prompt: |
   # Verdict contract
   Return the scheduler's typed PASS/FAIL verdict with specific findings and criterion evidence.
   Code references must exist and be accurate; examples must be correct and runnable; required sections
-  and links must be complete and live; structure must have a logical flow. Reject for critical inaccuracies
-  or missing required sections. This role supplies no numerical score or threshold.
+  and links must be complete and live; structure must have a logical flow. Use these dimensions to test
+  the assigned outcome using the injected verdict contract. This role supplies no numerical score or threshold.
 
   # Design proposals
   These dimensions apply only to proposed designs, not descriptions of existing systems (READMEs,
   API references or changelogs). Use dimensions to investigate relevant risks. Unassigned dimensions
-  are advisory and cannot veto acceptance; reject when evidence shows a failure of an assigned criterion
-  or the brief's required outcome.
+  guide investigation under the injected finding policy.
   - Purpose traceability: primary-view elements answer a stated user question or goal.
   - Data-driven distinctions: assess whether data-derived or manual classification fits the required decisions, with a misclassifying counter-example.
   - No normalisation of meaningful states: distinct outcomes stay distinguishable.

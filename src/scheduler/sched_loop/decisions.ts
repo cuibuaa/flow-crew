@@ -3,7 +3,7 @@ import { runRecordPath } from '../../run-layout.js';
 import { topoSort } from '../sched_admission/frontier.js';
 import { normalizedProjectPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
 import { readEvidence } from '../../evidence-ledger.js';
-import type { AuditFinding } from '../../scoped-audit-repair.js';
+import type { RecordedAuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
 import { existsSync } from 'node:fs';
 import { unlinkSync } from '../../engine-fs.js';
@@ -90,9 +90,9 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     if (graph.records.some(record => record.key === key)) continue;
     const stage = { ...source, decision: declaration };
     let choice: ReturnType<typeof validateDecision>;
-    let unconfirmedRejection = false;
+    let repairUnauthorized = false;
     let gateAccepted: boolean | undefined;
-    let rejectedFindings: AuditFinding[] = [];
+    let rejectedFindings: RecordedAuditFinding[] = [];
     if (source.is_gate) {
       const facts = collectGateRuntimeFacts([source], state, project, run);
       const fact = facts.evaluations[0];
@@ -106,11 +106,14 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       const successor = facts.allPass ? 'continue' : recoveries[0]?.id ?? declaration.default;
       choice = validateDecision(stage, JSON.stringify({ successor, reason: facts.allPass ? 'Effective independent gate accepted.' : fact?.effectiveVerdict?.reason ?? 'Invalid or absent gate result; take the declared default without accepting work.' }));
       if (!fact?.effectiveVerdict && !facts.allPass) choice.outcome = 'defaulted';
+      // A failed replay or historical rejection may have no new repair authority.
+      // Do not cycle the declared default back into a gate or an unauthorized repair.
       if (fact?.effectiveVerdict?.pass === false && !fact.effectiveVerdict.findings?.confirmed.length && !recoveries.length && !facts.contractRefusals.length) {
-        unconfirmedRejection = true;
+        repairUnauthorized = true;
         choice.outcome = 'refused';
-        choice.reason = `Gate criteria rejected; no confirmed finding authorizes repair. ${choice.reason}`;
+        choice.reason = `No confirmed finding authorizes repair. ${choice.reason}`;
       }
+
     } else if (source.retry_to?.length && !source.decision) {
       choice = validateDecision(stage, JSON.stringify({ successor: declaration.default, reason: 'Completed repair returns to its rejecting gate.' }));
     } else {
@@ -148,9 +151,9 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
               return declaration.kind !== 'unknown' && scopeMatchesProjectPath(declaration, path);
             });
           }))))?.id : undefined;
-    if (repeatedGap || unconfirmedRejection || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination
+    if (repeatedGap || repairUnauthorized || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination or exhausted visit budget (${used}/${limit}). ${record.reason}`;
+      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : repairUnauthorized ? record.reason : `Successor refused: unknown destination or exhausted visit budget (${used}/${limit}). ${record.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);

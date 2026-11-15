@@ -205,18 +205,31 @@ Each entry has nonblank `evidence` and a closed `status`:
 
 The criterion map is closed even in extended verdicts. The engine validates shape and
 referenced round existence; it never reads finding prose or decides whether carrying is
-justified. The reviewer owns the overall `pass` judgment. A passing verdict requires empty
-`audit_findings: {version: 1, findings: []}`; rejection requires `repairability`.
+justified. The reviewer assigns each finding's `class`; the engine never infers it from prose.
+The class set and rejection rule have one owner:
+[finding policy](../src/scoped-audit-repair.ts), used by the schema, settlement and injected instructions.
+The classes are `criterion_unmet` (name canonical `criterion_ids` entries, each marked `fail` in this verdict), `regression`
+(a reproduced base/changed difference introduced by the change or its repairs), and `advisory`
+(other real defects, including pre-existing defects, unrequested hardening and style).
+Only the first two reject. Every referenced criterion ID must exist in the brief. A passing verdict
+may carry advisories; a rejecting verdict must contain a rejecting finding and `repairability`.
+Pass with a rejecting finding, rejection with only advisories, an unknown class or an unknown
+criterion ID is invalid and follows the same correction path as other invalid verdicts.
+Review judges the brief's criteria and introduced regressions; it must not invent requirements.
 Invalid JSON/shape uses the existing bounded correction in the same execution and deadline;
 persistent invalidity cannot publish an authoritative verdict. Old authored records, including
 ones without criterion entries or with `judgement`, remain readable in summaries and verdict
 settled projections without rewriting or re-admitting their bytes under the current generation schema.
+Classless archived findings retain their absent class and historical rejecting interpretation; no prose
+heuristic reclassifies them as advisory, and their stored verdict and assessment are preserved.
+Reading an old finding cannot grant it fresh confirmation or repair authority.
 
-Repair receives the round's complete authored criterion entries and findings verbatim in the
-existing rejection records, alongside confirmed reproduction obligations. Re-review receives
+Repair receives the round's authored criterion entries and rejecting findings in the
+existing rejection records, alongside confirmed reproduction obligations. Advisories remain in
+the durable verdict and operator summary, and never become repair obligations. Re-review receives
 these records and `repairChangedFiles` from the engine's complete repair tree diff (`null`
 means unavailable). A reviewer may carry a previously met criterion whose evidence files
-were untouched, or re-examine it. No engine rule limits which defects a re-review may report.
+were untouched, or re-examine it. Re-review reports all findings under the same criterion/regression boundary.
 
 An applicable `gate_contract.json` binds metric/name synonyms, threshold, direction and
 optional `appliesToGates`. Accepting gates must supply finite numeric evidence when required;
@@ -229,7 +242,7 @@ metric artifacts remain readable; current gates have no optional campaign princi
 publication channel. Gate rejection archives under the injected
 `gate_reevaluation/iteration_<n>/round_<n>/` path are durable evidence; the root verdict is live.
 
-A rejection may carry `audit_findings: {version: 1, findings: [...]}`. Findings include exact
+Every verdict carries `audit_findings: {version: 1, findings: [...]}`. Findings include `class`, exact
 project paths, reason, canonical criterion IDs, `invalidates_plan` and configured
 `repair_role`, and optionally `reproduction` (a positive evidence-ledger sequence, or null).
 Run a targeted command, where exit 0 means the defect is absent and a positive exit
@@ -243,12 +256,21 @@ exit and output. Replay uses that shell with `-c` in that cwd. Put required shel
 in an explicit invocation in the command. Read the ledger after completion and cite
 that command's sequence. The engine records its exit, output digest and unchanged
 project tree hash; it confirms a finding only against a failed command from this reviewer
-attempt on the reviewed tree. Missing execution context, absent/missing citations and passing
-records remain unconfirmed observations. This also applies when reading old verdicts.
-Only confirmed findings acquire reproduction obligations. The complete authored verdict,
-including unconfirmed observations, remains visible in repair inputs, run facts and the report. Unconfirmed
-observations alone open no repair: passing criteria permit acceptance, failed criteria leave
-work incomplete. Repair closure replays each confirmed command on the repaired tree and
+attempt on the reviewed tree. Both rejecting classes require that reproduction: criterion status alone
+cannot close the existing command-replay repair loop. Missing execution context, absent/missing citations,
+passing records or a changed tree invalidate the verdict and use the existing same-attempt correction.
+The reviewer supplies the reproduction or reclassifies the finding as advisory. One correction invocation
+is allowed; persistent invalidity fails the stage without publishing a verdict, as with other invalid JSON.
+Only confirmed rejecting findings acquire reproduction obligations. The complete authored verdict,
+including advisories, remains in the durable record, run facts and the report. Advisories never acquire
+repair authority even when reproduced. Historical unconfirmed observations remain readable without
+acquiring fresh repair authority.
+
+When the brief supplies no criterion IDs, `criterion_unmet` cannot validate. Advisory and regression
+remain usable; a regression can reject only with its failed recorded reproduction. An unmet outcome
+without a named brief criterion cannot be rejected as `criterion_unmet`; supply criteria in the brief.
+An empty stage assignment still covers all canonical brief criteria when the brief has them.
+Repair closure replays each confirmed rejecting command on the repaired tree and
 records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,
 after the attempt's selected validation commands. Dependency preparation, when needed, is part of those declared commands.
 No reproduction is a second configured validation.

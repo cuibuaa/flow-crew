@@ -511,7 +511,7 @@ describe('compressed acceptance loop', () => {
     expect(preamble).not.toContain('Reject again only');
     expect(planner).toContain('returns concrete repairable findings');
     expect(planner).toContain('judgement with its own finite checklist');
-    expect(qa).toContain('brief\'s intended outcome');
+    expect(qa).toContain('Judge the assigned outcome using the injected verdict contract');
     expect(preamble).toContain('Check each rejected finding against the repair diff');
     expect(preamble).toContain('This is your judgment');
     expect(preamble).toContain('Consume the repair attempt\'s configured validation from the ledger without rerunning it');

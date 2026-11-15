@@ -85,9 +85,9 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (++calls > 1) return completed(opts, 'Replacement answer must not erase a genuine rejection.');
       time.advanceTo((budget - 1));
-      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'Actual defect', criteria: {}, audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'repairable', evidence: 'fixture' } }) };
+      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'Actual defect', criteria: {}, audit_findings: { version: 1, findings: [{ id: 'fixture_defect', class: 'regression', paths: ['work.txt'], reason: 'Required work remains defective.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] }, repairability: { version: 1, disposition: 'repairable', evidence: 'fixture' } }) };
     } };
-    const result = await runStage(adapter, { ...options(created, time), isGate: true, outputSchema: stageRecordSchema({ isGate: true }), artifactContract: fixtureArtifactContract('work', true) });
+    const result = await runStage(withConfirmedRejections(adapter), { ...options(created, time), isGate: true, outputSchema: stageRecordSchema({ isGate: true }), artifactContract: fixtureArtifactContract('work', true) });
     expect(result.exitCode).toBe(0);
     expect(result.continuation).toBeUndefined();
     expect(calls).toBe(1);
@@ -382,6 +382,7 @@ it('SI verified success after provider cleanup is complete and never starts a cr
 
 it.each([false, true])('SI a gate rejection cannot spend another attempt on a declared environment gap even with a confirmed finding (repair discovers=%s)', async repairDiscovers => {
   const { roles, workflow } = workflowFixture(3);
+  const brief = '---\ncriteria: [{id: visual, text: Supply the required visual evidence.}]\n---\nSupply visual evidence.';
   const calls: string[] = [];
   const gap = { reason: 'Renderer unavailable; visual evidence cannot be supplied in this environment.' };
   const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -391,13 +392,13 @@ it.each([false, true])('SI a gate rejection cannot spend another attempt on a de
     if (opts.stageId === 'review') {
       if (!repairDiscovers && calls.filter(id => id === 'review').length > 1) return withRemaining(completed(opts, 'Complete.'), []);
       if (!repairDiscovers || calls.filter(id => id === 'review').length > 1) expect(prompt).toContain(gap.reason);
-      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: gap.reason, criteria: {},
-        audit_findings: { version: 1, findings: [{ id: 'missing_visual', paths: ['work.txt'], reason: gap.reason, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] }, repairability: { version: 1, disposition: 'repairable', evidence: gap.reason } }) };
+      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: gap.reason, criteria: { visual: { status: 'fail', evidence: gap.reason } },
+        audit_findings: { version: 1, findings: [{ id: 'missing_visual', paths: ['work.txt'], reason: gap.reason, class: 'criterion_unmet' as const, criterion_ids: ['visual'], invalidates_plan: false, repair_role: 'coder' }] }, repairability: { version: 1, disposition: 'repairable', evidence: gap.reason } }) };
     }
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter, 20_000), new Map(), undefined, roles,
-    undefined, undefined, false, undefined, undefined, () => manualClock().clock);
+    undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(calls).toEqual(repairDiscovers ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review']);
   expect(result.status, result.failureReason).toBe('incomplete');
   expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed).toHaveLength(1);
@@ -474,7 +475,7 @@ it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
     if(opts.stageId==='work') return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'Optional renderer missing; textual evidence can satisfy the brief.',...(binding==='absent'?{}:{blocks:binding==='empty'?{criterion_ids:[],paths:[]}:binding==='paths'?{criterion_ids:[],paths:['renderer']}:{criterion_ids:[refs[0]],paths:binding==='joint'?['work.txt']:[]}}),caveats:[],remaining_work:['Optional visual evidence unavailable.']})};
     if(opts.stageId==='text') writeFileSync(join(project,'work.txt'),'wrong text');
     if(opts.stageId==='repair') writeFileSync(join(project,'work.txt'),'correct text');
-    if(opts.stageId==='review' && !calls.includes('repair')) return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'Renderer gap accepted under criteria; independently reproduced text typo must be fixed.',criteria:{[refs[0]]:{status:'pass',evidence:'The stated optional renderer gap is accepted using delivered textual evidence.'},[refs[1]]:{status:'fail',evidence:'work.txt contains wrong text.'}},audit_findings:{version:1,findings:[{id:'text_typo',paths:['work.txt'],reason:'Text is wrong; renderer is unrelated.',criterion_ids:[refs[1]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'Repair work.txt only; no renderer invocation or gap reopening.'}})};
+    if(opts.stageId==='review' && !calls.includes('repair')) return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'Renderer gap accepted under criteria; independently reproduced text typo must be fixed.',criteria:{[refs[0]]:{status:'pass',evidence:'The stated optional renderer gap is accepted using delivered textual evidence.'},[refs[1]]:{status:'fail',evidence:'work.txt contains wrong text.'}},audit_findings:{version:1,findings:[{id:'text_typo',paths:['work.txt'],reason:'Text is wrong; renderer is unrelated.',class: 'criterion_unmet' as const, criterion_ids:[refs[1]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'Repair work.txt only; no renderer invocation or gap reopening.'}})};
     return withRemaining(completed(opts,'Complete.'),[]);
   }};
   const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,undefined,()=>manualClock().clock);
@@ -527,7 +528,7 @@ it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMappin
    return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'The required renderer executable is unavailable in this environment.',blocks:{criterion_ids:binding==='paths'?[]:[refs[0]],paths:binding==='criteria'?[]:['renderer']},caveats:[],remaining_work:['Supply visual evidence with renderer.']})};
   }
   if(opts.stageId==='text')writeFileSync(join(project,'work.txt'),'correct text');
-  if(opts.stageId==='review')return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'The renderer is absent; text is correct.',criteria:{[refs[0]]:{status:'fail',evidence:'Renderer unavailable.'},[refs[1]]:{status:'pass',evidence:'Correct text exists.'}},audit_findings:{version:1,findings:[{id:'missing_renderer',paths:['renderer'],reason:'Same renderer capability missing.',criterion_ids:[refs[0]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'The renderer is absent.'}})};
+  if(opts.stageId==='review')return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'The renderer is absent; text is correct.',criteria:{[refs[0]]:{status:'fail',evidence:'Renderer unavailable.'},[refs[1]]:{status:'pass',evidence:'Correct text exists.'}},audit_findings:{version:1,findings:[{id:'missing_renderer',paths:['renderer'],reason:'Same renderer capability missing.',class: 'criterion_unmet' as const, criterion_ids:[refs[0]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'The renderer is absent.'}})};
   return withRemaining(completed(opts,'Complete.'),[]);
  }};
  const result=await runWorkflow(workflow,stringify(workflow),project,withRendererReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,undefined,()=>manualClock().clock);
@@ -552,6 +553,7 @@ it.each([
   { gapPath: './renderer/', findingPath: 'renderer-sibling', sameGap: false },
 ])('SI gap path scope $gapPath contains $findingPath = $sameGap', async ({ gapPath, findingPath, sameGap }) => {
   const { roles, workflow } = workflowFixture(3);
+  const brief = '---\ncriteria: [{id: evidence, text: Supply the required evidence.}]\n---\nSupply evidence.';
   workflow.stages.find(stage => stage.id === 'repair')!.scope = ['renderer', 'assets', 'assets-sibling', 'renderer-sibling', 'work.txt'];
   const calls: string[] = [];
   const adapter: Adapter = { async run(_prompt, _role, opts) {
@@ -561,14 +563,14 @@ it.each([
       blocks: { criterion_ids: [], paths: [gapPath] }, caveats: [], remaining_work: ['Supply the missing evidence.'],
     }) };
     if (opts.stageId === 'review' && !calls.includes('repair')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
-      pass: false, reason: 'Missing required evidence.', criteria: {},
-      audit_findings: { version: 1, findings: [{ id: 'missing_evidence', paths: [findingPath], reason: 'Evidence unavailable.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] },
+      pass: false, reason: 'Missing required evidence.', criteria: { evidence: { status: 'fail', evidence: 'Evidence unavailable.' } },
+      audit_findings: { version: 1, findings: [{ id: 'missing_evidence', paths: [findingPath], reason: 'Evidence unavailable.', class: 'criterion_unmet' as const, criterion_ids: ['evidence'], invalidates_plan: false, repair_role: 'coder' }] },
       repairability: { version: 1, disposition: 'repairable', evidence: 'Independently reproduced missing evidence.' },
     }) };
     return withRemaining(completed(opts, 'Complete.'), []);
   } };
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
-    undefined, undefined, false, undefined, undefined, () => manualClock().clock);
+    undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed ?? []).toHaveLength(sameGap ? 1 : 0);
   expect(calls).toEqual(sameGap ? ['done', 'work', 'review'] : ['done', 'work', 'review', 'repair', 'review']);
   expect(result.status, result.failureReason).toBe('incomplete');
@@ -605,7 +607,7 @@ it('SI gap path scope reports unknown blocked criterion ids to the gate', async 
       gateSawFact = true;
       if (!calls.includes('repair')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
         pass: false, reason: 'Required evidence missing.', criteria: { [refs[0]]: { status: 'fail', evidence: 'Renderer is absent.' } },
-        audit_findings: { version: 1, findings: [{ id: 'missing_renderer', paths: ['renderer'], reason: 'Renderer is absent.', criterion_ids: [unknown], invalidates_plan: false, repair_role: 'coder' }] },
+        audit_findings: { version: 1, findings: [{ id: 'missing_renderer', paths: ['renderer'], reason: 'Renderer is absent.', class: 'criterion_unmet' as const, criterion_ids: [refs[0]], invalidates_plan: false, repair_role: 'coder' }] },
         repairability: { version: 1, disposition: 'repairable', evidence: 'Independently reproduced missing renderer.' },
       }) };
     }
@@ -614,9 +616,10 @@ it('SI gap path scope reports unknown blocked criterion ids to the gate', async 
   const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
     undefined, brief, false, undefined, undefined, () => manualClock().clock);
   expect(gateSawFact).toBe(true);
-  expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
-  expect(result.stages.repair.attempts ?? []).toHaveLength(1);
-  expect(result.status, result.failureReason).toBe('complete');
+  expect(calls).toEqual(['done', 'work', 'review']);
+  expect(result.stages.repair.attempts ?? []).toHaveLength(0);
+  expect(result.status, result.failureReason).toBe('incomplete');
+  expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
 });
 
 function allowanceBrief(brief = '# Complete the fixture work.') {
@@ -871,6 +874,7 @@ describe('retained contracts under declared allowances', () => {
   });
   it.each([true, false])('SI environment gap reaches an independent gate once (accept=%s)', async accept => {
     const { roles, workflow } = workflowFixture(5);
+    const brief = '---\ncriteria: [{id: visual, text: Supply the required visual evidence.}]\n---\nSupply visual evidence.';
     workflow.defaults.max_retries = 3;
     let time = manualClock();
     const calls: string[] = [];
@@ -886,13 +890,13 @@ describe('retained contracts under declared allowances', () => {
         expect(prompt).toContain(gap.reason);
         expect(prompt).toContain('environment_gap');
         expect(workflow.stages.find(stage => stage.id === 'review')!.scope).toEqual([]);
-        if (!accept) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'The required evidence is absent.', criteria: {},
-          audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'irreparable', evidence: gap.reason } }) };
+        if (!accept) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'The required evidence is absent.', criteria: { visual: { status: 'fail', evidence: gap.reason } },
+          audit_findings: { version: 1, findings: [{ id: 'fixture_defect', class: 'criterion_unmet', paths: ['work.txt'], reason: 'Required work remains defective.', criterion_ids: ['visual'], invalidates_plan: false, repair_role: 'coder' }] }, repairability: { version: 1, disposition: 'irreparable', evidence: gap.reason } }) };
       }
       return withRemaining(completed(opts, 'Complete.'), []);
     } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
-      undefined, allowanceBrief(), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
+      undefined, allowanceBrief(brief), false, undefined, undefined, () => { time = manualClock(); return time.clock; });
    expect(calls).toEqual(['done', 'work', 'review']);
     expect(result.status, result.failureReason).toBe(accept ? 'complete' : 'escalated');
     expect(result.stages.work.attempts).toHaveLength(1);

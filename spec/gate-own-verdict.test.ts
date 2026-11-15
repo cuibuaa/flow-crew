@@ -14,6 +14,7 @@ import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.j
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { stageFixtureCommand } from './test-support/stage-command.js';
 import { createRun } from './test-support/create-run.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
@@ -43,7 +44,7 @@ afterEach(() => {
 
 function verdict(pass = true) {
   return { pass, reason: pass ? 'Independent review accepted the work.' : 'Independent review rejected the work.',
-    criteria: {}, audit_findings: { version: 1, findings: [] }, remaining_work: [],
+    criteria: {}, audit_findings: { version: 1, findings: pass ? [] : [{ id: 'fixture_defect', class: 'regression', paths: ['fixture'], reason: 'Independent fixture defect.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] }, remaining_work: [],
     ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'The reported defect can be repaired.' } } : {}),
   };
 }
@@ -68,7 +69,7 @@ async function launch(options: { pass?: boolean; noAnswer?: boolean; correctAnsw
   const yaml = stringify(workflow);
   const created = prepareFixtureRun(project, workflow, yaml);
   updateRunState(project, created.runId, state => { state.maxRetries = 0; });
-  const answer = verdict(options.pass ?? true);
+  let answer = verdict(options.pass ?? true);
   const calls: string[] = [];
   const prompts: string[] = [];
   const plannerPrompts: string[] = [];
@@ -83,6 +84,18 @@ async function launch(options: { pass?: boolean; noAnswer?: boolean; correctAnsw
       prompts.push(prompt);
       if (options.writeOwn !== false) writeFileSync(stageWorkPath(opts.runDir, carrier), '{"pass":true,"reason":"stage-authored counterfeit"}');
       if (options.otherCarrier) writeFileSync(runRecordPath(opts.runDir, 'verdict_dependent.json'), '{"pass":true}');
+      if (!answer.pass) {
+        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+        const request = JSON.stringify({ command: 'false', cwd: project, shell: '/bin/sh' });
+        const response = await stageFixtureCommand({ role: 'test', command: '/bin/sh',
+          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Independent fixture rejection',
+          cwd: project, runDir: opts.runDir });
+        expect(response.exitCode).toBe(0);
+        const record = JSON.parse(response.stdout!).record;
+        expect(record.exitCode).toBe(1);
+        answer = { ...answer, audit_findings: { version: 1,
+          findings: answer.audit_findings.findings.map(finding => ({ ...finding, reproduction: record.sequence })) } };
+      }
       return { output: options.noAnswer || options.correctAnswer && prompts.length === 1
         ? 'Review completed, but no structured final answer.' : JSON.stringify(answer, null, 2),
         exitCode: 0, duration_ms: 1, writes: [

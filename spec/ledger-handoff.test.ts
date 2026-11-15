@@ -164,7 +164,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
         const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
         output = JSON.stringify({ pass, reason: pass ? 'Independently correct.' : 'Wrong greeting.',
           criteria: Object.fromEntries(criteria.map(c => [c.id, { status: pass ? 'pass' : 'fail', evidence: 'greeting.txt' }])),
-          audit_findings: { version: 1, findings: pass ? [] : [{ id: 'greeting', paths: ['greeting.txt'], reason: 'Wrong greeting.', criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] },
+          audit_findings: { version: 1, findings: pass ? [] : [{ id: 'greeting', paths: ['greeting.txt'], reason: 'Wrong greeting.', class: 'criterion_unmet' as const, criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] },
           ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace the wrong greeting.' } } : {}), remaining_work: [],
         });
       }

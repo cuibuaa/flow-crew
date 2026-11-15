@@ -565,6 +565,7 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 
 /** Gate verdict fields returned in the final structured answer and published by the engine. */
 export interface GateVerdict {
+  /** Confirmed rejecting obligations, historical unconfirmed observations and operator advisories. */
   findings?: import('./scoped-audit-repair.js').FindingAssessment;
   validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'command' | 'args' | 'env' | 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed' | 'sourceBound' | 'totals' | 'testsRun' | 'failureCount'>
     & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: string; measurement: import('./project-validation.js').ValidationMeasurement }>;
@@ -576,9 +577,10 @@ export interface GateVerdict {
 }
 export const VERDICT_CONTRACT_DOC = 'A gate returns its verdict as the final structured JSON answer matching its active result schema; the engine validates it and publishes verdict_<stage_id>.json. Stage templates must not instruct stages to write verdict files or other engine-owned files. '
   + 'Verdict fields: {"pass": true|false, "reason": "<why>"} (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
+  + 'Gate reviewers receive the injected finding-class policy and must ground every rejecting finding. '
   + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
   + 'Use irreparable only when no repair or re-plan can undo the observed failure; it ends the run escalated and preserves the rejection. '
-  + 'A repair requires a completed nonzero engine validation record or a finding citing a failed reviewer command in the evidence ledger; observations without a confirmed reproduction never admit repair. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
+  + 'A repair requires a completed nonzero engine validation record or a finding citing a failed reviewer command in the evidence ledger; a rejecting finding without a confirmed reproduction is invalid and uses result correction. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';

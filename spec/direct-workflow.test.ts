@@ -98,10 +98,13 @@ describe('direct workflow', () => {
       expect(call.user).toContain('# Execution clock');
       expect(call.user).toContain('Engine state query');
       if (call.id === 'review') {
-        expect(call.system).toContain('including the limits of the inputs the brief allows');
-        expect(call.system).toContain("The author's summary, tests and evidence alone");
-        expect(call.system).toContain('independent evidence across the allowed input families and complete observable');
-        expect(call.system).toContain('unchanged baseline is the oracle wherever preservation is required');
+        expect(call.system).toContain('Judge the assigned outcome using the injected verdict contract.');
+        expect(call.user).toContain('Do not invent task requirements');
+        expect(call.user.split('Choose each finding class:')).toHaveLength(2);
+        expect(call.system + call.user).not.toContain('src/scoped-audit-repair.ts');
+        expect(call.user).toContain('Independent evidence is required');
+        expect(call.system).toContain('Choose independent experiments that establish the criteria');
+        expect(call.user).toContain('criterion_unmet');
         expect(call.system).toContain('supplied references and constraints');
       } else {
         expect(call.system).toContain('After the last change, supply relevant evidence');
@@ -187,7 +190,7 @@ describe('direct workflow', () => {
           expect(prompt).not.toContain('Reject again only');
         }
         const findings = defects.map((name, index) => ({ id: name, paths: [name], reason: `verbatim defect ${name}\nwith detail`,
-          criterion_ids: [`fixture_${index + 1}`], invalidates_plan: false, repair_role: 'coder' }));
+          class: 'criterion_unmet' as const, criterion_ids: [`fixture_${index + 1}`], invalidates_plan: false, repair_role: 'coder' }));
         return { output: JSON.stringify({ pass: defects.length === 0, reason: 'Complete independent review',
           criteria: { ...criteria, stable }, audit_findings: { version: 1, findings },
           ...(defects.length ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace both bad values' } } : {}) }), exitCode: 0, duration_ms: 1 };

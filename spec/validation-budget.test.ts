@@ -172,7 +172,7 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
       const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
       const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`], display: 'Independent audit predicate', cwd: root, timeoutMs: 30000 });
       expect(response.exitCode).toBe(0); const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1);
-      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]) });
+      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]) });
     }
     if (opts.stageId === 'implement') {
       writeFileSync(join(root, 'contract.txt'), 'new'); if (kind === 'cpu') writeFileSync(join(root, 'resource.txt'), '6-7');

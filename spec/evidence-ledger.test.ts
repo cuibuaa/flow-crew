@@ -114,7 +114,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       const pass = !defect && (options.returnToFirstTree ? reviews > 2 : !options.rejectFirstReview || reviews > 1);
       return { output: JSON.stringify({ pass, reason: pass ? 'Independent acceptance.' : 'Check the value again.',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'value.txt' }])),
-        audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] },
+        audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] },
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'value.txt' } } : {}) }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured', tokens_in: 1, tokens_out: 1 };
     }

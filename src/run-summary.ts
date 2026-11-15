@@ -16,7 +16,7 @@ import type { StageStatus, StoreState } from './store.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 import type { RunEvent } from './run-events.js';
 import { archivedGateRejections } from './scheduler/sched_settlement/gate-archives.js';
-import { projectLegacyFindings } from './scoped-audit-repair.js';
+import { projectLegacyFindings, readArchivedAuditFindings, findingRejects } from './scoped-audit-repair.js';
 // ---------------------------------------------------------------------------
 // Git: compute the REAL set of changed files since the run started.
 // ---------------------------------------------------------------------------
@@ -236,8 +236,8 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
           lines.push(`Independent verdict: ${record.pass ? 'PASS' : 'FAIL'} — ${record.reason}`);
           const criteria = record.criteria as Record<string, { status: string; evidence: string }>;
           for (const [id, criterion] of Object.entries(criteria ?? {})) lines.push(`- ${id}: ${criterion.status} — ${criterion.evidence}`);
-          const findings = record.audit_findings as { findings: Array<{ id: string; reason: string; paths: string[] }> };
-          for (const finding of findings?.findings ?? []) lines.push(`- Finding ${finding.id}: ${finding.reason} (${finding.paths.join(', ')})`);
+          const findings = record.audit_findings as { findings: Array<{ id: string; class?: string; reason: string; paths: string[] }> };
+          for (const finding of findings?.findings ?? []) lines.push(`- Finding ${finding.id} [${finding.class ?? 'legacy rejecting'}]: ${finding.reason} (${finding.paths.join(', ')})`);
           if (record.repairability) {
             const repair = record.repairability as { disposition: string; evidence: string };
             lines.push(`Repairability: ${repair.disposition} — ${repair.evidence}`);
@@ -284,6 +284,7 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
     if (!verdict) continue;
     const authored = readJson<{ audit_findings?: unknown }>(runRecordPath(runDir, `verdict_${id}.json`));
     const findings = projectLegacyFindings(verdict, authored?.audit_findings).findings;
+    for (const finding of findings?.advisory ?? []) sections.push(`- ${id}: advisory ${finding.id}: ${finding.reason}; no repair requested.`);
     for (const finding of findings?.confirmed ?? []) sections.push(`- ${id}: confirmed finding ${finding.id}; reproduction ledger #${finding.record.sequence}.`);
     for (const finding of findings?.unconfirmed ?? []) sections.push(`- ${id}: unconfirmed observation ${finding.id}: ${finding.reason}; no repair requested.`);
   }
@@ -306,6 +307,10 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
       } else {
         lines.push(`Archived authored verdict: ${record.written_verdict_pass === null ? 'unknown' : record.written_verdict_pass ? 'PASS' : 'FAIL'}.`,
           `Engine effective verdict: ${record.engine_effective_pass ? 'PASS' : 'FAIL'} — ${record.engine_rejection_reason || 'Reason unavailable in engine record.'}`);
+      }
+      const authored = readJson<{ audit_findings?: unknown }>(archive.verdictPath);
+      for (const finding of readArchivedAuditFindings(authored?.audit_findings) ?? []) {
+        if (!findingRejects(finding)) lines.push(`Advisory ${finding.id}: ${finding.reason}; no repair requested.`);
       }
       sections.push(lines.join('\n\n'));
     }

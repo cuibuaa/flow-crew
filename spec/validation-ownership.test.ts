@@ -229,8 +229,9 @@ describe('scheduler owns validation after author settlement', () => {
         const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1); reproduction = record.sequence;
       }
       const value = verdict(opts.runDir); value.pass = !first;
+      if (first) value.criteria.value = { status: 'fail', evidence: 'Independent predicate reproduced the bad value.' };
       return { output: JSON.stringify({ ...value, ...(first ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Replace bad value' } } : {}),
-        audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Value should be good', reproduction, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }),
+        audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Value should be good', reproduction, class: 'criterion_unmet' as const, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } });
     expect(reviews).toBe(2); expect(readFileSync(counter, 'utf8')).toBe('3');
@@ -330,7 +331,7 @@ describe('scheduler owns validation after author settlement', () => {
       attemptIndex: 1, commandId: 'fixture', command: 'predicate', exitCode: 7, unfinished: true,
       context: { cwd: '/workspace', shell: '/bin/sh' }, outputDigest: 'digest', treeHash: 'tree', treeAfterHash: 'tree' };
     const finding = { id: 'value', paths: ['value.txt'], reason: 'Opaque predicate', reproduction: 1,
-      criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
+      class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
     const gate = { stageId: 'review', attemptIndex: 1, treeHash: 'tree' };
     expect(assessFindings([finding], [record], gate).confirmed).toEqual([]);
     expect(assessFindings([finding], [{ ...record, unfinished: false }], gate).confirmed).toHaveLength(1);
@@ -351,7 +352,7 @@ describe('scheduler owns validation after author settlement', () => {
         expect(response.record).toMatchObject({ kind: 'command', exitCode, unfinished: true });
         expect(readEvidence(opts.runDir).find(entry => entry.sequence === response.record.sequence)).toEqual(response.record);
         const finding = { id: 'observation', paths: ['value.txt'], reason: 'Opaque command facts', reproduction: response.record.sequence,
-          criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
+          class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' };
         expect(assessFindings([finding], readEvidence(opts.runDir), { stageId: opts.stageId, attemptIndex: 1,
           treeHash: captureProjectTree(root, '', opts.runDir).hash }).confirmed).toEqual([]);
         return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
@@ -378,10 +379,12 @@ describe('scheduler owns validation after author settlement', () => {
       }
       const first = ++reviews === 1;
       const response = first ? await execute({ command: 'independent predicate', cwd: root, shell: '/bin/sh' }, new AbortController().signal) as { record: evidenceOwner.EvidenceEntry } : undefined;
-      return { output: JSON.stringify({ ...verdict(opts.runDir), pass: !first,
+      const value = verdict(opts.runDir); value.pass = !first;
+      if (first) value.criteria.value = { status: 'fail', evidence: 'Completed independent predicate reproduced the bad value.' };
+      return { output: JSON.stringify({ ...value,
         ...(first ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Completed independent predicate' } } : {}),
         audit_findings: { version: 1, findings: first ? [{ id: 'value', paths: ['value.txt'], reason: 'Replace bad value', reproduction: response!.record.sequence,
-          criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+          class: 'criterion_unmet' as const, criterion_ids: ['value'], invalidates_plan: false, repair_role: 'coder' }] : [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } });
     const closure = readEvidence(runDir(root, final.runId)).find(entry => entry.kind === 'command' && entry.reproductionOf !== undefined);
     expect(closure).toMatchObject({ exitCode: 0, unfinished: true });

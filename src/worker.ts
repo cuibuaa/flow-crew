@@ -25,14 +25,14 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
-import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext } from './evidence-ledger.js';
+import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext, readEvidence } from './evidence-ledger.js';
 import { adapterInputLimit, adapterInputLength, INPUT_RESERVE_CHARS, runAdapter } from './adapter-input.js';
 import { createHash } from 'node:crypto';
-import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
+import { buildStagePrompt, gateCriterionRefs, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
-import { AuditFindingsSchema } from './scoped-audit-repair.js';
+import { validateFindingVerdict } from './scoped-audit-repair.js';
 import { admittedContract } from './brief-admission.js';
 import { readBriefCriteriaArtifact } from './brief-criteria.js';
 import { normalizedProjectPath, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
@@ -497,7 +497,7 @@ export async function runStage(
   }
   if (opts.outputSchema) {
     const judgement = opts.isGate
-      ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
+      ? 'Judge the brief criteria and regressions introduced relative to the unchanged base, using the injected finding-class policy. Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
       : '';
     prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands. List unfinished duties/checks in remaining_work; use [] only when all assigned work is complete.`;
   }
@@ -973,8 +973,9 @@ export async function runStage(
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
         ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');
       if (violation) throw new Error(violation);
-      const findings = AuditFindingsSchema.parse(record.audit_findings);
-      if (record.pass === true && findings.findings.length) throw new Error('AUDIT_FINDINGS_OPEN: passing verdict has unresolved findings');
+      const findingViolation = validateFindingVerdict(record, gateCriterionRefs(opts.runDir, opts.criterionRefs), { ledger: readEvidence(opts.runDir),
+        gate: { stageId: opts.stageId, attemptIndex, treeHash: captureProjectTree(opts.projectDir, '', opts.runDir).hash } });
+      if (findingViolation) throw new Error(findingViolation);
     }
     return record;
   };
@@ -1036,7 +1037,7 @@ export async function runStage(
         return combined;
       }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
-      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
+      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct the final JSON document using retained work and evidence; record a required targeted reproduction if it is missing. Preserve substantive evidence; never invent evidence or suppress a grounded rejection. Apply the injected finding policy when reclassifying an unsupported claim.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
       if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {
         return {
           ...combined,

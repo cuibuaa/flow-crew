@@ -87,7 +87,7 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
     if (options.missing === 'criterion') delete evidence[criteria[0].id];
     return { output: JSON.stringify({ pass, reason, criteria: evidence,
       audit_findings: { version: 1, findings: pass ? [] : [{ id: 'required_evidence', paths: ['docs/report.json'], reason,
-        criterion_ids: criteria.filter((_, i) => i === 0 ? !speedPass : !boundsPass).map(c => c.id),
+        class: 'criterion_unmet', criterion_ids: criteria.filter((_, i) => i === 0 ? !speedPass : !boundsPass).map(c => c.id),
         invalidates_plan: false, repair_role: 'repair' }] },
       ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: reason } }) }),
     exitCode: 0, duration_ms: 1 };

@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
-const findings = (path: string) => ({ version: 1, findings: [{ id: 'page', paths: [path], reason: 'Correct the page.', criterion_ids: ['render'], invalidates_plan: false, repair_role: 'coder' }] });
+const findings = (path: string) => ({ version: 1, findings: [{ id: 'page', paths: [path], reason: 'Correct the page.', class: 'criterion_unmet' as const, criterion_ids: ['render'], invalidates_plan: false, repair_role: 'coder' }] });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['render'] });
 const record = (path: string) => ({ pass: false, reason: 'The page needs repair.', criteria: { render: { status: 'fail', evidence: 'The page did not render.' } }, audit_findings: findings(path), repairability: { version: 1, disposition: 'repairable', evidence: 'Correct the page.' } });
 

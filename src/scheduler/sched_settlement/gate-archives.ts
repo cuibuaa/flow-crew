@@ -1,3 +1,4 @@
+import { findingRejects, readArchivedAuditFindings } from '../../scoped-audit-repair.js';
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Canonical iteration/round coordinates, archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
 import { copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
@@ -261,13 +262,14 @@ For a criterion met last round whose evidence files the repair did not touch, yo
 The repairDiffPath names the complete, untruncated repair-round diff. repairChangedFiles comes from attempt content identities; null means unavailable. With no structured rejection, run a complete initial evaluation.`;
 }
 
-function rejectionRecord(rejection: ArchivedGateRejection): object {
+function rejectionRecord(rejection: ArchivedGateRejection, repair = false): object {
   let verdict: Record<string, unknown> = {};
   try { verdict = JSON.parse(readFileSync(rejection.verdictPath, 'utf8')); } catch { /* Historical records may lack the authored verdict. */ }
   return {
     iteration: rejection.iteration, round: rejection.round,
     criteria: verdict.criteria ?? null,
-    audit_findings: verdict.audit_findings ?? null,
+    audit_findings: repair ? { version: 1,
+      findings: (readArchivedAuditFindings(verdict.audit_findings) ?? []).filter(findingRejects) } : verdict.audit_findings ?? null,
     verdictPath: rejection.verdictPath,
     effectiveVerdictPath: rejection.effectiveVerdictPath,
     ...(existsSync(rejection.metricPath) ? { metricPath: rejection.metricPath } : {}),
@@ -278,7 +280,7 @@ export function confirmedRepairFindings(runDirPath: string, gateIds: string[], t
   const findings = gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
     .filter(coordinate => !through || coordinate.iteration < through.iteration || coordinate.iteration === through.iteration && coordinate.round <= through.round)
     .flatMap(coordinate => {
-      try { return JSON.parse(readFileSync(gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'), 'utf8')).findings?.confirmed ?? []; }
+      try { return (JSON.parse(readFileSync(gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'), 'utf8')).findings?.confirmed ?? []).filter(findingRejects); }
       catch { return []; } // A missing archive never creates repair authority.
     })) as NonNullable<GateVerdict['findings']>['confirmed'];
   // Later repairs must replay earlier obligations on their new tree too.
@@ -291,8 +293,8 @@ export function buildGateFixCorrectionContract(
   return `# Gate repair facts\n${JSON.stringify({ ...coordinate, gateIds,
     rejections: gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
       .filter(rejection => rejection.iteration === coordinate.iteration && rejection.round === coordinate.round)
-      .map(rejection => rejectionRecord(rejection))),
+      .map(rejection => rejectionRecord(rejection, true))),
     confirmedFindings: Object.fromEntries(gateIds.map(gateId => [gateId, confirmedRepairFindings(runDirPath, [gateId], coordinate)])),
     ledgerPath: runRecordPath(runDirPath, 'evidence-ledger.jsonl'),
-  })}\nReceive all criterion entries and findings of this round verbatim in rejections. Resolve all not-met (status "fail") entries and confirmed findings together against the current diff; retain unconfirmed observations as evidence without treating them as confirmed defects. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
+  })}\nReceive all criterion entries and rejecting findings of this round in rejections; advisory findings remain in the durable verdict for the operator and are never repair obligations. Resolve all not-met (status "fail") entries and confirmed findings together against the current diff. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
 }

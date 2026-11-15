@@ -257,13 +257,13 @@ describe('real scheduler boundaries', () => {
       if (opts.stageId === 'report') { writerCalls++; write(join(project, 'docs/report.md'), 'needs attribution'); writes.push('docs/report.md'); }
       if (opts.stageId === 'audit') {
         gateCalls++; const pass = readFileSync(join(project, 'docs/report.md'), 'utf8').includes('attribution repaired');
-        write(stageWorkPath(opts.runDir, 'fixture_verdict_audit.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'report attribution missing', audit_findings: { version: 1, findings: pass ? [] : [{ id: 'attribution', paths: ['docs/report.md'], reason: 'Add the missing report attribution.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] } })); writes.push('run:verdict_audit.json');
+        write(stageWorkPath(opts.runDir, 'fixture_verdict_audit.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'report attribution missing', criteria: { attribution: { status: pass ? 'pass' : 'fail', evidence: 'Read the report attribution.' } }, audit_findings: { version: 1, findings: pass ? [] : [{ id: 'attribution', paths: ['docs/report.md'], reason: 'Add the missing report attribution.', class: 'criterion_unmet' as const, criterion_ids: ['attribution'], invalidates_plan: false, repair_role: 'coder' }] } })); writes.push('run:verdict_audit.json');
       }
       if (opts.stageId === 'repair') { repairCalls++; write(join(project, 'docs/report.md'), 'attribution repaired'); writes.push('docs/report.md'); }
       return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
     } };
     const workflow = { name: 'repair', description: 'Plan-repair fixture', defaults: { max_iterations: 1 }, stages: [plan] };
-    const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents);
+    const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents, undefined, undefined, undefined, '---\ncriteria: [{id: attribution, text: Include report attribution.}]\n---\nWrite the report.');
     expect(result.status).toBe('complete'); expect(writerCalls).toBe(1); expect(gateCalls).toBe(2); expect(repairCalls).toBe(1);
     expect(result.planControl!.stages.filter((stage) => stage.retry_to?.length).map(stage => stage.id)).toEqual(['repair']);
     expect(result.currentIteration).toBe(1);

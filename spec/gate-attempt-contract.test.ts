@@ -133,7 +133,7 @@ describe('explicit gate repairability', () => {
       gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
         repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' },
         criteria: {}, audit_findings: { version: 1, findings: [{ id: 'fact', paths: ['fixture'],
-          reason: 'Retained immutable fact', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] },
+          reason: 'Retained immutable fact', class: 'regression' as const, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] },
       } }),
     });
     expect(result.final.status).toBe('escalated');

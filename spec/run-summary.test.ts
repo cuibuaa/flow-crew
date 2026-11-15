@@ -228,7 +228,7 @@ function gateRecord(pass: boolean) {
   return { pass, reason: pass ? 'Greeting verified.' : 'Greeting missing.',
     criteria: { greeting: { status: pass ? 'pass' : 'fail', evidence: 'greeting.txt:1' } },
     audit_findings: { version: 1, findings: pass ? [] : [{ id: 'missing', paths: ['greeting.txt'],
-      reason: 'Greeting missing.', criterion_ids: ['greeting'], invalidates_plan: false, repair_role: 'coder' }] },
+      reason: 'Greeting missing.', class: 'criterion_unmet' as const, criterion_ids: ['greeting'], invalidates_plan: false, repair_role: 'coder' }] },
     ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: 'greeting.txt absent' } }) };
 }
 
@@ -330,7 +330,7 @@ describe('engine-assembled terminal reports', () => {
       expect(report).toContain('exit 7');
       expect(report).toContain('exit 0');
       expect(report).toContain('Independent verdict: FAIL');
-      expect(report).toContain('Finding missing: Greeting missing.');
+      expect(report).toContain('Finding missing [criterion_unmet]: Greeting missing.');
       expect(report).toContain('Repairability: repairable');
       expect(report).toContain('Independent verdict: PASS');
       expect(report).toContain('review, execution 1');
