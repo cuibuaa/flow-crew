@@ -71,7 +71,6 @@ it('does not infer content changes from a reported write below an unchanged read
 });
 
 it('preserves a preexisting ignored FIFO on a reported read-only write', () => {
-  vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => ({ kind: 'unavailable', reason: 'platform' })));
   write('.gitignore', 'operator.pipe\n');
   isolatedProjectCommand('mkfifo', ['operator.pipe'], project, root);
   git('init', '-q');
@@ -517,7 +516,7 @@ it.each(['unavailable', 'landlock'] as const)('fails read-only frozen changes wi
   const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', is_gate: true, scope: ['arbitrary note'] });
   create('---\ninputs: [{path: frozen.txt, frozen: true}]\n---\n', [gate]);
   const context = createContentSettlementContext(project, [gate], runId);
-  expect(Boolean(context.readOnlyBefore)).toBe(kind === 'unavailable');
+  expect(context.readOnlyBefore).toBeDefined();
   write('frozen.txt', 'CHANGED');
   const result = settleProjectWrites({ projectDir: project, context, readOnly: true, rawWrites: [], appliedWrites: ['frozen.txt'] });
   expect(result.violations.map(item => item.kind)).toEqual(['immutable_evidence_violation']);

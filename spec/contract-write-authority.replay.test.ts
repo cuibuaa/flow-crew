@@ -44,14 +44,14 @@ beforeEach(() => {
   writeFileSync(join(project, 'untracked.txt'), 'untracked evidence');
 });
 afterEach(() => { vi.restoreAllMocks(); setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
-async function execute(script: string, options: { readOnly?: boolean; frozen?: string; output?: boolean; locator?: string } = {}) {
+async function execute(script: string | Adapter, options: { readOnly?: boolean; frozen?: string; output?: boolean; locator?: string } = {}) {
   const grantStart = observedGrants.length;
   const stage = StageConfigSchema.parse({ id: options.readOnly ? 'review' : 'implement', role: 'local', scope: ['src/'], is_gate: options.readOnly ?? false,
     artifact_contract: { version: 1, produces: options.output ? [{ id: 'report', root: 'project', path: 'docs/runner_minimal', kind: 'directory' }] : [], reads: [] } });
   if (options.output) mkdirSync(join(project, 'docs/runner_minimal'), { recursive: true });
   const brief = `---\ninputs: [{path: ${options.frozen ?? 'frozen.txt'}, frozen: true}${options.locator ? ', ' + options.locator : ''}${options.output ? ', .gitignore, docs/runner_minimal' : ''}]\n${options.output ? 'outputs: [{path: docs/runner_minimal/step2_report.md}]\n' : ''}---\nReduced replay.`;
   const { runId, runDirPath } = createRun(project, 'replay', 'name: replay\nstages: []\n', [stage.id], brief);
-  const adapter: Adapter = { sessionKind: 'local', async run(_prompt, _role, opts) {
+  const adapter: Adapter = typeof script !== 'string' ? script : { sessionKind: 'local', async run(_prompt, _role, opts) {
     const result = await execWithStdin(process.execPath, ['-e', script], '', { cwd: project, timeout_ms: opts.timeout_ms, execution: opts, captureStreams: true });
     return fixtureResult(result, opts);
   } };
@@ -75,6 +75,39 @@ it('fails a readable project change by a read-only stage when the kernel grant i
   expect(result.audit.violations).toContainEqual(expect.objectContaining({ path: 'src/a.ts', kind: 'read_only_project_violation' }));
   expect(result.status.status).toBe('failed'); expect(result.attempt.endingCause).toBe('engine_void');
   expect(readFileSync(join(project, 'src/a.ts'), 'utf8')).toBe('changed');
+});
+it('fails a readable project change with landlock capability but no applied attempt grant', async () => {
+  vi.spyOn(grantOwner, 'admitWriteGrant').mockReturnValue({ version: 1, capability: { kind: 'landlock', abi: 3 }, sharedCaches: [] });
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    writeFileSync(join(project, 'src/a.ts'), 'changed in process');
+    return fixtureResult({ output: JSON.stringify({ pass: true, reason: 'Reviewed.', criteria: {}, audit_findings: { version: 1, findings: [] } }),
+      exitCode: 0, duration_ms: 1 }, opts);
+  } };
+  const result = await execute(adapter, { readOnly: true });
+  expect(readRunState(project, result.runId).writeGrant?.capability.kind).toBe('landlock');
+  expect(result.attempt.writeGrantApplied).toBeUndefined();
+  expect(result.audit.violations).toContainEqual(expect.objectContaining({ path: 'src/a.ts', kind: 'read_only_project_violation' }));
+  expect(result.status.status).toBe('failed'); expect(result.attempt.endingCause).toBe('engine_void');
+  expect(readFileSync(join(project, 'src/a.ts'), 'utf8')).toBe('changed in process');
+});
+it.skipIf(!capable).each(['src/a.ts', 'frozen.txt'])('settles an applied read-only grant with an out-of-band change to %s', async path => {
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    const result = await execWithStdin(process.execPath, ['-e', `console.log(JSON.stringify({pass:true,reason:'Reviewed.',criteria:{},audit_findings:{version:1,findings:[]}}))`], '',
+      { cwd: project, timeout_ms: opts.timeout_ms, execution: opts });
+    // The engine-side fixture changes bytes after the granted child exits.
+    writeFileSync(join(project, path), 'changed outside the child');
+    return fixtureResult(result, opts);
+  } };
+  const result = await execute(adapter, { readOnly: true });
+  expect(result.attempt.writeGrantApplied).toBeDefined();
+  if (path === 'frozen.txt') {
+    expect(result.audit.violations).toContainEqual(expect.objectContaining({ path, kind: 'immutable_evidence_violation' }));
+    expect(result.status.status).toBe('failed'); expect(result.attempt.endingCause).toBe('engine_void');
+  } else {
+    expect(result.audit.violations).toEqual([]);
+    expect(result.status.status, result.status.error).toBe('complete');
+  }
+  expect(readFileSync(join(project, path), 'utf8')).toBe('changed outside the child');
 });
 describe.each(cases)('$name reduced contract replay', fixture => {
   it('accepts the omitted paths, preserves output bytes and records an independent read-only check', async () => {

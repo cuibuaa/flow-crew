@@ -9,7 +9,7 @@ import { readContentIdentity, compareContentIdentities, type ContentIdentity } f
 import { gitResultSync, rethrowGitNotAnswered } from '../../git-facts.js';
 import { readAdmittedContract } from '../../brief-criteria.js';
 import { readAdmittedBriefContract } from '../../ship-inputs.js';
-import { readRunState, runDir } from '../../store.js';
+import { runDir } from '../../store.js';
 import { readRunSnapshot } from '../../run-lifecycle.js';
 import { runRecordPath } from '../../run-layout.js';
 import type { StageConfig } from '../sched_admission/configuration.js';
@@ -103,8 +103,7 @@ export function bindFrozenInputs(projectDir: string, directory: string): FrozenI
 export interface ContentSettlementContext { frozen: FrozenInputs; readOnlyBefore?: ContentMembers }
 export function createContentSettlementContext(projectDir: string, stages: StageConfig[], runId: string): ContentSettlementContext {
   return { frozen: bindFrozenInputs(projectDir, runDir(projectDir, runId)),
-    ...(stages.some(isReadOnlyStage) && readRunState(projectDir, runId).writeGrant?.capability.kind !== 'landlock'
-      ? { readOnlyBefore: projectContentMembers(projectDir) } : {}) };
+    ...(stages.some(isReadOnlyStage) ? { readOnlyBefore: projectContentMembers(projectDir) } : {}) };
 }
 export function changedContentMembers(before: ContentMembers, after: ContentMembers): string[] {
   return [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().filter(path =>

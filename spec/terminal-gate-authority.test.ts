@@ -1,5 +1,5 @@
 import './test-support/policy-runtime.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, lstatSync, symlinkSync } from 'node:fs';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { dirname, join } from 'node:path';
@@ -19,8 +19,6 @@ import * as writeGrant from '../src/write-grant.js';
 const capability = writeGrant.queryWriteGrantCapability();
 const admitWriteGrant = writeGrant.admitWriteGrant;
 const previous=fcGlobalDir(), roots:string[]=[];
-// In-process mutations bypass the native launcher; exercise settlement's fallback explicitly.
-beforeEach(() => { vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => ({ kind: 'unavailable', reason: 'platform' }))); });
 afterEach(()=>{vi.restoreAllMocks();setFcGlobalDir(previous);for(const r of roots.splice(0))rmSync(r,{recursive:true,force:true})});
 it.each([
  {ignored:true,dispatched:false,initial:false},
@@ -131,7 +129,7 @@ describe('reproduction 824', () => {
 
   it.each(['unavailable', 'kernel'] as const)('continues after a read-only review writes nothing beside ignored socket and FIFO (%s)', async grant => {
     if (grant === 'kernel' && capability.kind !== 'landlock') return;
-    vi.mocked(writeGrant.admitWriteGrant).mockImplementation(path => admitWriteGrant(path, () => grant === 'kernel' ? capability : { kind: 'unavailable', reason: 'platform' }));
+    vi.spyOn(writeGrant, 'admitWriteGrant').mockImplementation(path => admitWriteGrant(path, () => grant === 'kernel' ? capability : { kind: 'unavailable', reason: 'platform' }));
     setEngineDefaults({ stage_technical_retries: 1 });
     const root = mkdtempSync(join(tmpdir(), 'terminal-fifo-')); roots.push(root);
     const project = join(root, 'project'); mkdirSync(project); setFcGlobalDir(join(root, 'store'));
