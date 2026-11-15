@@ -15,7 +15,7 @@ import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js
 import { readStageStatus, readRunState, updateRunState, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 import {
   reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, projectValidationResult, evaluateValidationDelta, runProjectCommand,
-  type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationLimits, type ValidationDeltaResult, type ValidationCommand,
+  type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationLimits, type ValidationDeltaResult,
 } from '../../project-validation.js';
 import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, validationBatch, validationForTree, VALIDATION_FACT_VERSION, type ValidationFact } from '../../evidence-ledger.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
@@ -92,11 +92,6 @@ export function recordValidationSelection(projectDir: string, runId: string, val
   writeFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(plan, null, 2)}\n`);
 }
 
-function validationPlanIdentity(commands: readonly Pick<ValidationCommand, 'role' | 'command' | 'args' | 'env'>[]): string {
-  return createHash('sha256').update(JSON.stringify(commands.map(command => [command.role, command.command, command.args,
-    Object.entries(command.env ?? {}).filter(([, value]) => value !== undefined).sort()]))).digest('hex');
-}
-
 /** The scheduler requests one engine record after settled writes. Gate and resume
  * requests use the same content-addressed owner; they never execute separately. */
 export async function recordAttemptValidation(projectDir: string, runId: string, stageId: string,
@@ -110,23 +105,17 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     recordPath: runRecordPath(base, 'evidence-ledger.jsonl'), executions: [], failures: [], pass: false,
     delta: plan.baseline.discovery.commands.map(command => ({ role: command.role, display: command.display, state: 'unverified',
       reason: tree.reason ?? 'Source tree identity unavailable', newFailureIdentifiers: [] })) }) as ValidationFact;
-  const previous = validationForTree(readEvidence(base), treeHash);
-  const completed = previous && (previous.validationVersion === undefined || [1, 2, 3].includes(previous.validationVersion)) ? previous.executions.find(execution => execution.target === 'attempt'
-    && execution.treeHash === treeHash && execution.treeAfterHash === treeHash
-    && validationPlanIdentity(execution.commands) === validationPlanIdentity(plan.baseline.discovery.commands)
-    && execution.commands.every(result => Number.isInteger(result.exitCode) && !result.unfinished)) : undefined;
-  const record = previous?.validationVersion === VALIDATION_FACT_VERSION && previous.resourceState === 'complete' ? previous : await engineValidation({ projectDir, treeHash, commands: plan.baseline.discovery.commands, limits: plan.limits, completed, run: { projectDir, runId },
+  const previous = validationForTree(readEvidence(base), treeHash, plan.baseline.discovery.commands);
+  const completed = previous && [1, 2, 3, VALIDATION_FACT_VERSION].includes(previous.validationVersion ?? 1) ? validationBatch(previous) : undefined;
+  const record = await engineValidation({ projectDir, treeHash, commands: plan.baseline.discovery.commands, limits: plan.limits, completed, run: { projectDir, runId },
     treeAfter: () => captureProjectTree(projectDir, briefAt(base), base).hash, ...dependencies });
-  if (record.resourceState === 'complete' && validationPlanIdentity(record.executions.at(-1)!.commands) !== validationPlanIdentity(plan.baseline.discovery.commands)) {
-    throw new Error(`VALIDATION_DECLARATION_CONFLICT: requested commands differ from completed engine record ${record.recordPath}; this tree cannot execute another validation`);
-  }
-  if (record === previous) return previous;
   const fact: ValidationFact = { ...record, kind: 'validation', stageId, attemptIndex: attempt.index,
     attemptStartedAt: attempt.startedAt, delta: evaluateValidationDelta(undefined,
       record.executions.at(-1)?.commands ?? [], undefined, plan.baseline.discovery.commands), failures: [] };
-  if (previous && previous.resourceState === record.resourceState && JSON.stringify(previous.executions) === JSON.stringify(record.executions)) return previous;
-  const joined = validationForTree(readEvidence(base), treeHash);
-  if (joined?.resourceState === 'complete') return joined;
+  // Publication joins the owner's state, even when an unfinished batch cannot cover its declaration.
+  const joined = readEvidence(base).filter(entry => entry.kind === 'validation' && entry.recordPath === record.recordPath).at(-1);
+  if (joined?.kind === 'validation' && Object.entries(record).every(([key, value]) =>
+    JSON.stringify(Reflect.get(joined, key)) === JSON.stringify(value))) return joined;
   return appendEvidence(base, fact) as ValidationFact;
 }
 
@@ -206,12 +195,11 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
   const attempt = stage.attempts?.at(-1);
   if (!attempt || stage.continuation || ![STAGE_STATUS.RUNNING, STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED].some(status => status === attempt.status)) return undefined;
   const tree = captureProjectTree(projectDir, briefAt(base), base);
-  const fact = validationForTree(readEvidence(base), tree.hash);
+  const fact = validationForTree(readEvidence(base), tree.hash, plan.baseline.discovery.commands);
   const projected = fact && projectValidationFact(fact);
   const current = projected && validationBatch(projected);
   const valid = fact && tree.hash !== null && fact.treeHash === tree.hash && current?.treeHash === tree.hash && current.treeAfterHash === tree.hash
     && (fact.resourceState === 'complete' || (fact.validationVersion ?? 1) < VALIDATION_FACT_VERSION)
-    && current.commands.length === plan.baseline.discovery.commands.length
     && current.commands.every(command => Number.isInteger(command.exitCode) && !command.unfinished);
   const delta: ValidationDeltaResult[] = valid ? projected!.delta : [{ role: 'test', state: 'unverified', reason: 'No completed engine validation covers the current source tree', newFailureIdentifiers: [] }];
   const artifact: GateValidationDeltaArtifact = { version: 2, stageId, checkedAt: fact?.at ?? attempt.startedAt,
@@ -228,10 +216,10 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
 /** Missing or stale facts expose each selected command as unrun. */
 export function currentValidationResults(projectDir: string, runId: string): ProjectValidationBaseline['results'] {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
-  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash);
+  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash, plan?.baseline.discovery.commands);
   const commands = fact ? validationBatch(projectValidationFact(fact))?.commands ?? [] : [];
-  return (plan?.baseline.discovery.commands ?? commands).map(command => {
-    const result = commands.find(result => result.role === command.role && result.display === command.display);
+  return (plan?.baseline.discovery.commands ?? commands).map((command, index) => {
+    const result = commands[index];
     return result ? { ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) } : {
       role: command.role, display: command.display, command: command.command, args: command.args, env: command.env, state: 'unverified', exitCode: null,
       durationMs: 0, output: '', failureIdentifiers: [], failureIdentity: 'unknown', reason: 'Selected command did not run on the reviewed tree',
@@ -241,8 +229,8 @@ export function currentValidationResults(projectDir: string, runId: string): Pro
 
 /** Completed nonzero exits are repair facts, without another reproduction. */
 export function currentValidationRegressions(projectDir: string, runId: string): NonNullable<ValidationFact['regressions']> {
-  const base = runDir(projectDir, runId);
-  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash);
+  const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
+  const fact = validationForTree(readEvidence(base), captureProjectTree(projectDir, briefAt(base), base).hash, plan?.baseline.discovery.commands);
   if (fact?.validationVersion !== VALIDATION_FACT_VERSION || fact.resourceState !== 'complete') return [];
   return (fact.executions.at(-1)?.commands ?? []).flatMap((command, index) => {
     if (command.exitCode === 0) return [];

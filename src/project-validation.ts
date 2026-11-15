@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import { rethrowGitNotAnswered } from './git-facts.js';
 import { parseBriefDeclarations, argument, commandDeclaration, commandsDeclaration, limitFields, validationDeclaration } from './brief-declarations.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
@@ -54,6 +55,12 @@ export interface ValidationCommand {
   display: string;
   evidencePath?: string;
   provenance?: ValidationCommandProvenance;
+}
+
+/** Executable declaration identity; display/provenance and resource allowances do not change commands. */
+export function validationPlanIdentity(commands: readonly Pick<ValidationCommandResult, 'role' | 'command' | 'args' | 'env'>[]): string {
+  return createHash('sha256').update(JSON.stringify(commands.map(command => [command.role, command.command, command.args,
+    Object.entries(command.env ?? {}).filter(([, value]) => value !== undefined).sort()]))).digest('hex');
 }
 
 export interface BriefValidationCommand {

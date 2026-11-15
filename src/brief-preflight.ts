@@ -2,7 +2,7 @@ import { sha256, declarationHash, type FrozenBriefContract, type BriefAdmissionA
 export { admittedContract, canonicalDeclaration, declarationHash, ContractRefusal, verifyBriefAdmission, type FrozenBriefContract, type BriefAdmissionRecord, type BriefAdmissionAcknowledgement, type BriefAdmissionVerification } from './brief-admission.js';
 import { BRIEF_DECLARATION_VERSION, DeclarationRefusal, parseBriefDeclarations } from './brief-declarations.js';
 import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
-import { parseBriefFrontmatter, entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
+import { parseBriefFrontmatter, entryWorkflow, terminalReceiptGlob } from './scheduler/sched_admission/brief-contract.js';
 
 export interface BriefPreflightFinding {
   code: string;
@@ -116,10 +116,11 @@ export function inspectBrief(
         entry.floor.minAttemptedStages === undefined ? '' : `stages≥${entry.floor.minAttemptedStages}`,
         entry.floor.minWallMinutes === undefined ? '' : `wall≥${entry.floor.minWallMinutes} min`,
       ].filter(Boolean) : [];
+      const receiptGlob = terminalReceiptGlob(entry);
       add({
         code: `terminal_state_${status}`,
         level: 'ok',
-        message: `terminal ${status}: paths=[${entry.paths.join(', ')}]${floorParts.length ? ` floor(${floorParts.join(', ')})` : ''}`,
+        message: `terminal ${status}: paths=[${entry.paths.join(', ')}]${floorParts.length ? ` floor(${floorParts.join(', ')})` : ''}${receiptGlob ? ` stage_glob=${receiptGlob}` : ''}`,
         consequential: false,
       });
       if (entry.floor?.minWallMinutes !== undefined && entry.floor.minWallMinutes > 10) {
@@ -133,25 +134,6 @@ export function inspectBrief(
         });
       }
     }
-    // Research ceiling floors count measured rounds; other stage floors need
-    // an explicit evidence pattern, independently of the brief's prose.
-    for (const [status, entry] of Object.entries(terminalStates)) {
-      if (entry.floor?.minAttemptedStages === undefined || entry.stageGlob !== undefined) continue;
-      if (rc) continue;
-      const first = entry.paths[0];
-      if (!first) continue;
-      const directory = first.includes('/') ? first.slice(0, first.lastIndexOf('/')) : '.';
-      const glob = `${directory}/stage_*_verdict.md`;
-      add({
-        code: `terminal_floor_uncountable_${status}`,
-        level: 'fail',
-        message: `terminal ${status} sets min_attempted_stages without an explicit stage_glob. The engine would infer \`${glob}\`, but the counted evidence contract must be explicit and assigned to a stage so it cannot drift or remain unreachable.`,
-        consequential: true,
-        risk: 'An implicit counting pattern can diverge from the files stages actually own, making the terminal status miscount evidence or become unreachable.',
-        suggestion: `Set stage_glob explicitly to \`${glob}\` (or the intended pattern) and require a stage to write concrete matching evidence files; otherwise remove min_attempted_stages and gate on named evidence.`,
-      });
-    }
-
   }
 
   return {

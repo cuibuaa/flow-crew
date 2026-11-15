@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,7 +8,7 @@ import { checkpointConsumers } from './checkpoint-liveness.js';
 import { loadEngineDefaults } from './config.js';
 import { processLiveness, processStartToken, type ProcessStartToken } from './process-liveness.js';
 import { VALIDATION_FACT_VERSION, type ValidationExecution } from './evidence-ledger.js';
-import { runProjectValidationBaseline, runValidationCommand, type ValidationCommand, type ValidationLimits, type ProjectValidationDependencies } from './project-validation.js';
+import { runProjectValidationBaseline, runValidationCommand, validationPlanIdentity, type ValidationCommand, type ValidationLimits, type ProjectValidationDependencies } from './project-validation.js';
 
 export interface EngineValidationRecord {
   validationVersion: number;
@@ -46,12 +46,31 @@ export async function engineValidation(input: ProjectValidationDependencies & {
     ? record.executions.length >= limits.attempts : !(record.spentMs < allowance);
   const root = join(fcGlobalDir(), 'validation');
   mkdirSync(root, { recursive: true });
-  const queuePath = join(root, 'queue.json'), recordPath = join(root, `${input.treeHash}.json`);
+  const identity = validationPlanIdentity(input.commands);
+  const key = createHash('sha256').update(JSON.stringify([input.treeHash, identity])).digest('hex');
+  const queuePath = join(root, 'queue.json'), recordPath = join(root, `${key}.json`);
   const empty = (): EngineValidationRecord => ({ validationVersion: VALIDATION_FACT_VERSION, treeHash: input.treeHash,
     resourceState: 'unfinished', recordPath, executions: [], limits, spentMs: 0, pass: false });
   const ticket: Ticket = { id: randomUUID(), tree: input.treeHash, pid: process.pid, start: processStartToken(process.pid), active: false, run: input.run };
-  const readRecord = (): EngineValidationRecord | undefined => existsSync(recordPath)
-    ? JSON.parse(readFileSync(recordPath, 'utf8')) as EngineValidationRecord : undefined;
+  const coversRequest = (execution: ValidationExecution | undefined): execution is ValidationExecution => execution?.target === 'attempt'
+    && execution.treeHash === input.treeHash && execution.treeAfterHash === input.treeHash
+    && validationPlanIdentity(execution.commands) === identity
+    && execution.commands.every(command => Number.isInteger(command.exitCode) && !command.unfinished);
+  const readRecord = (): EngineValidationRecord | undefined => {
+    if (existsSync(recordPath)) return JSON.parse(readFileSync(recordPath, 'utf8')) as EngineValidationRecord;
+    // Promote only a completed, exactly bound legacy receipt. Unmatched tree-only records stay historical.
+    const legacyPath = join(root, `${input.treeHash}.json`);
+    if (!existsSync(legacyPath)) return undefined;
+    let record: EngineValidationRecord;
+    try {
+      const legacy = JSON.parse(readFileSync(legacyPath, 'utf8')) as EngineValidationRecord;
+      const execution = legacy.executions?.at(-1);
+      if (legacy.resourceState !== 'complete' || !coversRequest(execution)) return undefined;
+      record = { ...legacy, recordPath, pass: execution.commands.every(command => command.exitCode === 0) };
+    } catch { return undefined; }
+    atomicWrite(recordPath, JSON.stringify(record));
+    return record;
+  };
   const transaction = <T>(action: (queue: Queue) => T): T => withRunStateLock(root, () => {
     const queue: Queue = existsSync(queuePath) ? JSON.parse(readFileSync(queuePath, 'utf8')) : { tickets: [] };
     queue.tickets = queue.tickets.filter(entry => {
@@ -71,7 +90,7 @@ export async function engineValidation(input: ProjectValidationDependencies & {
     while (true) {
       const state = transaction(queue => {
         record = readRecord();
-        if (!record && input.completed) {
+        if (!record && coversRequest(input.completed)) {
           record = { ...empty(), resourceState: 'complete', executions: [input.completed],
             pass: input.completed.commands.every(command => command.exitCode === 0) };
           atomicWrite(recordPath, JSON.stringify(record));

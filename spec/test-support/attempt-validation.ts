@@ -23,6 +23,6 @@ export function seedAttemptValidation(projectDir: string, runId: string, current
   const delta = options.delta ?? evaluateValidationDelta(options.baseline ?? plan.baseline, current);
   return appendEvidence(base, { kind: 'validation', resourceState: (options.validationVersion ?? VALIDATION_FACT_VERSION) < VALIDATION_FACT_VERSION ? undefined : current.every(result => Number.isInteger(result.exitCode) && !result.unfinished) ? 'complete' : 'unfinished', validationVersion: options.validationVersion ?? VALIDATION_FACT_VERSION, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
     treeHash: tree.hash, executions: [{ target: 'attempt', cwd: projectDir, treeHash: tree.hash, treeAfterHash: tree.hash,
-      commands: current.map(result => ({ ...result, ...plan.baseline.discovery.commands.find(command => command.role === result.role && (command.display === result.display || !result.display)), command: 'declared-fixture', args: [] })) }],
+      commands: current.map(result => ({ command: 'declared-fixture', args: [], ...plan.baseline.discovery.commands.find(command => command.role === result.role && (command.display === result.display || !result.display)), ...result })) }],
     delta, failures: [], pass: current.length > 0 && evaluateValidationDelta(undefined, current).every(entry => entry.state === 'verified') });
 }

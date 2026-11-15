@@ -365,7 +365,12 @@ describe('one projection across historic receipts and every reader', () => {
     writeFileSync(path, JSON.stringify({ version: 2, stageId: 'legacy', current: commands, delta, pass: true }));
     expect(readValidationDelta(path)).toMatchObject({ pass: false,
       delta: commands.map(({ role }) => ({ role, state: 'unverified' })) });
-    expect(evidenceContext(root, base)).toContain('"pass":false');
+    const context = evidenceContext(root, base);
+    expect(context).toContain('No configured validation fact covers the current tree; validation unmeasured.');
+    const handedOver = JSON.parse(context.split('Ledger facts:\n')[1].split('\n')[0]);
+    // The unmatched historical receipt remains on disk, but is absent from current model facts.
+    expect(handedOver.facts.filter((entry: { kind: string }) => entry.kind === 'validation')).toEqual([]);
+    expect(context).not.toContain('"pass":true');
     expect(renderRunSummary(root, base, readRunState(root, runId))).not.toContain('comparison verified');
     expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
   });

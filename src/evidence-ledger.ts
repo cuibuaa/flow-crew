@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from './engine-fs.js';
 import { readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
 import { extractBriefOutputDeclarations, parseBriefInputs, readAdmittedBriefContract } from './ship-inputs.js';
-import { evaluateValidationDelta, projectValidationResult, type ValidationCommandResult, type ValidationDeltaResult } from './project-validation.js';
+import { evaluateValidationDelta, projectValidationResult, validationPlanIdentity, type ValidationCommandResult, type ValidationDeltaResult } from './project-validation.js';
 import type { CommandContext } from './adapters/base.js';
 
 export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
@@ -163,10 +163,13 @@ export function stagePredecessor(entries: EvidenceEntry[], stageId: string, prev
     && entry.attemptIndex === attempt.attemptIndex && entry.attemptStartedAt === attempt.attemptStartedAt) };
 }
 
+type ValidationCommandResultIdentity = Pick<ValidationCommandResult, 'role' | 'command' | 'args' | 'env'>;
+
 /** A restored tree consumes its original receipt, not a later different tree's
  * result. Unmatched historical facts remain in the ledger, never current greens. */
-export function validationForTree(entries: EvidenceEntry[], treeHash: string | null) {
-  const facts = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation');
+export function validationForTree(entries: EvidenceEntry[], treeHash: string | null, commands?: readonly ValidationCommandResultIdentity[]) {
+  const facts = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation'
+    && (commands === undefined || validationPlanIdentity(validationBatch(entry)?.commands ?? []) === validationPlanIdentity(commands)));
   return treeHash === null ? undefined : facts.filter(fact => fact.treeHash === treeHash).filter(fact => fact.resourceState === 'complete').at(-1) ?? facts.filter(fact => fact.treeHash === treeHash).at(-1);
 }
 
@@ -232,11 +235,11 @@ export function projectCommit(projectDir: string): string | undefined {
 export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null, budget = Infinity): string {
   if (!existsSync(runRecordPath(runDir, EVIDENCE_LEDGER))) writeFileSync(runRecordPath(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
-  const validation = validationForTree(entries, captureProjectTree(projectDir, '', runDir).hash);
   const baselinePath = runRecordPath(runDir, 'validation_baseline.json');
   let commit: string | undefined;
-  let selection: unknown;
+  let selection: { commands?: ValidationCommandResultIdentity[] } | undefined;
   try { const plan = JSON.parse(readFileSync(baselinePath, 'utf8')); commit = plan.baseCommit; selection = plan.baseline?.discovery; } catch { /* no Git baseline */ }
+  const validation = validationForTree(entries, captureProjectTree(projectDir, '', runDir).hash, selection?.commands);
   const diff = commit ? gitResultSync(['diff', '--no-ext-diff', '--no-textconv', '--binary', commit, '--', '.', ':(exclude)**/.env*', ':(exclude)**/auth.json', ':(exclude)**/credentials.json', ':(exclude)**/installation_id'], {
     cwd: projectDir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },

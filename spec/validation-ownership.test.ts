@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Orchestrator } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { engineValidation } from '../src/engine-validation.js';
+import { engineValidation, type EngineValidationRecord } from '../src/engine-validation.js';
 import { runProjectCommand, projectValidationResult, parseBriefValidationCommands, parseValidationCommands, type ValidationCommand } from '../src/project-validation.js';
 import * as validationOwner from '../src/project-validation.js';
 import * as gateValidation from '../src/scheduler/sched_settlement/gate-validation.js';
@@ -16,10 +16,10 @@ import * as recorderOwner from '../src/recorded-command.js';
 import { assessFindings } from '../src/scoped-audit-repair.js';
 import { loadWorkflow, snapshotShipSetupValidationBaseline } from '../src/scheduler.js';
 import { runPreparedWorkflow as runWorkflow } from './test-support/ready-setup.js';
-import { runDir, fcGlobalDir, readRunState, readStageStatus, updateRunState } from '../src/store.js';
+import { runDir, fcGlobalDir, readRunState, readStageStatus, writeStageStatus, updateRunState } from '../src/store.js';
 import { runRecordPath } from '../src/run-layout.js';
 import * as evidenceOwner from '../src/evidence-ledger.js';
-import { captureProjectTree, projectValidationFact, validationBatch, readEvidence, type ValidationFact } from '../src/evidence-ledger.js';
+import { captureProjectTree, projectValidationFact, validationBatch, validationForTree, readEvidence, type ValidationFact } from '../src/evidence-ledger.js';
 import { WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
@@ -93,6 +93,67 @@ describe('engine validation ownership', () => {
     expect(a).toEqual(b); expect(calls).toBe(1); expect(readFileSync(f.counter, 'utf8')).toBe('x');
     const third = await engineValidation({ ...f.input, runCommand: () => { throw Error('completed tree executed again'); } });
     expect(third).toEqual(a); expect(third.resourceState).toBe('complete');
+  });
+
+  it('declaration-bound: command, argv, role and explicit env changes own separate receipts; presentation and limits do not', async () => {
+    const f = fixture(), base = f.input.commands[0]; let executions = 0;
+    const runCommand = () => { executions++; return { exitCode: 7 }; };
+    const variants = [base, { ...base, command: 'other-executable' }, { ...base, args: ['other-check.cjs'] },
+      { ...base, role: 'lint' as const }, { ...base, env: { CHECK: 'one', MODE: 'strict' } }, { ...base, env: { CHECK: 'two', MODE: 'strict' } }];
+    const records = [];
+    for (const command of variants) records.push(await engineValidation({ ...f.input, commands: [command], runCommand }));
+    expect(new Set(records.map(record => record.recordPath)).size).toBe(variants.length);
+    expect(records.every(record => record.resourceState === 'complete' && !record.pass)).toBe(true);
+    const reused = await engineValidation({ ...f.input, commands: [{ ...variants[4], display: 'different label', env: { MODE: 'strict', CHECK: 'one', UNSET: undefined } }],
+      limits: { attempts: 9 }, runCommand });
+    expect(reused.recordPath).toBe(records[4].recordPath); expect(reused.pass).toBe(false); expect(executions).toBe(variants.length);
+  });
+
+  it('declaration-bound: identical content at another cwd reuses a completed failure', async () => {
+    const root = project(), other = project(), counter = join(project(), 'count'); let executions = 0;
+    const source = `require('node:fs').appendFileSync(${JSON.stringify(counter)},'x');process.exit(7);`;
+    for (const directory of [root, other]) writeFileSync(join(directory, 'check.cjs'), source);
+    const treeHash = captureProjectTree(root).hash!;
+    expect(captureProjectTree(other).hash).toBe(treeHash);
+    const input = { projectDir: root, treeHash, commands: [{ role: 'test' as const, command: process.execPath, args: ['check.cjs'], display: 'declared check' }],
+      treeAfter: () => captureProjectTree(root).hash };
+    const runCommand = (request: Parameters<typeof runProjectCommand>[0]) => { executions++; return runProjectCommand(request); };
+    const first = await engineValidation({ ...input, runCommand });
+    const second = await engineValidation({ ...input, projectDir: other, treeAfter: () => captureProjectTree(other).hash, runCommand });
+    expect(second).toEqual(first); expect(second).toMatchObject({ resourceState: 'complete', pass: false });
+    expect(second.executions[0]).toMatchObject({ cwd: root, commands: [{ exitCode: 7 }] });
+    expect(executions).toBe(1); expect(readFileSync(counter, 'utf8')).toBe('x');
+    for (const directory of [root, other]) expect(captureProjectTree(directory).hash).toBe(treeHash);
+  });
+
+  it('declaration-bound: promotes a matching legacy failure and ignores a different or malformed tree-only receipt', async () => {
+    const f = fixture(7), first = await engineValidation(f.input);
+    const legacyPath = join(fcGlobalDir(), 'validation', `${f.input.treeHash}.json`);
+    writeFileSync(legacyPath, JSON.stringify(first)); rmSync(first.recordPath);
+    const failIfExecuted = () => { throw Error('completed failure executed twice'); };
+    const retained = await engineValidation({ ...f.input, projectDir: project(), runCommand: failIfExecuted });
+    expect(retained).toMatchObject({ resourceState: 'complete', pass: false });
+    expect(retained.executions[0].commands[0].exitCode).toBe(7); expect(readFileSync(f.counter, 'utf8')).toBe('x');
+    const commands = [{ ...f.input.commands[0], args: ['-e', 'process.exit(0)'] }];
+    const next = await engineValidation({ ...f.input, commands });
+    expect(next).toMatchObject({ resourceState: 'complete', pass: true }); expect(next.recordPath).not.toBe(retained.recordPath);
+    rmSync(next.recordPath); writeFileSync(legacyPath, '{not-json');
+    expect((await engineValidation({ ...f.input, commands })).pass).toBe(true);
+  });
+
+  it('legacy unfinished budget: grants at most one fresh allowance per tree and declaration after upgrade', async () => {
+    setEngineDefaults({ validation_attempts: 3 });
+    const f = fixture(); let executions = 0;
+    const runCommand = () => { executions++; return { exitCode: null, unfinished: true }; };
+    const old = await engineValidation({ ...f.input, runCommand });
+    const legacyPath = join(fcGlobalDir(), 'validation', `${f.input.treeHash}.json`);
+    const legacyBytes = JSON.stringify(old);
+    writeFileSync(legacyPath, legacyBytes); rmSync(old.recordPath);
+    const fresh = await engineValidation({ ...f.input, runCommand });
+    expect(fresh).toMatchObject({ resourceState: 'unfinished', pass: false });
+    expect(fresh.executions).toHaveLength(3); expect(executions).toBe(6);
+    expect(await engineValidation({ ...f.input, projectDir: project(), runCommand })).toEqual(fresh);
+    expect(executions).toBe(6); expect(readFileSync(legacyPath, 'utf8')).toBe(legacyBytes);
   });
 
   it.each([0, 7])('exit-code-only: exit %s decides despite contradictory output and report diagnostics', async code => {
@@ -175,6 +236,41 @@ function projectValidation(root: string) {
 }
 
 describe('scheduler owns validation after author settlement', () => {
+  it.each(['empty', 'partial'] as const)('unfinished-publication: repeated %s records publish one fact per distinct state', async shape => {
+    const root = project(); writeFileSync(join(root, 'value.txt'), 'unchanged');
+    const { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', ['author']);
+    writeStageStatus(root, runId, 'author', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: 'fixture-start', completedAt: 'fixture-end', writes: [], writeAttribution: 'structured' }] });
+    const commands: ValidationCommand[] = ['build', 'test'].map(role => ({ role: role as ValidationCommand['role'],
+      command: process.execPath, args: ['-e', 'process.exit(7)'], display: role }));
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'project-declarations',
+      baseline: { version: 1, projectDir: root, execution: 'skipped',
+        discovery: { state: 'configured', commands, missingRoles: ['lint'] }, results: [] } }));
+    const abort = new AbortController(); abort.abort();
+    const treeHash = captureProjectTree(root, '', base).hash!;
+    const record = await engineValidation({ projectDir: root, treeHash, commands, limits: { attempts: 1 },
+      treeAfter: () => treeHash, abortSignal: abort.signal });
+    if (shape === 'partial') record.executions.push({ target: 'attempt', cwd: root, treeHash, treeAfterHash: treeHash,
+      commands: [{ ...commands[0], exitCode: 7, state: 'failed', durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' }] });
+    // Persist interrupted states at the engine owner, including a batch that never finished publication.
+    writeFileSync(record.recordPath, JSON.stringify(record));
+    const runCommand = vi.fn(() => { throw Error('cancelled unfinished validation executed'); });
+    const request = () => gateValidation.recordAttemptValidation(root, runId, 'author', { abortSignal: abort.signal, runCommand });
+    const first = await request(), repeated = await request();
+    expect(first).toMatchObject({ resourceState: 'unfinished', pass: false, executions: record.executions });
+    expect(repeated).toEqual(first);
+    expect(readEvidence(base).filter(entry => entry.kind === 'validation')).toHaveLength(1);
+    const changed: EngineValidationRecord = { ...record, executions: [...record.executions,
+      { target: 'attempt', cwd: root, treeHash, treeAfterHash: null, commands: [] }] };
+    writeFileSync(record.recordPath, JSON.stringify(changed));
+    const next = await request(); expect(next.executions).toEqual(changed.executions);
+    expect(await request()).toEqual(next);
+    expect(readEvidence(base).filter(entry => entry.kind === 'validation')).toHaveLength(2);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(await gateValidation.recordGateValidationDelta(root, runId, 'author')).toMatchObject({ pass: false,
+      current: [], delta: [{ state: 'unverified', reason: 'No completed engine validation covers the current source tree' }] });
+  });
+
   it('engine-runs-it: terminal hook writes cannot inherit acceptance from the author tree', async () => {
     const root = project(); projectValidation(root);
     const config = WorkflowConfigSchema.parse({ name: 'terminal-hook', defaults: { max_iterations: 1, max_retries: 0 },
@@ -282,9 +378,9 @@ describe('scheduler owns validation after author settlement', () => {
     expect(ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined)).toEqual([]);
   });
 
-  it('once-per-tree: refuses a different declaration without executing it or reopening the settled author', async () => {
+  it('declaration-bound: runs a different brief declaration on unchanged content and reuses each result', async () => {
     const root = project(); projectValidation(root); writeFileSync(join(root, 'value.txt'), 'good');
-    const calls: string[] = [];
+    const counter = join(project(), 'declared-executions'), calls: string[] = [];
     const adapter: Parameters<typeof engineering>[1] = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       if (opts.stageId === 'review') return { output: JSON.stringify(verdict(opts.runDir)), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
@@ -297,13 +393,67 @@ describe('scheduler owns validation after author settlement', () => {
         '---\ncriteria: [{id: value, text: Deliver a reviewed value}]\ninputs: [value.txt]\noutputs: [{path: value.txt, on_existing: update}]\n'
         + extra + '---\nDeliver the value.', true);
     };
+    const extra = 'validation: ' + JSON.stringify({ commands: { lint: { command: process.execPath,
+      args: ['-e', `require('node:fs').appendFileSync(${JSON.stringify(counter)},'x')`] } } }) + '\n';
     const first = await run(''); expect(first.status).toBe('complete');
     calls.length = 0;
-    const next = await run('validation: {commands: {lint: {command: '+JSON.stringify(process.execPath)+", args: ['-e', 'process.exit(7)']}}}\n");
-    expect(next.status).toBe('failed'); expect(next.failureReason).toContain('VALIDATION_DECLARATION_CONFLICT');
-    expect(calls).toEqual(['implement']); expect(next.stages.implement.status).toBe('complete');
+    const next = await run(extra);
+    expect(next.status, next.failureReason).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
     expect(next.stages.implement.attempts).toHaveLength(1);
-    expect(readEvidence(runDir(root, next.runId)).filter(entry => entry.kind === 'validation')).toEqual([]);
+    const receipt = (runId: string) => readEvidence(runDir(root, runId)).find(entry => entry.kind === 'validation') as ValidationFact;
+    expect(receipt(first.runId).treeHash).toBe(receipt(next.runId).treeHash);
+    expect(receipt(first.runId).recordPath).not.toBe(receipt(next.runId).recordPath);
+    expect(receipt(next.runId).executions.at(-1)?.commands.map(command => [command.role, command.exitCode])).toEqual([['test', 0], ['lint', 0]]);
+    const repeated = await run(extra); expect(repeated.status).toBe('complete');
+    expect(receipt(repeated.runId).recordPath).toBe(receipt(next.runId).recordPath);
+    expect(readFileSync(counter, 'utf8')).toBe('x');
+  });
+
+  it('declaration-bound: all scheduler readers select the declared batch and retain an unchanged failing batch', async () => {
+    const root = project(); writeFileSync(join(root, 'value.txt'), 'unchanged');
+    const { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture\nstages: []\n', ['author', 'review']);
+    for (const stageId of ['author', 'review']) writeStageStatus(root, runId, stageId, { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: 'fixture-start', completedAt: 'fixture-end', writes: [], writeAttribution: 'structured' }] });
+    const command = (exit: number) => ({ role: 'test' as const, command: process.execPath, args: ['-e', `process.exit(${exit})`], display: 'declared check' });
+    const select = (exit: number, display = 'declared check') => writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({
+      version: 1, source: 'project-declarations', baseline: { version: 1, projectDir: root, execution: 'skipped',
+        discovery: { state: 'configured', commands: [{ ...command(exit), display }], missingRoles: [] }, results: [] } }));
+    let executions = 0;
+    const runCommand = (request: Parameters<typeof runProjectCommand>[0]) => { executions++; return runProjectCommand(request); };
+    select(7);
+    const failed = await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand });
+    expect(failed).toMatchObject({ resourceState: 'complete', pass: false });
+    // A divergent ledger receipt cannot override the engine's completed failure.
+    const { sequence: _failedSequence, at: _failedAt, ...failedFact } = failed as evidenceOwner.EvidenceEntry & ValidationFact;
+    const foreign = evidenceOwner.appendEvidence(base, { ...failedFact, pass: true,
+      executions: failed.executions.map(execution => ({ ...execution, cwd: project(),
+        commands: execution.commands.map(command => ({ ...command, exitCode: 0 })) })) });
+    const owner = await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand });
+    expect(owner).toMatchObject({ resourceState: 'complete', pass: false, executions: [{ cwd: root, commands: [{ exitCode: 7 }] }] });
+    expect((owner as evidenceOwner.EvidenceEntry).sequence).not.toBe(foreign.sequence);
+    select(0);
+    expect(await gateValidation.recordGateValidationDelta(root, runId, 'review')).toMatchObject({ pass: false,
+      current: [], delta: [{ state: 'unverified', reason: 'No completed engine validation covers the current source tree' }] });
+    expect(gateValidation.currentValidationResults(root, runId).map(command => command.exitCode)).toEqual([null]);
+    expect(gateValidation.currentValidationRegressions(root, runId)).toEqual([]);
+    const passed = await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand });
+    expect(passed).toMatchObject({ resourceState: 'complete', pass: true });
+    expect(passed.treeHash).toBe(failed.treeHash); expect(passed.recordPath).not.toBe(failed.recordPath);
+    const { sequence: _sequence, at: _at, ...old } = failed as evidenceOwner.EvidenceEntry & ValidationFact;
+    evidenceOwner.appendEvidence(base, old);
+    expect(validationForTree(readEvidence(base), passed.treeHash, [command(0)])?.sequence).toBe((passed as evidenceOwner.EvidenceEntry).sequence);
+    expect((await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand })).pass).toBe(true);
+    expect(await gateValidation.recordGateValidationDelta(root, runId, 'review')).toMatchObject({ pass: true,
+      ledgerSequence: (passed as evidenceOwner.EvidenceEntry).sequence, current: [{ exitCode: 0 }] });
+    select(0, 'renamed display');
+    expect(gateValidation.currentValidationResults(root, runId)).toMatchObject([{ state: 'passed', exitCode: 0 }]);
+    select(7);
+    const retained = await gateValidation.recordAttemptValidation(root, runId, 'author', { runCommand });
+    expect(retained).toMatchObject({ resourceState: 'complete', pass: false }); expect(executions).toBe(2);
+    expect(await gateValidation.recordGateValidationDelta(root, runId, 'review')).toMatchObject({ pass: false, current: [{ exitCode: 7 }] });
+    expect(gateValidation.currentValidationResults(root, runId)).toMatchObject([{ state: 'failed', exitCode: 7 }]);
+    expect(gateValidation.currentValidationRegressions(root, runId)).toMatchObject([{ reproduction: (retained as evidenceOwner.EvidenceEntry).sequence,
+      record: { exitCode: 7, validationRecord: (retained as evidenceOwner.EvidenceEntry).sequence } }]);
   });
 
   it('engine-runs-it: validation keeps its resource allowance after the author clock has expired', async () => {

@@ -4,8 +4,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { inspectBrief } from '../src/brief-preflight.js';
-import { rehearsalExitCode } from '../src/rehearse.js';
+import { briefDeclarationFailures, inspectBrief } from '../src/brief-preflight.js';
+import { rehearseBrief, rehearsalExitCode } from '../src/rehearse.js';
+import { captureTerminalReceiptBaselines, evaluateTerminalFloor, parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
+import type { StoreState } from '../src/store.js';
 
 function staticRehearsal(brief: string) {
   const root = mkdtempSync(join(tmpdir(), 'brief-prose-'));
@@ -66,17 +68,59 @@ describe('brief prose admission', () => {
     expect(rehearsalExitCode(report.findings.map(finding => ({ level: finding.level, text: finding.message })))).toBe(1);
   });
 
-  it.each(['complete', 'ceiling_hit'])('rejects a %s stage-count floor without an explicit stage_glob', status => {
-    const brief = `---\ncriteria: [{\"id\":\"fixture_1\",\"text\":\"Produce a summary.\"}]\nterminal_states:\n  ${status}:\n    paths: [docs/task_summary.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Produce a summary.\n`;
+  it.each([
+    ['complete', 'result.md', './stage_*_verdict.md'],
+    ['complete', 'docs/task_summary.md', 'docs/stage_*_verdict.md'],
+    ['ceiling_hit', 'docs/task_summary.md', 'docs/stage_*_verdict.md'],
+  ])('admits an inferred %s receipt floor for %s through rehearsal and launch', async (status, path, glob) => {
+    const brief = `---\nterminal_states:\n  ${status}:\n    paths: [${path}]\n    floor:\n      min_attempted_stages: 1\n---\nProduce a summary.\n`;
+    const root = mkdtempSync(join(tmpdir(), 'inferred-receipt-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      const report = inspectBrief(brief);
+      expect(report.findings).not.toContainEqual(expect.objectContaining({ code: `terminal_floor_uncountable_${status}` }));
+      expect(report.findings).toContainEqual(expect.objectContaining({
+        code: `terminal_state_${status}`, level: 'ok', message: expect.stringContaining(`stage_glob=${glob}`),
+      }));
+      expect(briefDeclarationFailures(brief, report)).toEqual([]);
+      const rehearsal = await rehearseBrief(['brief.md', '--static-only', '--project', root], { briefText: brief, render: false });
+      expect(rehearsal.findings).toContainEqual(expect.objectContaining({ code: `terminal_state_${status}`, level: 'ok' }));
+      expect(rehearsal.exitCode).toBe(0);
+      expect(rehearsal.preflight.contractReady).toBe(true);
+
+      // Admission accepts the inferred contract; runtime still requires fresh
+      // nonempty evidence rather than merely the terminal summary artifact.
+      const entry = parseBriefFrontmatter(brief).terminalStates![status as 'complete' | 'ceiling_hit']!;
+      const receipt = join(root, glob.replace('*', 'one'));
+      writeFileSync(receipt, 'old evidence');
+      const state = { startedAt: '2026-01-01T00:00:00.000Z',
+        terminalReceiptBaselines: captureTerminalReceiptBaselines(root, [entry]) } as StoreState;
+      expect(evaluateTerminalFloor(state, entry, root)).toMatchObject({ passed: false,
+        reason: expect.stringContaining(`match inferred stage_glob '${glob}'; 1 matching file(s) have unchanged launch content; need 1`) });
+      writeFileSync(receipt, '');
+      expect(evaluateTerminalFloor(state, entry, root)).toMatchObject({ passed: false,
+        reason: expect.stringContaining('only 0 fresh stage verdict file(s)') });
+      writeFileSync(receipt, 'new measured evidence');
+      expect(evaluateTerminalFloor(state, entry, root)).toEqual({ passed: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a malformed stage floor through the shared declaration rule', async () => {
+    const brief = '---\nterminal_states:\n  complete:\n    paths: [result.md]\n    floor: {min_attempted_stages: -1}\n---\nProduce a summary.';
     const report = inspectBrief(brief);
-    const finding = report.findings.find(entry => entry.code === `terminal_floor_uncountable_${status}`);
-    expect(finding).toMatchObject({ level: 'fail', consequential: true });
-    expect(finding?.message).toContain('docs/stage_*_verdict.md');
-    expect(report.contractReady).toBe(false);
-    const rehearsal = staticRehearsal(brief);
-    expect(rehearsal.status).toBe(1);
-    expect(rehearsal.stdout).toContain(finding?.message);
-    expect(rehearsalExitCode(report.findings.map(entry => ({ level: entry.level, text: entry.message })))).toBe(1);
+    expect(briefDeclarationFailures(brief, report)).toContainEqual(expect.objectContaining({
+      code: 'frontmatter_invalid', level: 'fail', keyPath: 'terminal_states.complete.floor.min_attempted_stages',
+    }));
+    const root = mkdtempSync(join(tmpdir(), 'invalid-receipt-'));
+    try {
+      const rehearsal = await rehearseBrief(['brief.md', '--static-only', '--project', root], { briefText: brief, render: false });
+      expect(rehearsal.findings).toContainEqual(expect.objectContaining({ code: 'frontmatter_invalid', level: 'fail' }));
+      expect(rehearsal.exitCode).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('accepts an explicit stage_glob without inferring a writer from prose', () => {
