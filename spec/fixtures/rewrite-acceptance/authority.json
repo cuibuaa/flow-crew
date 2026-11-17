@@ -1,0 +1,140 @@
+{
+  "source": "TARGET-DESIGN §2 declaration boundary / §3 P3; authored from disposition semantics, not copied from r2 formula recount",
+  "cells": [
+    {
+      "id": "create/file/internal/absent/default",
+      "disposition": "create",
+      "kind": "file",
+      "location": "internal",
+      "original": "absent",
+      "tmpdir": "default",
+      "expected": "succeed",
+      "reason": "original absent; author must deliver"
+    },
+    {
+      "id": "create/file/internal/present/default",
+      "disposition": "create",
+      "kind": "file",
+      "location": "internal",
+      "original": "present",
+      "tmpdir": "default",
+      "expected": "refuse",
+      "reason": "create requires original absence"
+    },
+    {
+      "id": "update/file/internal/absent/default",
+      "disposition": "update",
+      "kind": "file",
+      "location": "internal",
+      "original": "absent",
+      "tmpdir": "default",
+      "expected": "refuse",
+      "reason": "update requires existing object"
+    },
+    {
+      "id": "update/file/internal/present/default",
+      "disposition": "update",
+      "kind": "file",
+      "location": "internal",
+      "original": "present",
+      "tmpdir": "default",
+      "expected": "succeed",
+      "reason": "retain update authority"
+    },
+    {
+      "id": "append/file/internal/absent/default",
+      "disposition": "append",
+      "kind": "file",
+      "location": "internal",
+      "original": "absent",
+      "tmpdir": "default",
+      "expected": "refuse",
+      "reason": "append requires original prefix"
+    },
+    {
+      "id": "append/file/internal/present/default",
+      "disposition": "append",
+      "kind": "file",
+      "location": "internal",
+      "original": "present",
+      "tmpdir": "default",
+      "expected": "succeed",
+      "reason": "preserve original prefix"
+    },
+    {
+      "id": "replace/file/internal/absent/default",
+      "disposition": "replace",
+      "kind": "file",
+      "location": "internal",
+      "original": "absent",
+      "tmpdir": "default",
+      "expected": "succeed",
+      "reason": "replacement permits original absence"
+    },
+    {
+      "id": "replace/file/internal/present/default",
+      "disposition": "replace",
+      "kind": "file",
+      "location": "internal",
+      "original": "present",
+      "tmpdir": "default",
+      "expected": "succeed",
+      "reason": "replacement permits existing object"
+    }
+  ],
+  "nativeTopologies": [
+    {
+      "id": "missing-recorded-parents",
+      "expected": "succeed",
+      "condition": "all missing ancestor authority recorded before provisioning"
+    },
+    {
+      "id": "unrecorded-parent",
+      "expected": "refuse-before-mutation"
+    },
+    {
+      "id": "external-file-atomic-replace",
+      "expected": "refuse-with-in-place-disclosure",
+      "condition": "DESIGN-INPUTS item 5: external file grants permit in-place write/truncate/append; namespace mutation requires declaring the containing directory; sibling remains isolated"
+    },
+    {
+      "id": "external-file-delete-recreate",
+      "expected": "refuse-with-in-place-disclosure",
+      "condition": "DESIGN-INPUTS item 5: external file grants permit in-place write/truncate/append; namespace mutation requires declaring the containing directory; sibling remains isolated"
+    },
+    {
+      "id": "sample-b-cache-selected",
+      "expected": "succeed",
+      "condition": "synthetic declaration, explicitly selected cache/device config; native readiness unverified"
+    },
+    {
+      "id": "sample-b-shipped-empty-cache",
+      "expected": "explicit-setup-mismatch",
+      "mandatorySuccess": false
+    },
+    {
+      "id": "declared-TMPDIR",
+      "expected": "preserve-exact-env"
+    },
+    {
+      "id": "fresh-command-scratch",
+      "expected": "distinct-context"
+    },
+    {
+      "id": "committed-reservation-scratch",
+      "expected": "reuse-stored-context"
+    },
+    {
+      "id": "git-env-authority-collision",
+      "expected": "explicit-conflict-before-admission"
+    },
+    {
+      "id": "commands-provider-homes",
+      "expected": "write-denied"
+    },
+    {
+      "id": "model-backend-home",
+      "expected": "only-selected-backend-writable"
+    }
+  ]
+}

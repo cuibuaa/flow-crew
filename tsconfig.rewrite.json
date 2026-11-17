@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "incremental": false,
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": [
+    "rewrite-src/**/*.ts", "rewrite-src/**/*.mjs",
+    "integrations/claude/flowcrew-session.mjs",
+    "spec/rewrite-hooks-*.test.ts", "spec/native/rewrite-hooks-*.test.ts",
+    "spec/fixtures/rewrite-port-composition.ts"
+  ]
+}

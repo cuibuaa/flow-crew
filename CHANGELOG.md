@@ -42,7 +42,7 @@ survives the stop/build/start boundary; see [deployment operations](guide/operat
   to `validation_timeout_ms`, `default_max_iterations` to `max_iterations`,
   `default_gate_retry_loops` to `gate_retry_loops`, `default_stage_technical_retries` to
   `stage_technical_retries`, and `default_plan_stage_retries` to `plan_stage_retries`.
-  `default_timeout_ms` is unchanged. Remove custom role-template uses of `{default_timeout_ms}`;
+  `default_timeout_ms` is removed; only an author-declared `stage_duration_ms` supplies a stage allowance. Remove custom role-template uses of `{default_timeout_ms}`;
   that substitution is gone. The shipped planner file is now `config/workflows/planner.yaml`;
   `--workflow default` and saved default-workflow names still resolve to it.
 - **Task record readers use canonical launch settings.** `launch_options` replaces `launch_args`,

@@ -1,212 +1,95 @@
 ---
 name: ship
-description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
+description: Turn the current conversation into a self-contained FlowCrew brief, check it with setup, get explicit confirmation, and start the run. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 37 -->
+<!-- flowcrew-skill-revision: 69 -->
 
 # Ship a conversation to FlowCrew
 
-This is a procedure for the coding agent, not an engine promise of model obedience.
-Use `/ship` in Claude Code or `$ship` in Codex. The repository's
-[brief contract](../guide/brief-contract.md), [CLI](../guide/cli.md) and
-[operations](../guide/operations.md) own detailed engine facts and travel with installed copies.
+Use `/ship` in Claude Code or `$ship` in Codex. This procedure instructs the coding
+agent; it is not an engine promise of model obedience. The run never sees this
+conversation. Detailed facts live in the bundled [brief contract](../guide/brief-contract.md),
+[CLI](../guide/cli.md) and [operations](../guide/operations.md).
 
-## Gather facts and author the brief
+## Author with the user
 
-Precondition: before drafting, run `flowcrew ship-preflight` from the source project. Before exact-digest
-confirmation, invoke FlowCrew only for preflight and rehearsal; do not probe setup/quick
-with help or launch options. Treat `--help`, `--version`, capability discovery and dry probes
-as invocations too. Exit zero means facts were gathered, not that they are favorable;
-collection failure exits nonzero. Preflight cannot decide what prior state means. It discovers
-validation commands but does not execute a baseline.
+Inspect the selected project and original evidence. Use `flowcrew status` to inspect
+existing work before proposing another run; it lists all runs in the selected store,
+not just this project. Inspect an identified run with `flowcrew status <run-id>`.
+Carry useful prior evidence into declared inputs and explain unknown state.
 
-If a prior run is pending/running/parked/awaiting approval, show its identity and stop instead
-of duplicating it. For terminal failure/incomplete/ceiling/phase/stop, carry forward the
-relevant blocker and durable evidence. Unknown status needs inspection. Use prior reports
-as inputs, not paraphrased facts or a promise to repeat their outcome.
+Write a self-contained brief at `docs/task_brief.md` with the user. Include the goal,
+evidence paths, real constraints, outcome criteria, required products and what the
+report must show. Leave approach and decomposition to the run; label illustrative
+mechanisms as examples. Use the required frontmatter fields `criteria`, `inputs`,
+`outputs`, `commands`, `results` and `allowBlocked`. Prose paths do not declare resources.
+Declare gitignored inputs and intentional reuse of existing outputs. Freeze supplied
+evaluators and evidence that must stay unchanged with structured `frozen: true` inputs.
+Inputs otherwise require explicit `frozen: false`.
 
-Write a self-contained brief at `docs/task_brief.md` only after preflight facts are available. The run does not receive this
-conversation. Include outcome, evidence paths, real constraints, extractable numbered
-criteria, required human outputs and allowed stopping outcomes. State required observable
-properties; label example mechanisms explicitly. Declare every source input in a leading
-frontmatter `inputs:` block. A path in prose or a table is only a reference, not a declaration.
-Declare gitignored inputs in the block and intentional reuse of existing outputs. Freeze a file
-or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
-not enforce freezing. Explain evidence gaps and dependencies of quantities.
+For research, state the baseline, measurement policy, evidence gaps and allowed
+stopping results. Declare finite `results` labels when needed and decide whether
+`allowBlocked` is permitted; a supported ceiling is not a metric win. Do not invent
+missing author-owned facts. For engineering, require complete validation after the
+last relevant write, with direct exits and totals in the report. Keep operator numeric
+expectations separate from measurements. Apply the [evidence policy](../guide/brief-contract.md#evidence-authoring-policy)
+and [verification principles](../guide/brief-contract.md#authoring-and-verification-principles).
 
-Choose engineering for a known pass/fail outcome and research for candidate search with an
-allowed supported ceiling. Propose the mode/workflow and explain it to the operator. Use
-`workflow: direct` for coherent author-plus-review work and `workflow: planner` for decomposable
-work or loops. Do not create an acceptance-only `objective.confirm` envelope. Map writable
-paths for authored stages; leave schema details in the canonical references.
+## Check, show and confirm
 
-Require the complete configured validation with direct exits/totals after the last relevant
-write. Separate an operator numeric expectation from measured evidence; use exact fields
-`within_expected_range` and `method_was_not_adjusted_to_match_expectation` where applicable.
-Use the [evidence authoring policy](../guide/brief-contract.md#evidence-authoring-policy) for
-judgments about statistics, recurrence, concentrated contributions and supplied mechanisms. Do not invent measurements
-or apply research-round rules to an ordinary engineering task.
-Apply the [authoring and verification principles](../guide/brief-contract.md#authoring-and-verification-principles) when drafting and accepting work.
-
-### Minimal, modular rewrites
-
-For “minimal, modular rewrite” or “simplify what actually runs” tasks, require a small core
-preserving the base commit's production behaviour. Name production entrypoints (services,
-timers, cron, CLIs); code they do not reach may be removed, with every removal inventoried.
-The design standard lives only in report criterion 3, as evidence the report must show; do not
-restate it as a requirement on how the code is structured (no shared skeleton, variant mechanism,
-or order of work), because the run chooses the means.
-
-Require discovery of production's interpreter/runtime from service and other entrypoint
-definitions and its use for parity and tests. Production processes, deploys and pushes are
-outside the run's authority: describe cutover, never perform it. Use shared production state
-(user data, caches) read-only via copies. A suspected behaviour bug is a finding left unchanged.
-
-Give the brief numbered report criteria pinned to the base commit and final tree after the
-last write, with evidence locations:
-
-1. Reachability inventory from the named entrypoints at base: every module reached/unreached,
-   method and direct exit code; every removed module and test listed.
-2. Base/final behaviour parity: identical recorded inputs and clock/network stubs; decisions,
-   outputs, error/failure paths (alerts, error records, notifications), and old-format records
-   already on disk readable by every consumer (readers, dashboards, notifiers). Report harness
-   location, inputs, compared-item counts per entrypoint, mismatches and direct exit code;
-   demonstrate detection of an injected one-line change. Name existing parity/test facilities
-   and why they do or do not serve.
-3. Design account: final module map with responsibilities/interfaces; before/after `file:line`
-   for each removed patch, special case or duplicate; every place where variants of one flow still
-   carry duplicated execution code, with `file:line` and why; non-test line counts per module at
-   base/end and method; each added mechanism with what it replaced, and every unpaired addition
-   justified; any special case keyed on an error string or name; each retained restriction or
-   special case with the consumer or failure it protects.
-4. Full configured validation after the last write: direct exit codes and totals; direct
-   import check for every retained module and execution check for every CLI entrypoint under
-   the production runtime. List every removed test with the deleted code it exercised.
-5. Final report with criteria 1–4 evidence, behaviour findings left unchanged, ordered operator cutover and rollback.
-
-## Rehearse and confirm exact bytes
-
-Precondition: `docs/task_brief.md` exists. Run these against its exact saved bytes:
+Run against the saved brief from the selected project:
 
 ```bash
-flowcrew ship-preflight --brief docs/task_brief.md
-flowcrew rehearse docs/task_brief.md
+flowcrew setup docs/task_brief.md
 ```
 
-Fix blocking findings. Review every retained warning and explain it. Rehearsal is mandatory
-for this skill, including an engineering brief's static pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
-research quality. Nonzero means correct the brief/environment. It calls no model but can
-run declared shell confirmation; review that text first.
-If bytes change, repeat preflight and rehearsal.
+Use `--project <dir>` if the source project differs from the current directory.
+Correct refusals and review the complete result. Setup checks grammar and real host
+readiness; it runs no declared command, prepares no exact resource grants and proves
+no validation baseline or command feasibility. Those checks happen during start and
+execution. Setup currently prints no brief digest; do not invent one or describe its
+result as digest-bound approval.
 
-Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
-target, base, new branch, workflow/mode, adapter, foreground/background, campaign/context,
-iteration bound and stage deadline read from engine configuration (`max_iterations`
-and `default_timeout_ms`). Do not hardcode defaults.
-Explain unattended shell authority and the scope-versus-host-isolation boundary.
+Show the user the exact complete saved brief, setup's complete result and direct exit,
+the source project, and any intended start options (`--backend`, `--config`, optional
+`--requester`). Explain unattended shell access and the [platform limits](../guide/operations.md#platform-boundaries).
+Ask for a **new explicit confirmation to start those exact saved bytes with those options**.
+The original ship request or earlier approval of unseen text is insufficient. If brief
+bytes, source or options change, repeat setup, display and confirmation. Wait for the
+answer before starting.
 
-Ask: “Start this exact brief digest `<digest>` with these settings?”
-Wait for a new explicit answer after the final bytes/settings were shown.
-Do not treat the original `/ship` request or an earlier “ship it” as approval of unseen
-bytes/findings. Any change returns to saved-byte preflight/rehearsal and confirmation.
+## Start and follow the run
 
-## Set up and launch
-
-### Prepare the target
-
-Precondition: a new explicit answer confirmed the unchanged exact digest and launch identity.
-Do not invoke `ship-setup` for any purpose, including help or probes, before that confirmation.
-Setup cannot choose the target identity. Run it with the approved identity and absolute brief path:
-
-```text
-flowcrew ship-setup --brief <brief-path> --project <source> --target <target> --base <ref> --branch <name>
-```
-
-Proceed only on exit zero and `Ship setup: READY`; nonzero is a refusal.
-On nonzero, inspect the refusal; do not bypass it with manual links/worktrees.
-Setup admits estimated declared-input copy bytes through `disk-guard need` before creating the worktree
-or copying inputs; resolve a capacity/tool refusal before retrying.
-Unsupported population comparison remains unverified; do not claim source-suite parity.
-
-### Register or run
-
-Precondition: exact-digest confirmation and successful setup remain valid. Do not invoke
-`quick`, even for help or a probe, before those conditions. For a background launch, inspect daemon status. Fresh verified status permits registration;
-no listener calls for an explicitly authorized daemon start. Stale/unverified/nonresponsive
-status requires reading identity/provenance, not assuming a hash difference names missing
-fixes. Do not restart a daemon serving other work. If a required fix cannot be proven loaded,
-stop or return for an explicit foreground choice. Foreground is absence of `--background`;
-there is no `--foreground` CLI flag. Do not silently change the approved launch mode.
-
-Transport unchanged bytes through stdin:
-
-```text
-flowcrew quick --background --project <target> - < docs/task_brief.md
-flowcrew quick --project <target> - < docs/task_brief.md
-```
-
-Choose the approved one. Add only approved adapter/workflow/campaign/iteration flags and,
-for changed-run continuation, `--acknowledge-brief-warnings=<digest>`. Do not use command substitution to
-transport brief text or acknowledge a new digest automatically. A changed brief/settings
-requires returning to confirmation. A zero background exit means registration succeeded,
-not that the run passed. Exit 1 means a known refusal or failure; inspect the diagnosis before retrying. Exit 2 means
-the outcome is unknown and the request may have taken effect; inspect task/run state before
-retrying. Neither exit alone proves the deliverable.
-Report the returned task/run and ledger entry identities.
-The installer-owned [launch-side integration](../guide/session-push.md) records the
-launching frontend and address, displays engine progress and delivers wrap-up events.
-No hand-attached waiter is required. If a launch has no delivery target, surface that
-limitation; do not infer another session or treat registration as proof of delivery.
-After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
-
-### Observe
-
-Precondition: successful background registration returned an exact task identity. Run the
-read-only watch command for a snapshot; `--once` exits 0, invalid options exit 1. It does not write run or task status. The existing `fc-notify` observer automatically discovers the registered task/run, writes `<FC_HOME>/runs/<run-id>/wake.json` for paused/terminal states or new failed attempts, and queues notifyd events. A session task-notification still uses a background tool (see fc-observe); `watch --once` is only a snapshot:
+After confirmation, start the unchanged file with the displayed options:
 
 ```bash
-flowcrew watch --once
+flowcrew start docs/task_brief.md
 ```
 
-## Ownership and verification
+Report the returned `run` id and operation result. A successful start is not task
+acceptance. On an unknown outcome inspect status before retrying. Keep the run id;
+status has no project selector. Optional `--requester <session>` binds frontend identity;
+it is not required for launch and does not prove delivery. See [session integration](../guide/session-push.md).
 
-As an instruction for this skill, keep the research loop within the question in the brief;
-the operator changes the question. The split is not mechanical work versus judgement: ask
-whether failure announces itself or returns a plausible value. A new reproducible failure
-belongs in a mechanical check when possible; the boundary moves as evidence improves.
-Human acceptance still needs a second way to verify plausible results, actual rendered/served
-artifacts when required, and inspection of the deciding code, query, formula or instrument.
-Reproduce a claimed defect independently, characterize recurrence and its first mechanism,
-and assess residual uncertainty. Archive failed or invalid results unchanged; preserve the
-only copy of unique work. The tracked specification suite expresses intended behavior;
-change it only for a task-authorized contradiction and explain which assertion and why.
-Keep environment-specific probes in the invocation's private temporary root or declared
-run files, outside the collected public specification directory.
+Use `flowcrew status <run-id>` to inspect. Text `flowcrew guide <run-id> "text"` queues
+context for the next author-side invocation without interrupting; reviewers never
+receive it. `flowcrew cancel <run-id>` interrupts. `flowcrew resume <run-id>` continues
+parked work using its original runtime pin; active resume is a no-op, terminal and
+cancelled runs refuse. After a host restart continuation is manual. Follow
+[operations](../guide/operations.md#inspect-guide-and-stop) for replacement plans and recovery.
 
-## Human wrap-up
+## Verify and preserve
 
-When work ends, read the terminal report, durable rejection/repair evidence, configured
-validation delta and preservation inventory. Assess every criterion and unresolved limitation.
-A terminal status, exit zero or a model's summary alone does not establish acceptance.
-When handling a pushed FlowCrew event, check its event ID and current run/attempt first.
-After completing that event's duties, execute its explicit `session-push ack` command.
-Do not acknowledge merely because a message arrived, and do not repeat an already
-acknowledged event's wrap-up. ACK and explicit ledger closure are separate obligations.
-Do not discard a failed run's useful artifacts or infer that a ceiling is a metric win.
-Use `land` audit before any authorized removal; removal and optional ledger closure are
-explicit operator decisions.
+Read the terminal report, rejected reviews, command evidence and actual deliverables.
+Assess every criterion and limitation independently; a status label, model summary or
+zero CLI exit alone does not establish acceptance. Inspect the deciding code, query,
+formula or instrument when results could look plausible while wrong. Reproduce defects
+and characterize recurrence. Preserve failed or invalid evidence and unique work.
 
-Once the result is accepted and independently verified, inspect `flowcrew land --run <run-id>`
-and the sensitive evidence scope. For authorized archival and reclamation, use
-`flowcrew land --run <run-id> --archive --remove`, adding the exact audited regenerable count
-when required. Land copies unique worktree outputs and the terminal run store to the existing
-archive root with per-file sha256 manifests and verifies both copies before its existing removal
-gate. To select another existing root, use `--archive=<root>`.
-If the operator retained an exact ledger closure identity, carry
-`--complete-fc-task <entry-id> --fc-task-session <session-id>` into that command;
-otherwise omit the closure identity and leave the entry open. Closure occurs only after
-worktree removal, prune and non-force branch deletion all succeed. Inspect refusals and the
-removal/closure report; Git success with ledger failure still needs repair.
-Ledger closure is not an automatic reaction to terminal status, and terminal status alone does not
-authorize removal. [Operations](../guide/operations.md#preserve-and-reclaim) defines the
-preservation boundary and owns the full removal and closure contract.
+Once the result is independently accepted, `flowcrew land <run-id>` preserves declared
+outputs; it is an operation, not a read-only audit. Inspect its result and preserve any
+other unique files and raw evidence yourself before authorized
+`flowcrew land <run-id> --reclaim`. Reclaim deletes workspace, scratch, runtime pin and
+raw evidence after preservation succeeds; SQLite history and status remain. Terminal
+status alone does not authorize deletion. [Preservation](../guide/operations.md#preserve-and-reclaim)
+owns the full boundary.

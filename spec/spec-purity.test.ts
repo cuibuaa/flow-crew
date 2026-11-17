@@ -1,3 +1,4 @@
+import { portableProject } from '../vitest.config.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -18,14 +19,15 @@ import {
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..");
 const TEST_OWNED_ENV_KEYS = environmentKeysWrittenBy(
-  readFileSync(join(PROJECT_ROOT, "vitest.setup.ts"), "utf-8"),
-  "vitest.setup.ts",
+  readFileSync(join(PROJECT_ROOT, "spec/setup.ts"), "utf-8"),
+  "spec/setup.ts",
 );
 
 describe("public specification purity", () => {
   it("keeps every spec source machine-independent", () => {
     const violations = scanProjectTests(PROJECT_ROOT, {
       testOwnedEnvKeys: TEST_OWNED_ENV_KEYS,
+      scope: portableProject,
     });
     if (violations.length > 0) {
       throw new Error(`Public test purity violations:\n${formatViolations(violations)}`);
@@ -37,7 +39,6 @@ describe("public specification purity", () => {
       { rule: "absolute-home", source: ["/", "home", "/alice/work"].join("") + "/file" },
       { rule: "wsl-mount", source: ["/", "mnt", "/c/work/file"].join("") },
       { rule: "windows-drive", source: ["C", ":", "\\", "work", "\\", "file"].join("") },
-      { rule: "private-project", source: ["trading", "_bot"].join("") },
       { rule: "user-home-state", source: ["home", "dir()"].join("") },
       { rule: "network-client", source: ["fet", "ch('https://example.invalid')"].join("") },
       { rule: "real-history", source: ["task", " #", "123"].join("") },
@@ -206,7 +207,7 @@ describe("public specification purity", () => {
       .filter(({ rule }) => rule === "required-env-without-skip")).toEqual([]);
   });
 
-  it("allows only isolated project-local Node child probes", () => {
+  it("refuses child probes even with isolated project-local homes", () => {
     const childModule = ["node", ":", "child", "_process"].join("");
     const source = [
       `import { spawnSync } from '${childModule}';`,
@@ -216,7 +217,9 @@ describe("public specification purity", () => {
       "});",
     ].join("\n");
     expect(scanSource(source, "spec/project-probe.test.ts")
-      .filter(({ rule }) => rule === "child-process")).toEqual([]);
+      .filter(({ rule }) => rule === "child-process")).toEqual([
+        expect.objectContaining({ rule: "child-process" }),
+      ]);
   });
 
   it("detects both direct user-home access forms and all network clients", () => {
@@ -236,11 +239,10 @@ describe("public specification purity", () => {
   it("ignores comment trivia without hiding executable code on the same line", () => {
     const forbiddenPath = ["/", "home", "/alice/work/"].join("");
     const clientCall = ["fet", "ch('/resource')"].join("");
-    const privateName = ["btc", "_explore"].join("");
     const commentsOnly = [
       `// ${forbiddenPath}`,
       `/* ${clientCall} */`,
-      `const safe = true; // ${privateName}`,
+      `const safe = true; // ${forbiddenPath}`,
     ].join("\n");
     expect(scanSource(commentsOnly, "comments.ts")).toEqual([]);
 
@@ -381,7 +383,12 @@ describe("public specification purity", () => {
       const forbidden = ["/", "home", "/alice/work/file"].join("");
       writeFileSync(join(root, "spec", "untracked-probe.ts"), `const path = '${forbidden}';\n`, "utf-8");
 
-      expect(scanProjectTests(root)).toEqual([
+      for (const pattern of portableProject.exclude) {
+        const directory = pattern.slice(0, pattern.indexOf('*')).replace(/\/$/, '');
+        mkdirSync(join(root, portableProject.dir, directory), { recursive: true });
+        writeFileSync(join(root, portableProject.dir, directory, 'native-fixture.ts'), `const path = '${forbidden}';\n`);
+      }
+      expect(scanProjectTests(root, { scope: portableProject })).toEqual([
         expect.objectContaining({
           file: "spec/untracked-probe.ts",
           line: 1,

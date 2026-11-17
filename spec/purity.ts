@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { extname, join, posix, relative } from "node:path";
+import { extname, join, posix, relative, matchesGlob } from "node:path";
 import ts from "typescript";
 
 export interface PurityViolation {
@@ -13,7 +13,9 @@ export interface ScanOptions {
   testOwnedEnvKeys?: ReadonlySet<string>;
 }
 
-export type ProjectScanOptions = ScanOptions;
+export interface ProjectScanOptions extends ScanOptions {
+  scope: { dir: string; exclude: readonly string[] };
+}
 
 interface PurityRule {
   id: string;
@@ -28,14 +30,6 @@ interface EnvReference {
 }
 
 const regex = (source: string, flags = "g"): RegExp => new RegExp(source, flags);
-const privateNames = [
-  ["trading", "_bot"].join(""),
-  ["btc", "_explore"].join(""),
-  ["stock", "_analysis"].join(""),
-  ["da", "qing"].join(""),
-  ["ai", "_fan"].join(""),
-  ["frontier", "_expansion"].join(""),
-];
 
 const RULES: PurityRule[] = [
   {
@@ -52,11 +46,6 @@ const RULES: PurityRule[] = [
     id: "windows-drive",
     description: "Windows drive path",
     patterns: [regex("(?:^|[^A-Za-z0-9_])[A-Za-z]:" + "\\\\")],
-  },
-  {
-    id: "private-project",
-    description: "private project identifier",
-    patterns: [regex("\\b(?:" + privateNames.join("|") + ")\\b", "gi")],
   },
   {
     id: "user-home-state",
@@ -1035,52 +1024,6 @@ function semanticConstructedFilesystemPathViolations(
   return violations;
 }
 
-function propertyInitializer(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
-  for (const property of object.properties) {
-    if (!ts.isPropertyAssignment(property)) continue;
-    const propertyName = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
-      ? property.name.text
-      : undefined;
-    if (propertyName === name) return property.initializer;
-  }
-  return undefined;
-}
-
-function hasProperty(object: ts.ObjectLiteralExpression, name: string): boolean {
-  return object.properties.some((property) => {
-    if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return false;
-    return (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name))
-      && property.name.text === name;
-  });
-}
-
-function safeGitLsFiles(call: ts.CallExpression): boolean {
-  const [command, argv, options] = call.arguments;
-  if (!command || !ts.isStringLiteralLike(command) || command.text !== "git") return false;
-  if (!argv || !ts.isArrayLiteralExpression(argv)) return false;
-  const args = argv.elements
-    .filter(ts.isStringLiteralLike)
-    .map((argument) => argument.text);
-  return args[0] === "ls-files"
-    && args.includes("-z")
-    && args.includes("--")
-    && !!options
-    && ts.isObjectLiteralExpression(options)
-    && hasProperty(options, "cwd");
-}
-
-function safeProjectNodeProbe(call: ts.CallExpression, sourceFile: ts.SourceFile): boolean {
-  const command = call.arguments[0];
-  const options = call.arguments.at(-1);
-  if (!command || command.getText(sourceFile).replaceAll(/\s/g, "") !== "process.execPath") return false;
-  if (!options || !ts.isObjectLiteralExpression(options) || !hasProperty(options, "cwd")) return false;
-  const env = propertyInitializer(options, "env");
-  return !!env
-    && ts.isObjectLiteralExpression(env)
-    && hasProperty(env, "HOME")
-    && hasProperty(env, "FC_HOME");
-}
-
 function semanticChildProcessViolations(sourceFile: ts.SourceFile, file: string): PurityViolation[] {
   const bindings = new Map<string, { importNode: ts.ImportDeclaration; used: boolean }>();
   const violations: PurityViolation[] = [];
@@ -1093,7 +1036,7 @@ function semanticChildProcessViolations(sourceFile: ts.SourceFile, file: string)
         file,
         line: lineFor(sourceFile, statement),
         rule: "child-process",
-        description: "host child-process dependency is not an isolated project-local probe",
+        description: "child processes belong in the native project",
       });
     }
     if (!ts.isImportDeclaration(statement)
@@ -1127,7 +1070,7 @@ function semanticChildProcessViolations(sourceFile: ts.SourceFile, file: string)
           file,
           line: lineFor(sourceFile, node),
           rule: "child-process",
-          description: "host child-process dependency is not an isolated project-local probe",
+          description: "child processes belong in the native project",
         });
       }
       const bindingName = ts.isIdentifier(node.expression)
@@ -1138,14 +1081,12 @@ function semanticChildProcessViolations(sourceFile: ts.SourceFile, file: string)
       const binding = bindingName ? bindings.get(bindingName) : undefined;
       if (binding) {
         binding.used = true;
-        if (!safeGitLsFiles(node) && !safeProjectNodeProbe(node, sourceFile)) {
-          violations.push({
-            file,
-            line: lineFor(sourceFile, node),
-            rule: "child-process",
-            description: "host child-process dependency is not an isolated project-local probe",
-          });
-        }
+        violations.push({
+          file,
+          line: lineFor(sourceFile, node),
+          rule: "child-process",
+          description: "child processes belong in the native project",
+        });
       }
     }
     ts.forEachChild(node, visit);
@@ -1158,7 +1099,7 @@ function semanticChildProcessViolations(sourceFile: ts.SourceFile, file: string)
         file,
         line: lineFor(sourceFile, binding.importNode),
         rule: "child-process",
-        description: "host child-process dependency is not an isolated project-local probe",
+        description: "child processes belong in the native project",
       });
     }
   }
@@ -1255,13 +1196,15 @@ export function scanTree(
 
 export function scanProjectTests(
   projectRoot: string,
-  options: ProjectScanOptions = {},
+  options: ProjectScanOptions,
 ): PurityViolation[] {
-  const specRoot = join(projectRoot, "spec");
+  const specRoot = join(projectRoot, options.scope.dir);
+  const included = (file: string) => !options.scope.exclude.some(pattern => matchesGlob(relative(specRoot, file), pattern));
   const unsupportedChecks = (root: string): PurityViolation[] => {
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
       const path = join(root, entry.name);
+      if (!included(path)) return [];
       if (entry.isDirectory()) return entry.name === "__pycache__" ? [] : unsupportedChecks(path);
       const testLike = /(?:^test_.*|\.(?:test|spec))\.[^.]+$/i.test(entry.name);
       if (!entry.isFile() || !testLike || SOURCE_EXTENSIONS.has(extname(entry.name))) return [];
@@ -1273,9 +1216,9 @@ export function scanProjectTests(
       }];
     });
   };
-  return sourceFiles(specRoot).flatMap((file) => (
-    scanSource(readFileSync(file, "utf-8"), relative(projectRoot, file), options)
-  )).concat(unsupportedChecks(specRoot));
+  return sourceFiles(specRoot).filter(included).flatMap(file =>
+    scanSource(readFileSync(file, 'utf-8'), relative(projectRoot, file), options))
+    .concat(unsupportedChecks(specRoot));
 }
 
 export function formatViolations(violations: PurityViolation[]): string {

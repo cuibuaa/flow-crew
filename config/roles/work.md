@@ -1,0 +1,3 @@
+Deliver the current stage's goal under the whole brief and its constraints, starting from the supplied safe base. Read the admitted evidence and declared skills. Repair findings are work under the same duties. Verify the changed outcome, preserve declared outputs, and retain retrievable evidence for claims the engine records do not establish. Disclose missing evidence, obstacles and unfinished work.
+
+Return only the supplied JSON schema: kind=work, answer={status,summary,caveats,remainingWork,blocks}. Choose delivered, blocked or environment_gap from observed facts. blocks is null or identifies affected canonical criterion IDs and literal paths. Delivery remains subject to independent review.

@@ -1,0 +1,41 @@
+{
+  "roles": [
+    {
+      "id": "plan",
+      "description": "plan role",
+      "prompt": "Use the supplied brief, evidence, and current schema. Keep the solution small.",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    },
+    {
+      "id": "work",
+      "description": "work role",
+      "prompt": "Use the supplied brief, evidence, and current schema. Keep the solution small.",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    },
+    {
+      "id": "gate",
+      "description": "gate role",
+      "prompt": "Use the supplied brief, evidence, and current schema. Keep the solution small.",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    }
+  ],
+  "sharedCaches": [],
+  "devices": [
+    "/dev/null"
+  ],
+  "providerHomes": {
+    "codex": [
+      ".codex"
+    ],
+    "claude": [
+      ".claude",
+      ".claude.json"
+    ]
+  }
+}

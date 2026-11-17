@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../dist-monitor",
+    "incremental": false,
+    "declaration": false, "allowJs": true
+  },
+  "include": ["*.ts"],
+  "exclude": ["../dist-monitor", "../node_modules"]
+}

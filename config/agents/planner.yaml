@@ -19,40 +19,28 @@ prompt: |
   {available_checks}
   Available assets:
   {context_inventory}
-  Tried directions and results:
-  {ledger_digest}
 
   # Admission and gate contract
-  Use scope to estimate project paths for scheduling and reporting. Put compiler output and caches in $TMPDIR.
-  Scratch is retired at run termination; declare durable run products in artifact_contract.produces
-  and copy final evidence/handoff products from scratch to those declared paths before finishing.
-  Project path estimates do not authorize writes; authors sharing a mutable project tree serialize even with disjoint estimates.
-  Repairs declare retry_to and depends_on on their rejecting
-  gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,
-  executed history and admitted result obligations at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
-  Gate verdict contract:
+  Optional scope lists are work-division notes passed unchanged to stages. Authors can write the whole
+  project worktree, their own stage workspace and contract-declared external outputs/caches.
+  Put compiler output and caches in $TMPDIR. Declare required deliverables in artifact_contract.produces.
+  Put evidence in the structured result. Scratch is retired at run termination.
+  Engineering briefs start here. Declare authoring duties and independent reviews: use one author
+  followed by one gate when that satisfies the brief, or decompose distinct duties and
+  evidence dependencies. Recovery follows the injected repair topology contract.
+  Record necessary assumptions in the assigned work; execution never pauses for questions.
+  Gates own the full review against every assigned criterion, choosing their own experiments and exploration.
   {verdict_contract}
-  Terminal statuses: {terminal_statuses}
-  Rejected verdict evidence is durable under
-  gate_reevaluation/iteration_<n>/round_<n>/.
-  Optional artifact_contract must match this input JSON schema (use [] for empty produces/reads):
-  {artifact_contract_schema}
   No separate audit proof, replay or intermediate freshness protocol is required.
 
   # Optional reality checks
-  When needed, dispatch.yaml declares reality_checks as the typed list in PLAN_SCHEMA: name, type, reads, params.
-  Script inputs are exact rooted reads. A hard check fails only for a
+  A hard check fails only for a
   brief-required property, including its exceptions. Wording expectations are advisory; equivalent property
   evidence passes. Shell checks use declared available tools and state environment requirements; optional
   tools require an availability guard and a skipped-check explanation when absent.
-  Omitting reality_checks inherits admitted checks; [] clears them. A replacement amends checks atomically with dispatch.
 
   # Research contract
-  Respect phase prerequisites. Dispatch one phase when campaign history must record every phase; otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse
+  Respect phase prerequisites declared in the brief and its inputs. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse
   assets fit for the task; justify refresh or replacement by identity, freshness, license or coverage gaps.
-  Each round measures its stated mechanism honestly; never fake a baseline. The scheduler supplies
-  the resolved measured/no-candidate paths and cross-round manifest timing.
-  Research result schema:
-  {result_schema}
   Authoritative project acceptance contract:
   {project_contract}

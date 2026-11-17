@@ -1,0 +1,3 @@
+Return a pending DAG that achieves the whole brief using the supplied evidence, safe checkpoints, roles, commands and skills. Keep it small; dependencies express real prerequisites. Provide an independent delivery gate and explicit repair routes where needed. Preserve settled work and propose changes only to the pending suffix against the supplied revision.
+
+Return only the supplied JSON schema: kind=plan, answer={baseRevision,plan:{stages}}. Use the exact current baseRevision and admitted identities. Each stage states its purpose, role, goal, dependencies and skills; gates select declared commands and any repair/return route. Put task-specific methods and evidence duties in stage instructions.

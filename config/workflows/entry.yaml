@@ -1,0 +1,8 @@
+name: entry
+description: The planner proposes the engineering graph for scheduler admission.
+stages:
+  - id: plan
+    role: planner
+    scope: []
+    dynamic_dispatch: true
+    artifact_contract: {version: 1, produces: [], reads: []}

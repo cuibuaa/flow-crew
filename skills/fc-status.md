@@ -1,18 +1,25 @@
 ---
 name: fc-status
-description: Show the current project's latest FlowCrew run with the project-scoped CLI. Use when the user asks for FlowCrew status or invokes the fc-status workflow.
+description: Show FlowCrew run status from the selected store or inspect an explicit run id.
 ---
-<!-- flowcrew-skill-revision: 4 -->
+<!-- flowcrew-skill-revision: 5 -->
 
-# Show project run status
+# Show run status
 
-Run from the user's selected project:
+Run `flowcrew status <run-id>` when the user supplied a run id. Otherwise run:
 
 ```bash
 flowcrew status
 ```
 
-Show the output as produced. Do not summarize or launch more commands for the normal skill.
-The command selects the latest run for that project. For an explicitly cross-project request,
-use the `--all` or `--project` selectors in the bundled
-[CLI reference](../guide/cli.md#read-and-steer).
+Show the output as produced. With no id it returns an array of per-run Result objects
+for all run directories in the selected store, including other projects; it does not
+select the latest project run. An explicit id returns one status object. There are no
+`--project` or `--all` status selectors. Use the user's selected storage environment.
+
+The view includes lifecycle, stage, stop reason, attention, C2 counters, elapsed step
+time, usage completeness and optional reclamation/interruption facts. Unknown usage
+is not zero. Inspection exits zero even for a failed or cancelled run; read the status.
+An interrupted run shows the exact manual resume command. Do not start, resume, cancel
+or reclaim work as part of this read-only skill. See [status fields](../guide/cli.md#status-output)
+and [storage defaults](../guide/configuration.md#storage-and-runtime).

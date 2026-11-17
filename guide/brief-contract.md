@@ -1,433 +1,127 @@
 # Brief contract
 
-For a task author: how do I express the outcome, evidence and limits the run must satisfy?
-
-Write a self-contained outcome, explicit input paths, real constraints and numbered acceptance
-criteria. Name the report and the evidence it must show. Separate a required property from
-an illustrative implementation.
-
-## Engineering and workflow selection
-
-This is an illustrative engineering envelope, not a complete launch-ready task:
+For authors writing a self-contained goal and evidence contract. A brief has YAML
+(or JSON) frontmatter between `---` delimiters followed by an opaque UTF-8 body.
+Code validates declarations without deriving policy from prose. The run receives the
+parsed declaration and complete body, not the originating conversation. Original bytes
+and their digest remain evidence; public setup currently prints no digest.
 
 ```yaml
 ---
-workflow: direct
-inputs:
-  - src/
-outputs:
-  - path: docs/result.md
-    on_existing: update
-validation:
-  commands:
-    build: {command: npm, args: [run, build]}
-    test: {command: npm, args: [test]}
-    lint: {command: npm, args: [run, lint]}
+criteria:
+  - {id: correct, text: Deliver independently reviewed work.}
+inputs: []
+outputs: []
+commands: []
+results: []
+allowBlocked: false
 ---
+Describe the goal, evidence, real constraints and what the report must show.
 ```
 
-Follow it with the goal, constraints and extractable acceptance criteria. `workflow: direct`
-selects a fixed author/gate/repair plan, also used when the choice is omitted for an
-ordinary task. `workflow: planner` requests dynamic planning; `--workflow <name>`
-preserves an explicit CLI choice, including `--workflow default` for the planner.
-Numeric research selects the research workflow unless an explicit CLI workflow overrides it.
-Direct research loops are refused.
-Input/output count does not choose the workflow. The fixed plan uses the same admission,
-isolated author writes, independent review, repair and re-review, and brief/report duties.
+All six fields are required. Criteria must be nonempty; the other arrays may be empty.
+Unknown fields, duplicate YAML keys and duplicate IDs within a collection are refused.
+IDs start with an ASCII letter and then contain letters, digits, `_` or `-`.
 
-`objective:` is an exact alias for `research:`, with `research` winning when both exist.
-A numeric `baseline` activates the metric loop. An engineering `objective` containing only
-`confirm` does not activate confirmation. Use normal engineering gates and configured
-validation for a pass/fail task.
+## Inputs outputs and validation
 
-Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
-[criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
-
-## Inputs, outputs and validation
-
-Declare inputs in leading YAML frontmatter. Project-relative directory names are accepted
-without a trailing slash there; unsafe declarations are reported unresolved. Paths mentioned
-in prose are references and do not declare inputs or authorize reuse of existing outputs.
-To freeze a file or tree, use a structured input such as `{path: notes.md, frozen: true}`.
-Inputs are not frozen by default; `frozen: false` also leaves them mutable. Only the boolean
-frontmatter field grants this protection: notes, roles, headings and prose are not enforced.
-Nonboolean `frozen` values are unresolved input declarations, not coercions to true.
-Settlement rejects and restores changed frozen bytes, and accepts identical bytes.
-
-Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
-and `on_existing: update|append|replace`. They are create-only by default. Declaring an existing
-output as an input records intentional reuse. Nonempty create-only files, create-only symlinks
-and unsupported entry types block the output inventory. Explicit existing-content authority
-admits project symlinks. Archival preserves symlink objects without traversing their targets.
-Absolute external outputs require an explicit directory declaration: protected/root-level
-overlaps and aliases are refused.
-Their contents are not recursively inventoried by preflight. Rehearsal substitutes temporary
-locations. A declaration is authority for its named location, not permission for siblings.
-Project outputs may lie inside declared frozen input directories: freezing excludes the
-declared output file or directory tree, while other frozen input paths stay protected. Existing-content rules
-still apply.
-
-`validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
-`{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
-extra fields and control characters refuse parsing. Without declarations, setup discovers
-commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
-baseline and comparison semantics. Do not replace the full configured suite with a subset.
-
-Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/cli-ship-setup.ts),
-[validation discovery](../src/project-validation.ts).
-
-## Research rounds
-
-The [tracked research brief](../examples/hello-research.brief.md) is a complete rehearsal
-example. The metric block accepts these fields:
-
-| Field | Meaning |
+| Field | Declaration |
 |---|---|
-| `baseline` | Numeric reference activating the native loop |
-| `policy` | `greedy_stack` (default); invalid names are diagnosed |
-| `higher_is_better` | Direction; defaults higher; boolean strings are also recognized |
-| `result_file`, `report_dir` | Mutable round slot and report directory; [resolver](../src/research-paths.ts) supplies omitted paths |
-| `result_schema` | JSON schema for each measured round |
-| `context_roots` | Context inventory roots |
-| `integrity.max_std_ratio`, `outlier_factor` | Declared variability/outlier bounds |
-| `integrity.field_floors` | Numeric minimums for named result fields |
-| `integrity.reject_if_positive` | Named fields that must not be positive |
-| `confirm.command`, `requires`, `timeout_seconds`, `reads` | Optional real shell check, human assertion, bound and rooted reads |
-| `stop.beat` | Ship target, inclusive in the declared direction |
-| `stop.max_rounds`, `max_wall_hours`, `halt_after_no_improvement` | Stop budgets |
-| `stop.min_improvement`, `improvement_se_multiple` | Required gain beyond running best and reported uncertainty |
-| `feasibility` | Optional structural preflight model; see below |
+| `criteria` | `{id, text}` outcome obligations with nonempty text |
+| `inputs` | `{id, path, kind, frozen, sha256?}`; kind is `file` or `directory`; frozen is a required boolean |
+| `outputs` | `{path, kind, existing}`; existing is `create`, `update`, `append` or `replace` |
+| `commands` | `{id, argv, env, inputs, required, durationMs?}`; inputs are declared input IDs |
+| `results` | `{id, text}` finite allowed result labels with nonempty text |
+| `allowBlocked` | Whether a gate may accept a blocked outcome |
 
-A measured round supplies numeric `result`, a nonblank `label`, and optionally `result_std` and declared
-schema fields. No safe acting candidate uses the fresh `<result_file>.no_candidate.json`
-sidecar with `label`, `outcome: no_candidate` and a nonblank `reason`. Exactly one slot may
-be fresh. No-candidate rounds consume stop budget without inventing a baseline observation.
-Duplicate journaled labels are refused. Accepted rounds enter `research_journal.json` and
-the report directory's exact `run_manifest.json` before confirmation.
+Input and output paths must each be unique. Paths are literal relative or absolute
+paths, with nonempty components; dot/dot-dot, glob syntax, backslash, colon and control
+characters are refused. A path in prose is only a reference. Declare gitignored inputs
+and intentional reuse of existing outputs. `frozen: true` protects a file/tree; use
+`false` for mutable input. Prose cannot enforce freezing. A supplied file `sha256` is a
+lowercase SHA-256 identity; preparation measures and binds actual input identities.
 
-Before dispatch, the engine snapshots the content identities of both result slots and existing
-inferred `evidence.json` files in `run.json.researchInputGeneration`. Admission and inference
-share the same confined regular-file domain, with the existing 4 MiB evidence limit; aliases
-and special files are not read as evidence. Content identities use the existing nonblocking,
-no-follow regular-file reader. Explicit result slots retain confined internal aliases, using
-their canonical file identity; inferred evidence still requires a regular directory entry.
-A new publication changes content relative to that snapshot or is evidenced by a completed
-current-iteration producer attempt's settled write ledger. Equal measurement bytes remain valid
-when that ledger proves current production; touching an old file alone does not prove it.
-Backward clock steps therefore cannot discard a newly published round. The snapshot
-survives resume, while journal labels and immutable consumed copies prevent counting a round
-twice. A legacy run without a snapshot preserves pending publications recorded in the closed
-current-iteration producer attempt's write ledger, using the same publication rule. Independent review still decides whether
-that result is accepted, without repeating completed production. The existing confined project
-alias resolver and regular-file device/inode identity bind a result slot to that producer's
-recorded write, including project-local hardlinks. An independent file with identical bytes
-does not prove publication. Other pre-existing files are snapshotted as old; a completed stage
-name alone does not prove publication. Once established,
-the snapshot survives every resume.
+For outputs, `create` requires absence; `update` and `append` require existing content;
+`replace` accepts either. Existing type must match `kind`. Append preservation checks
+the original content. External file mutation has [platform differences](operations.md#platform-boundaries).
+Declaring an output does not grant its parent or siblings. Authors can write the isolated
+project; exact external outputs and configured shared resources add authority. Inputs
+alone do not grant arbitrary external writes.
 
-Variability and outlier bounds apply only when declared. Reported uncertainty still determines
-whether a gain counts; surprising gains and high variance need independent review or a declared
-confirmation check.
+Commands declare exact argv (nonempty executable), explicit non-secret `env` map,
+input IDs and `required` boolean. The optional positive safe-integer `durationMs`
+belongs to that command alone. Avoid shell strings when argv suffices. Public setup
+checks syntax and host readiness, deferring all commands; start establishes resources
+and runtime execution establishes feasibility. Report direct exits and totals after
+the final relevant write. Required command/output obligations constrain delivery even
+when a model approves it. There is no separate brief `validation` block.
 
-The latest result and sidecar change between rounds. Immutable round evidence and the
-framework manifest record accepted observations. Configured validation and independent
-review decide whether authored tests remain valid after later work. Hard-check reachability
-is checked against the round timeline.
+Result IDs are opaque labels, not code-inferred scientific conclusions. A final
+accepting gate selects a declared result when labels exist. Set `allowBlocked`
+explicitly; a missing capability is evidence to judge, not automatic permission to
+waive required products. Research policy belongs in the task's criteria, declared
+evaluators/commands and evidence; there is no special research frontmatter.
 
-An unknown policy produces a strict-parser error and a preflight finding.
-`plan-check` refuses that error; an explicit quick launch can retain the
-parser's `greedy_stack` fallback. Set a valid name rather than assuming the diagnostic is an
-unconditional launch barrier.
-
-The policy computes keep/drop and continue/ship/ceiling. Improvement must clear the configured
-absolute margin and, when reported, uncertainty margin. Confirmation runs only when declared
-and a ship decision is reached. Failure prevents that candidate from being kept and permits
-further search; missing confirmation produces an advisory warning. Static budget checks compare round, iteration and wall limits; a large round limit
-cannot override the engine iteration bound.
-
-Sources: [policy](../src/research-policy.ts), [research settlement](../src/scheduler/sched_policy/research.ts),
-[research path contract](../src/scheduler/sched_policy/prompt-contracts.ts),
-[candidate validation](../src/research-candidate.ts).
-
-### Structural feasibility and statistics
-
-`feasibility` requires positive finite `hard_floor`, optional `warn_below` at least that floor,
-and nonempty `rules` with unique labels. A rule names one model:
-
-- `independent_repeated_conjunction`: positive integer `population` and `periods`,
-  `per_period_rate` between zero and one; estimates population × rate^periods.
-- `formation_count_distribution`: nonempty nonnegative integer `counts`; evaluates the
-  minimum formation count and reports its distribution.
-- `not_computable`: nonblank `reason` naming the unavailable structural quantity.
-
-This static contract can be parsed without activating a numeric loop. It does not establish
-that the chosen model fits the real problem. Unknown fields/models return parser errors;
-preflight reports them, while `plan-check` refuses them.
-
-Sources: [feasibility](../src/research-feasibility.ts), [planning policies](../src/planner-policies.ts).
-
-## Evidence authoring policy
-
-When leading brief frontmatter selects `planner_policies: [evidence_statistics]`, the planner receives
-these authoring requirements: a requested headline or quoted statistic needs its mean, median
-and position in its own distribution; a rule frozen before outcomes needs a structurally
-computed qualifying-member count, numeric feasibility floor and revision below that floor
-before outcomes are seen. An operator numeric expectation requires exact result fields
-`within_expected_range` and `method_was_not_adjusted_to_match_expectation`. These are injected
-planning instructions, not an automatic statistic calculator or guarantee of model obedience.
-
-Declare supplied numeric expectations in leading frontmatter as `supplied_numbers: [0, -112.89]`.
-The value must be an array of finite YAML numbers; `[]` declares none, and any other shape
-is refused. A nonempty array requires both exact anti-anchoring fields above as positive
-result requirements; missing either makes preflight and rehearse fail.
-This declaration works without operator wording in the body. Prose-only expectations produce
-warnings; `research.baseline`, ordinary counts, and the planning-policy selection do not
-by themselves declare supplied numbers.
-
-For other evidence, state the user-visible consequence, boundaries, counter-examples and
-unacceptable outcomes. Preserve an authoritative exact mechanism when it is required; label
-illustrative mechanisms as examples. For a known defect, require the unfixed reproducer and
-recurrence evidence, including a failure rate with its denominator when recurrence matters.
-Do not replace an outcome with a line-count check; if a count itself is a supplied requirement,
-it remains binding. Explain concentrated contributions with per-item, largest-share and
-leave-one-out evidence when those properties are part of the task.
-
-Sources: [selected planning policy](../src/planner-policies.ts),
-[gate contract](../src/scheduler/sched_settlement/gate-contract.ts).
+The retired `bounds` key is accepted and ignored regardless of value, with one advisory
+per supplied key at parsing. It is absent from admitted metadata and agent input;
+original evidence bytes remain intact. It supplies no execution limit. C2 parks after
+three gate rejections without a new best or four failures, retaining work. Provider
+context exhaustion is native; provider-internal loops need operator cancellation.
 
 ## Authoring and verification principles
 
-These are author/operator judgments to encode when relevant, not extra engine schemas or
-promises that a model will obey. Keep the detailed contract above authoritative.
+State the result and evidence needed, leaving approach and decomposition to the run.
+Keep the brief self-contained: outcome, original evidence locations, real constraints,
+observable criteria and required report/products. Label examples as illustrative;
+state exact paths/APIs only when they are genuine requirements. Name dependencies of
+supplied quantities and explain evidence gaps. Do not silently turn an operator's
+preferred answer into an acceptance criterion.
 
-### Scope and evidence
+Freeze supplied evaluators and original evidence that must remain unchanged. Require
+complete configured validation with direct exits/totals after the last relevant write.
+Separate operator numeric expectations from measured results; where applicable require
+`within_expected_range` and `method_was_not_adjusted_to_match_expectation` in the report.
+These are reporting conventions, not additional frontmatter fields.
 
-- Keep work of one kind in one task; let its planner decompose and parallelize it.
-  Reason: an operator-created chain removes choices the planner can make with the whole goal.
-- Split only genuinely different kinds of work and run independent pieces in parallel.
-  Reason: serial queues of related work add coordination and delay without improving ownership.
-- State what the run must find, leaving its approach, decomposition and interpretation open.
-  Reason: supplying those conclusions turns investigation into following the operator's answer.
-- Keep the brief near one page of outcome, evidence paths, real constraints, timed report criteria
-  and terminal products; omit speculative approaches and histories of what evidence means.
-  Reason: extra interpretation is where unverified context becomes an accepted premise.
-- Supplied quantities and prohibitions bind exactly as written; state when an enumeration is
-  incomplete and require discovery of omitted dependencies before acting on it.
-  Reason: honoring a visible count can leave the unstated quantity it depends on unchanged.
-- An out-of-scope list must contain only real exclusions; identify open dimensions explicitly
-  rather than relying on an unmentioned option remaining available.
-  Reason: a seemingly complete constraint list can close useful work unintentionally.
-- Give original evidence paths and require reading them; a supplied figure is a cross-check,
-  accompanied by the anti-anchoring fields, rather than a settled premise.
-  Reason: a summary preserves its author's confidence while losing the evidence they omitted.
-- State the property to establish in the target, rather than a manually derived answer from
-  the operator's environment; label an operator measurement as a cross-check.
-  Reason: the target can differ and must expose disagreement instead of silently reconciling it.
+For minimal rewrites, name production entrypoints and require a base/final reachability
+and removal inventory, behavior parity on identical recorded inputs, production runtime
+selection, module responsibilities, before/after size and a design account of added and
+removed mechanisms. Require a parity witness that detects an injected change, full final
+validation and a cutover/rollback description. Shared production state is read-only via
+copies; deployment and pushes need separate authority. Leave suspected behavior bugs as
+findings unless their repair is in scope. Ask for this evidence without prescribing a
+shared skeleton or an order of implementation.
 
-### Criteria and inputs
+Human acceptance needs a second way to verify plausible results. Read actual artifacts,
+rejected reviews and direct command evidence; reproduce a defect independently and
+characterize recurrence with denominators. Inspect the deciding code, query, formula or
+instrument before theorizing about a surprising value. A zero CLI exit, passing rerun
+or summary alone is insufficient. Use real served/rendered paths when the property
+depends on serving or presentation. Change tracked specifications only for an authorized
+contradiction and explain the affected assertion. Preserve unique and invalid evidence
+before cleanup; terminal status does not authorize deletion.
 
-- Constrain rigor through required reproduction, controls, independent review and evidence,
-  rather than predetermining the finding; pin each check to its moment and evidence form.
-  Reason: demanding a finding invites reshaping the work, while an untimed check may precede its last write.
-- Label examples, including parenthetical examples, as illustrative rather than acceptance
-  criteria; if an exact path, API or format is mandatory, say it is the criterion and alternatives fail.
-  Reason: gates must distinguish an illustrative instrument from an authoritative compatibility requirement.
-- Pair a prohibition on an exact case with a quantitative demonstration of the intended effect,
-  such as a control difference, count or interval excluding the null.
-  Reason: a nearly identical result can satisfy an exact-case prohibition without achieving the purpose.
-- Keep task-local criteria independent of a shared running total.
-  Reason: another task's accumulated work cannot establish that this task performed its obligation.
-- Map every authored stage's writable paths, including validation outputs, to its outputs and
-  declared reads; identify the writers of substantive evidence. Treat `min_wall_minutes` at or
-  below 10 as an anti-instant-quit guard only.
-  Reason: a clock or an early terminal file cannot prove that downstream verification happened.
-- Require preflight, rehearsal and setup to agree on declared output inventory and intended
-  existing-content authority before launch.
-  Reason: an occupied path does not become safe merely because it is the requested output name.
-- Declare intended inputs in frontmatter `inputs:`; prose paths are references only.
-  Use structured entries with `frozen: true` for evidence that must remain unchanged.
-  Reason: prose references neither declare inputs nor enforce freezing.
-- Declare only intended task inputs and inspect target content/type collisions rather than
-  adding unrelated declarations to satisfy setup; setup's target-copy rules remain authoritative.
-  Reason: excess inputs can import unrelated work or ask for incompatible materialization.
-- Use guidance for missing facts or correction of an operator error, not delayed scope or
-  replacing a required property with a preferred result; preserve better brief-conforming results.
-  Reason: erasing criteria or widening authority requires a revised, rehearsed brief and new admission.
-- Repeated engineering guidance suggests an incomplete brief; research steering on intermediate
-  evidence can be intentional. Check the addressed stage's consumption receipt and changed artifact.
-  Reason: sending guidance proves neither that the worker received it in time nor that it took effect.
+## Evidence authoring policy
 
-### Measurement and limits
+Apply these judgments when relevant; ordinary engineering does not inherit research
+rounds or metric-search policy merely by using FlowCrew.
 
-- Confirm supplied baselines, floors and thresholds on the candidates' scale against the
-  unchanged incumbent, input or constant control appropriate to the task.
-  Reason: the best result so far can still be worse than changing nothing.
-- Before creating a harness, collector, evaluator or execution path, name what the project
-  already provides and why it does not serve this comparison or isolation requirement.
-  Reason: otherwise the run can silently measure its own replacement for an existing capability.
-- Identify every bound on a limited quantity, establish which binds first and state what to
-  do at exhaustion; reserve enough budget to audit and report the final attempted round.
-  Reason: a second cap can nullify a raised limit or stop the run before its required report.
-- For a stateful defect compare unfixed reproduction with the fixed result; for a probabilistic
-  defect compare before/after failure rates with denominators; isolate mutations where only the guard protects behavior.
-  Reason: success after a change does not prove that change corrected the claimed defect.
-- Name and use the repository's reproducible runtime selector; treat failed launch, build,
-  test or lint execution as environment evidence before drawing a domain conclusion.
-  Reason: inability to execute an experiment says nothing about the subject it was meant to measure.
-- Before teardown, identify an input's later consumers, preserve its only copy durably and
-  bind useful row-count, date-span, file-count or digest assertions to that preserved location.
-  Reason: a successful round is unusable if the next consumer loses its evidence.
-- Shared accumulating records are append-only without restructuring, with non-decreasing
-  line counts; permit a visibly traced in-place correction of this task's own false claim.
-  Reason: protecting history should neither hide a correction nor erase another task's evidence.
-- For each census item give its user-visible consequence; classify consequence-free entries
-  as drift and explain whether fixing them pays back its cost, rather than imposing a zero target.
-  Reason: a count of differences is not a count of defects worth repairing.
-- For every aggregate show result and baseline distributions, per-item contributions, largest
-  share, leave-one-out results and the fewest top contributors whose removal flips the conclusion.
-  Reason: a favorable total can depend on a small exceptional subset rather than a general effect.
+- Research briefs declare baseline, measurement policy, allowed stopping results and
+  the evidence needed to distinguish a supported ceiling from success. Missing
+  author-owned facts must stay explicit rather than being invented.
+- Reproduce baseline and candidate at the same scale against an unchanged incumbent
+  or suitable constant control. Name existing evaluators and why they do or do not
+  serve before creating a replacement.
+- For aggregate claims show baseline/result distributions, per-item contributions,
+  largest share, leave-one-out results and how concentrated contributions affect the
+  conclusion. For intermittent defects give before/after rates and denominators.
+- Verify a plausible numeric result another way, including what the instrument returns
+  when broken. Prove the experiment varied the variable it claims. Preserve failed or
+  invalid measurements unchanged and label their defect.
+- Attribute prior conclusions or re-establish their evidence. Read original files;
+  summaries and expected values are cross-checks, not measured facts. Record direct
+  exits rather than the exit of a later pipe filter. Report residual uncertainty.
 
-### Independent acceptance
-
-- Read durable declared-check and gate evidence alongside actual deliverables. Reproduce a
-  rejected declaration independently; rerun a recorded script verbatim with full stdout/stderr and its direct exit code.
-  Reason: a terminal label or summary cannot replace the evidence that decided the run.
-- Record direct command exits and totals; never report `$?` after a pipeline as the measured
-  command's exit, and prefer structured parsing to lossy shell filters for decision-changing numbers.
-  Reason: a successful filter or plausible default can hide failure in the command being assessed.
-- A green rerun only makes a false negative plausible; characterize recurrence, explain the
-  first failure's mechanism and assess residual uncertainty against the task's risk.
-  Reason: one success cannot dismiss an intermittent failure whose cause remains unknown.
-- For a near-instant, zero-token failed attempt inspect its live log and adapter transition
-  before treating it as substantive evidence; ask what a numeric probe returns when broken and verify plausible values another way.
-  Reason: an execution failure or silent fallback can look like a believable finding.
-
-### Interpretation and review
-
-- Attribute a subagent's, report's or earlier document's conclusion, or re-establish its
-  evidence independently before adopting it as your own.
-  Reason: relaying a confident conclusion does not carry the chain that earned it.
-- Treat “flaky” as an observation awaiting a cause; a second failure of the same family calls
-  for a shared external-variable investigation using a comparison that changes one condition.
-  Reason: separate labels can conceal one mechanism and prematurely end investigation.
-- Match inspection environment to the property: use the real served path for latency,
-  authentication, caching and integration; deterministic headless rendering proves rendering properties only.
-  Reason: source and metric totals cannot establish behavior that depends on the served environment.
-- For a surprising result inspect the deciding code, query, formula, protocol, setting,
-  rubric or predicate before theorizing, and prove the experiment varied the variable it claims.
-  Reason: a mistaken instrument or unchanged treatment can produce a coherent but irrelevant explanation.
-- Expose assumptions and challenge the question when a plausible value can answer the wrong
-  framing; move a failure into commands or gates once a reliable check makes it announce itself.
-  Reason: mechanical success cannot choose the right question, but repeatable operator mistakes need not stay manual.
-
-### Safe wrap-up
-
-- After independent verification and archival, stop any watcher you started before reclaiming
-  disposable work; retain invalid results unchanged with an `INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
-  Reason: ending observation and marking preserved evidence prevents stale activity or mistaken later reuse.
-- Investigate a refused audit or non-force removal and leave wrap-up open; before using a
-  guarded post-reclaim ledger repair, verify its reported entry/session/run identity.
-  Reason: a repair command cannot safely close a different obligation or substitute for unfinished preservation.
-- Change tracked specifications only for an authorized behavior regression or contradiction,
-  explain the affected assertion, and avoid adding a public test merely for each task criterion.
-  Reason: the maintained suite expresses intended behavior; one-off proof belongs in private temporary or declared run evidence.
-- If FlowCrew is unavailable, stop live work and provide the [public installation recipe](getting-started.md#install-in-a-development-checkout).
-  Reason: an unavailable executable cannot establish launch or verification evidence.
-
-## Terminal artifacts
-
-`terminal_states` maps a known terminal run status to a path string, path list or object with
-`paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
-with diagnostics. Each terminal path has one final ordinary producer; ordered authors and
-repairs may share its write scope. Admission checks the producer's mandatory gate and criterion
-ancestors. Intermediate reports belong in outputs,
-not terminal declarations.
-
-An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
-(entry-level wins over floor-level). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
-matching the declared evidence pattern. Result checks determine whether those receipts prove the outcome; file length does not.
-Native research ceiling evaluation instead counts journaled rounds, including valid
-no-candidate attempts; neither counts arbitrary scheduler executions. With an attempted-stage floor satisfied,
-wall time is advisory; without it, wall time can be the sole floor. Use substantive artifacts
-and criteria rather than elapsed time as evidence of work.
-
-`post_terminate_hook` accepts `command`, optional string-array `args`, positive
-`timeout_seconds` and string-valued `env`. It runs after terminal commit under the command
-boundary, with a default 300-second timeout and `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
-`FC_PROJECT_DIR`, `FC_RUN_ID` defaulting to the committed terminal context; explicit hook
-`env` can override them. A failed/timed-out hook is
-recorded without turning the already committed terminal into a live run. Treat it as real
-execution authority and review it before launch.
-
-Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts),
-[terminal admission](../src/scheduler/sched_admission/dispatch.ts),
-[terminal settlement](../src/scheduler/sched_policy/terminal.ts).
-
-## Deterministic checks
-
-Only one `## Reality checks` section with a `checks` list is parsed. Each check supplies
-`name`, `type`, `reads` (explicitly empty if it has no file inputs), `params`, and optional
-`advisory: true`. Rooted reads follow [agent protocol](agent-protocol.md#artifact-locations).
-Typed handler file parameters must agree with declared reads; shell text is not parsed to
-discover every dynamic read.
-
-| Type | Parameters |
-|---|---|
-| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` (default 60) |
-| `file-exists-nonempty` | `paths` list or `{from_manifest, field}` |
-| `json-schema-match` | `file`, `schema` object or schema-file reference |
-
-A script runs via Bash from the project directory. Exit 127 with command-not-found diagnostics
-becomes advisory with the failed execution retained. Versioned-JSON shape failures remain
-failures unless the check explicitly declares `advisory: true`. This limits what a passing
-Reality Gate proves. Rejected terminal candidates are quarantined; prose reports do not create
-executable checks.
-
-Sources: [parser/execution](../src/reality-gate/index.ts), [registry](../src/reality-gate/registry.ts),
-[shell handler](../src/reality-gate/checks/exec-script-exit-zero.ts).
-
-### Generic declared-check example
-
-This illustration checks a document and a numeric JSON field; it is not a native research-round
-check. Provide the declared `docs/output.md` and `result.json` inputs before running it. The
-finite-number script adds a check beyond the JSON field's type; no measurement is claimed.
-
-```yaml
-checks:
-  - name: docs-generated
-    type: file-exists-nonempty
-    reads:
-      - {id: document, root: project, path: docs/output.md, source: {kind: input}}
-    params:
-      paths:
-        - docs/output.md
-
-  - name: result-shape
-    type: json-schema-match
-    reads:
-      - {id: result, root: project, path: result.json, source: {kind: input}}
-    params:
-      file: result.json
-      schema:
-        type: object
-        required: [metric, value, evidence]
-        properties:
-          metric: {type: string}
-          value: {type: number}
-          evidence: {type: string}
-
-  - name: result-value
-    type: exec-script-exit-zero
-    reads:
-      - {id: result, root: project, path: result.json, source: {kind: input}}
-    params:
-      script: |
-        node <<'NODE'
-        const fs = require('node:fs');
-        const result = JSON.parse(fs.readFileSync('result.json', 'utf8'));
-        if (!Number.isFinite(result.value)) {
-          console.error('result.value must be a finite number');
-          process.exit(1);
-        }
-        NODE
-```
+Sources: [brief grammar](../rewrite-src/contract/brief.ts),
+[public setup/start](../rewrite-src/ops/main.ts), [authority](../rewrite-src/exec/policy.ts),
+[answers](../rewrite-src/contract/answers.ts), [holding pattern](../rewrite-src/core/retry.ts).

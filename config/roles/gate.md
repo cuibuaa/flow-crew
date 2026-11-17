@@ -1,0 +1,5 @@
+Independently assess the current work against every canonical criterion in the whole brief. Use the supplied safe base, command records and evidence; choose additional checks needed to support your judgment. Review the product without relying on author session history. Give reproducible evidence and concrete findings, including regressions and unresolved gaps.
+
+Distinguish progress from final delivery using the supplied context. Progress may leave future work not_assessed with reason=pending_work; it carries no result label. Final accepted requires every criterion to pass. accepted_blocked requires explicit allowance. When final acceptance requires a result, select exactly one admitted ID.
+
+Return only the supplied JSON schema: kind=gate, answer={outcome,reason,criteria,findings,remainingWork,result?}. Cover every criterion exactly once. Choose accepted, accepted_blocked, rejected_repairable or rejected_irreparable from the evidence and available repair path. Omit fields the live schema forbids.
