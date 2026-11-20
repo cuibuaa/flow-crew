@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # Run source validation on demand against any ref.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    # 6f final2: build 138.005 + lint 36.312 + typecheck 17.752 + portable 51.444 s.
+    # Three times the recorded validation commands, rounded up to minutes.
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run lint
+      - run: nice -n 19 npm run typecheck
+      - name: Pull isolated test image
+        run: nice -n 19 docker pull node:22.22.2-bookworm
+      - name: Portable suite once, with network none and empty HOME
+        run: nice -n 19 npm run test:isolation
+
+  native-linux:
+    runs-on: ubuntu-latest
+    # 6f final2: build 138.005 + native 1952.043 s; ceil(3 * sum / 60).
+    timeout-minutes: 105
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Linux native prerequisites
+        run: nice -n 19 sudo apt-get install -y git rsync python3
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run test:native
+
+  native-macos:
+    runs-on: macos-15
+    # 6f final2: build 138.005 + native 1952.043 s; ceil(3 * sum / 60).
+    timeout-minutes: 105
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Native tool prerequisites
+        run: |
+          nice -n 19 brew install python
+          nice -n 19 node --version
+          nice -n 19 python3 --version
+          nice -n 19 git --version
+          nice -n 19 python3 -c "import os, shutil; assert os.path.samefile(shutil.which('rsync'), '/usr/bin/rsync')"
+          nice -n 19 rsync --version
+          nice -n 19 sw_vers
+          nice -n 19 uname -a
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run test:native
+
+  package-install:
+    runs-on: ${{ matrix.os }}
+    # Full comparable jobs, CI 44078278863: native Linux 316.707s, macOS 1155.750s
+    # (setup-node, prerequisites, npm ci, build and native acceptance included).
+    # ceil(3 * max / 60) = 58; lead recomputes from this job's first real full run.
+    timeout-minutes: 58
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Linux native prerequisites
+        if: runner.os == 'Linux'
+        run: nice -n 19 sudo apt-get install -y git rsync python3
+      - name: macOS native prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          nice -n 19 brew install python
+          nice -n 19 python3 -c "import os, shutil; assert os.path.samefile(shutil.which('rsync'), '/usr/bin/rsync')"
+          nice -n 19 rsync --version
+      - name: Install exact producer dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Tarball and source consumers with producer unavailable
+        run: nice -n 19 npm run test:package

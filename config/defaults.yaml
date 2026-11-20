@@ -1,0 +1,27 @@
+# Minimum observed silence before deterministic idle abort, including local commands.
+# Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
+stage_idle_timeout_ms: 600000
+
+# Only project/brief declarations bound validation time.
+# Unfinished executions retry this many times unless the project declares attempts.
+# Gates consume recorded results and never rerun the configured suite.
+validation_attempts: 3
+validation_concurrency: 1
+validation_priority: 19
+
+# Scheduler progress is published on its own loop; an independent process
+# warns when a live, identity-bound scheduler stops advancing it.
+scheduler_heartbeat_interval_ms: 2000
+scheduler_stall_threshold_ms: 120000
+scheduler_stall_observer_poll_ms: 5000
+# Runtime resolution is read-only: one installed CLI wins; with both installed,
+# Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
+adapter: auto
+# Legacy input retained for configuration compatibility. Conversation reuse is
+# disabled, including opt-in paths: the ledger and diff carry retained facts.
+session_reuse: false
+# Model/effort: explicit role or engine value > adapter user settings read at
+# invocation time > CLI built-in default. Codex reads config.toml; Claude reads
+# only model/effort from settings.json while keeping other settings isolated.
+model: default
+reasoning_effort: default

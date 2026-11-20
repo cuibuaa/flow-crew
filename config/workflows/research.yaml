@@ -1,0 +1,10 @@
+name: research
+description: >
+  Frozen project instrument loop. The versioned declaration constructs the author
+  and optional project review. The instrument owns verdicts and reports.
+stages:
+  - id: produce
+    role: coder
+    scope: []
+    prompt_template: The versioned research declaration supplies the active author instruction.
+    artifact_contract: {version: 1, produces: [], reads: []}

@@ -1,0 +1,56 @@
+node_modules
+dist
+.fc/
+*.log
+
+# Skill install artifacts — canonical source is skills/, these are local installs
+.claude/
+.codex/
+.tmp_*
+NUL
+npm-debug.log*
+coverage/
+.vitest/
+test-results/
+ui_mocks/
+playwright.config.ts
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.tsbuildinfo
+ui/*.d.ts.map
+tests/
+ui/tests/
+design/*
+!design/atom-architecture.md
+!design/autonomous-loop.md
+op_*.sh
+eval.sh
+scripts/__pycache__/
+__pycache__/
+*.pyc
+
+# Internal self-development governance tooling — verifies flow-crew's own
+# delivery process against itself. Genuinely useful locally; out of place in
+# a repo whose public surface is meant for using flow-crew, not developing it.
+config/delivery-policy.json
+config/defect-definition-index.json
+scripts/check-delivery-truth-table.mjs
+scripts/check-m3-control-boundaries.mjs
+spec/delivery-truth-table.test.ts
+
+# Operator-local vitest config: names the machine-private verification tree, never published.
+vitest.local.config.ts
+.cache/
+
+# Disposable local trial repositories and receipts.
+tmp/
+dist-monitor/
+dist-rewrite/
+
+# Local working notes and task reports (never published)
+/docs/

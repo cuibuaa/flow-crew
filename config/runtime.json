@@ -1,0 +1,25 @@
+{
+  "roles": [
+    {
+      "id": "plan",
+      "description": "plan role",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    },
+    {
+      "id": "work",
+      "description": "work role",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    },
+    {
+      "id": "gate",
+      "description": "gate role",
+      "backend": "codex",
+      "model": "default",
+      "effort": "default"
+    }
+  ]
+}

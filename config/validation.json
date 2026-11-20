@@ -1,0 +1,44 @@
+{
+  "timeoutMs": 1800000,
+  "commands": {
+    "build": {
+      "command": "npm",
+      "args": [
+        "run",
+        "build"
+      ]
+    },
+    "test": {
+      "command": "npm",
+      "args": [
+        "run",
+        "test",
+        "--",
+        "--reporter=default",
+        "--reporter=./config/validation-reporter.ts",
+        "--outputFile.json=.cache/validation-tests.json"
+      ],
+      "report": {
+        "format": "vitest-json",
+        "path": ".cache/validation-tests.json"
+      },
+      "rerun": {
+        "command": "/bin/sh",
+        "args": [
+          "-ec",
+          "nice -n 19 npm run build; nice -n 19 node node_modules/vitest/vitest.mjs run \"$@\" --reporter=default --reporter=./config/validation-reporter.ts --outputFile.json=.cache/validation-tests.json",
+          "validation-rerun",
+          "{files}"
+        ],
+        "timeoutMs": 10800000
+      }
+    },
+    "lint": {
+      "command": "npm",
+      "args": [
+        "run",
+        "lint"
+      ]
+    }
+  }
+}

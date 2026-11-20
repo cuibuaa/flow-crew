@@ -1,0 +1,1568 @@
+# Release history
+
+Entries below describe the versions in which they were written. Commands, defaults and
+features in older entries are historical; use the [current CLI](guide/cli.md) and
+[configuration](guide/configuration.md) for operation. Historical measurements, anecdotes
+and publication claims below were not independently reproduced in this overhaul; they are
+retained as reported release history, not current guarantees or benchmark evidence.
+
+# Changelog
+
+## [0.12.0] - 2026-11-19
+
+### Added
+
+- Optional command `dependsOn` paths let delivery reuse passing results when repairs leave those project dependencies unchanged, with the source shown in evidence and status.
+- A required command that exits non-zero at the delivery gate is run once on the run's base tree. If it fails there too, the gate records basis `pre-existing` (shown in status) and the failure does not block acceptance; otherwise the basis is `introduced` and it blocks. See the [brief contract](guide/brief-contract.md#required-commands-that-already-fail-on-the-base).
+- Optional brief field `decompose: true` starts the run with a planner stage; without it every run uses a fixed author, gate and repair graph.
+- Two runnable research example briefs, a positive case and a negative control, checked by the test suite. See [examples](examples/README.md#research-briefs).
+- Brief-contract lessons: prove each claimed visual difference with paired crops of the product and the mock, and keep the data that decides whether a research result is adopted out of the run's reach.
+
+### Changed
+
+- **Thin-engine rewrite.** The old scheduler, daemon and React control dashboard are
+  replaced by a small engine with strict brief/plan/answer contracts, one SQLite journal,
+  per-run project copies, independent review and retained command evidence. The package
+  executable is now `dist-rewrite/cli.js`.
+- **One public dashboard entry: `flowcrew monitor`.** It prints a URL and serves GET only,
+  by default at `http://127.0.0.1:8795`, using the CLI's selected store. `--port N`,
+  `--host H` and repeated `--store-root DIR` select the listener and stores. The old
+  standalone monitor CLI is removed; packaged consumers use `flowcrew monitor` too.
+  The page shows Needs you / Running / Ended counts, one stage time track per run,
+  current stage, tries, review results, checkpoints and stop reasons. Act in the owning
+  Claude Code or Codex session; the page cannot change runs.
+- **Status files are v4.** `runs/<run-id>/status.json` contains journal facts; public
+  readers apply one shared read-only controller/stage availability view. Titles,
+  stage segments and summaries, command progress, checkpoints and resume-refusal causes
+  are retained when available. Historical v2/v3 displayed snapshots remain readable;
+  unsupported development journal-only v3 files are not a migration format. Missing
+  historical facts remain absent. A dead controller is interrupted, not silently resumed.
+- **Independent runtime copies and explicit recovery.** Each new run keeps its own built
+  runtime and production dependencies; upgrades affect new runs. After a host restart,
+  inspect status and explicitly resume using the original copy. Recorded process-group
+  closure and cleanup attention stay visible even on terminal runs.
+- **Sandbox removed.** Authors, providers and declared commands have the OS account's
+  ordinary rights. Separate project copies, frozen-input observations, checkpoints and
+  independent review replace the engine's confinement mechanisms as accountability
+  tools; they do not enforce OS security. Processes outside the recorded closure
+  guarantee and remote effects require workload-owned cleanup.
+  See [execution boundaries](guide/operations.md#platform-boundaries).
+- **Declarations replace inferred policy.** Briefs declare criteria, inputs, outputs,
+  exact argv/env commands, result labels and `allowBlocked`. Required commands must
+  complete successfully at the delivery gate, retain applicable passing evidence
+  for unchanged declared dependencies, or fail identically on the unmodified base. Setup checks declarations/settings without executing any
+  declared command. Research-specific engine policy and artifact contracts give way to
+  ordinary criteria, declared evaluators, outputs and independent gate evidence.
+- **One progress backstop replaces execution budgets.** Three consecutive gate rejections
+  (counting the one that last set the best pass count), or four failures without a
+  completion, pause while retaining work. The former engine iteration,
+  stage/idle and retry budgets are retired. Provider context exhaustion remains native;
+  optional `commands[].durationMs` limits that command alone. See [configuration](guide/configuration.md).
+- **State moves to the platform state directory.** Default: `$XDG_STATE_HOME/flowcrew`
+  or `$HOME/.local/state/flowcrew`, containing `state.sqlite` and `store/`. `FC_HOME`
+  overrides the state directory and default store; `FLOWCREW_STORE_ROOT` overrides the
+  store independently. The store contains `runs/`, `pins/`, `work/` and, after `land`,
+  `deliveries/`. `FLOWCREW_RUNTIME_ROOT` selects the installation for new runs.
+
+### Migration
+
+This is a CLI, brief, configuration and storage break from 0.11.0. There are no legacy
+command aliases or automatic imports of the old store. Preserve old results and settle
+old work with the old installation before switching; keep old state separate. Historical
+v2/v3 **rewrite status snapshots** are readable, but that does not make 0.11.0 engine
+records resumable. The old default was `$HOME/.fc`; an existing `FC_HOME` retains its
+literal directory selection, so choose a fresh directory for the new engine.
+
+Rebuild and relink the CLI, reinstall skills with `./skills/install.sh`, and check
+`which flowcrew` and `flowcrew --help`. The installer copies linked guides from their
+single source into skill references. Review the host-rights boundary and approve the
+exact brief digest, source and start options before new work. Rewrite old briefs using
+the [current contract](guide/brief-contract.md), and replace YAML workflow/defaults
+configuration with `config/runtime.json` roles (or `--config <file>`).
+
+| Previous interface or retired rewrite mechanism | Replacement in 0.12.0 |
+|---|---|
+| `init`, `adapter` | Build/link the package, install skills; select roles in runtime JSON or use `start --backend` |
+| `quick`, `ship-preflight`, `rehearse`, `ship-setup` | Author with `/ship` (`$ship` in Codex), check `setup <brief>`, then `start <brief>`; setup executes no commands |
+| `plan-check` and YAML dynamic workflow dispatch | Typed plans checked by the engine; pending-plan changes through `guide <run-id> <text> --plan <file>` |
+| `start` as a dashboard server, `dashboard status`, `watch` | `monitor`; `start <brief>` now starts a run |
+| `list`, `state`, `events` | `status [<run-id>]`, monitor details and retained evidence; no public event-follow command |
+| `interrupt`, `task cancel`, `task resume`, `task retry` | `cancel <run-id>`, `resume <run-id>`; terminal work requires a new brief/run |
+| `task list`, `task show`, `task tail` and numeric task registry | Run IDs from `start`, `status [<run-id>]` and retained command streams |
+| `daemon start/serve/stop/restart/status/logs/deploy/hold/hold-status/continue` and RPC deployment holds | Per-run supervisor/runtime copy; manage installation upgrades outside the engine, inspect and explicitly resume after restart |
+| `inbox list/show/approve/deny` and execution approval requests | Approve the saved brief before launch in the coding-agent session; use `guide`, `cancel` or `resume` during work |
+| `doctor` and registry repair/compaction | `setup` for declarations/settings; actual launches report process failures; no registry maintenance substitute |
+| `audit-reality` and research-specific engine policy | Declare evaluator inputs, commands, criteria and result labels; independent review judges their evidence |
+| `export`, `prune`, `clean`, old `land --run ... --remove` | `land <run-id>` preserves the declared outputs and then deletes the run's project copy, runtime pin, work root and raw evidence; it takes no options. Archive any additional raw evidence yourself first |
+| `fc_tasks render/list/reconcile/create/update` and `session-push wake-check/wake/ack/list/bind-display/hook/statusline` | Optional packaged Claude session hook reads status files; CLI status works without a bound session; no promise of live delivery or equivalent ledger-edit API |
+| `version`, `--version` | Installed package metadata (for example `npm list -g flowcrew`); `--help` owns current syntax |
+| Campaign grouping/history registry | Operator-owned grouping and prior evidence declared as brief inputs |
+| `artifact_contract` and prose-derived obligations | Explicit brief `inputs`, `outputs`, `commands` and criteria |
+| `config/defaults.yaml` execution budgets and workflow selection | Runtime JSON roles, the progress backstop, and optional per-command `durationMs` |
+| Sandbox grants and provider-home/cache/device restrictions | Ordinary host rights plus observed content and independent review; use external OS controls when confinement is required |
+
+Retired `bounds`, `adapterInputLimitChars`, `sharedCaches`, `devices`, `providerHomes`
+and `commands[].unconfined` values are ignored with a parse advisory where documented;
+they grant no limit or permission. Remove them from new declarations. Other unknown
+keys still refuse. Recheck automation against current [exit codes](guide/cli.md#exits-and-storage):
+0 success, 1 conflict/refusal, 2 invalid input, 3 unavailable/unknown/in-progress.
+
+### Fixed before release
+
+- **Keep cancelled work.** `flowcrew land` retains the current declared outputs of
+  cancelled and failed runs and labels outputs that were not accepted unreviewed, without
+  requiring a safe checkpoint or usable runtime pin. A run that has not ended, including one
+  shown as interrupted, is refused until `flowcrew cancel` ends it. Missing or unreadable
+  outputs remain partial and nothing is deleted.
+- **Land preserves and reclaims in one step.** `flowcrew land <run-id>` preserves the declared
+  outputs under `deliveries/<run-id>/` and then deletes the project copy, runtime pin, work root
+  and raw evidence. It is not a read-only audit, and the former `--reclaim` flag is gone: `land`
+  takes no options. Status (`heldBytes`) and the dashboard show the space each ended run still
+  holds until it is landed, and the dashboard totals it as "held, not landed".
+- **Release resources after a terminal run.** Confirmed closure and capture release
+  external output paths so a new run in the same store can use them without land or
+  reclaim. Unknown closure or failed capture keeps the affected path held for inspection.
+- **Cancel closes child processes too.** Linux with a systemd user session uses a
+  cgroup; other hosts use the invocation's environment marker. Processes that clear
+  their environment can escape marker cleanup; unreadable environments remain unknown.
+  Receipts name the guarantee. Remote effects remain the workload's to clean up.
+- **A finished Claude invocation ends at its result.** The root `result` event ends the
+  invocation: stdin is closed, Claude gets 2 s to exit, then every process the invocation
+  started is closed. A tool left blocked (for example `cat` waiting on input) can no longer
+  keep an answered invocation open until the stage deadline. An exit inside the 2 s is
+  recorded as before. A guide counts as delivered only when Claude echoes it
+  (`--replay-user-messages`), and a result does not end the invocation while a written guide
+  is still unechoed: Claude runs another turn for it, and its result is the answer. At most one
+  guide message is in flight per invocation: guides accepted meanwhile wait and go out together as one
+  message after the echo, so delivery never depends on how Claude merges queued messages.
+- **Deliver accepted guidance.** A running Claude author receives it through Claude Code's
+  streaming input; a Codex author receives it at its next invocation. Guidance is never
+  silently dropped, and no stage passes review while an accepted guide is undelivered. A guide
+  shows `pending` until the invocation that received it ends, then `delivered`.
+- **Show live activity and quiet notices.** The dashboard shows each author's tool
+  activity and posts one notice per quiet spell when a tool or command has shown no
+  observed progress for 10 minutes. The notice never stops or retries anything. Runs paused at their limit
+  now say “Paused at run limit”.
+- **A reviewer's byproducts no longer fail accepted work.** Plan and gate stages never
+  deliver bytes: when their tools leave files in the project (for example Python
+  bytecode from a test run), the engine restores the tree they reviewed, keeps the
+  verdict, and the run completes with exactly that tree. Previously such a run ended
+  `failed` / `isolation_refused`.
+- **`setup` previews what `start` runs.** `setup` accepts `--backend`, like `start`, so
+  its role lines show the backend the same arguments would start.
+
+### Known limitations
+
+- The Codex adapter does not accept mid-turn steering, so guidance waits for the next author
+  invocation.
+- The macOS process-closure path has not yet been verified on real macOS. The same
+  fallback code is tested on Linux; marker cleanup remains best effort.
+
+## [0.11.0] - 2026-10-23
+
+This release removes retired control mechanisms, consolidates execution and settlement decisions,
+and delivers wrap-up requests to the launching session.
+
+### Migration
+
+**Upgrade the CLI and daemon together.** RPC success replies are now `{ok:true,result}`;
+refusals are `{ok:false,code,message}`. RPC commands `deploy-hold`, `deploy-status` and
+`deploy-continue` become `hold`, `hold-status` and `continue`; `cancel-run` becomes `cancel`
+with `runId`, and `cancel-status` is removed. The renamed commands have no compatibility aliases.
+
+The first deploy across this boundary must use separate CLI invocations from the deployment
+checkout, with the same `FC_HOME` and socket throughout:
+
+1. `flowcrew daemon hold` with the **old CLI**; proceed only on exit 0 and `ready: true`.
+2. `flowcrew daemon stop` with the **old CLI**; wait for the old daemon/socket to retire.
+3. `npm run build` in that checkout while the daemon is stopped.
+4. `flowcrew daemon start` with the **new CLI**.
+5. `flowcrew daemon continue` with the **new CLI**; verify the hold was released.
+
+The old CLI's `daemon deploy` cannot read the new daemon's replies. Cancel requests from a
+new client to a still-running old daemon fail as not-found until the restart. The durable hold
+survives the stop/build/start boundary.
+
+- **Socket selection is explicit.** `FLOWCREW_DAEMON_SOCKET` is ignored, and daemon/task
+  `--port` is removed. Use `FC_HOME` for the state root and default socket, or `--socket`
+  for an explicit endpoint. Validation no longer installs the retired socket-environment fuse;
+  use an isolated `FC_HOME` for private state.
+- **Engine budget keys are renamed.** In the installed engine's `config/defaults.yaml`, change
+  `default_stage_idle_timeout_ms` to `stage_idle_timeout_ms`, `default_validation_timeout_ms`
+  to `validation_timeout_ms`, `default_max_iterations` to `max_iterations`,
+  `default_gate_retry_loops` to `gate_retry_loops`, `default_stage_technical_retries` to
+  `stage_technical_retries`, and `default_plan_stage_retries` to `plan_stage_retries`.
+  `default_timeout_ms` is removed; only an author-declared `stage_duration_ms` supplies a stage allowance. Remove custom role-template uses of `{default_timeout_ms}`;
+  that substitution is gone. The shipped planner file is now `config/workflows/planner.yaml`;
+  `--workflow default` and saved default-workflow names still resolve to it.
+- **Task record readers use canonical launch settings.** `launch_options` replaces `launch_args`,
+  `max_attempts` replaces `max_retries`, and one-based `launch` replaces zero-based `launch_seq`.
+  `attempt` still counts consumed launch budget. Legacy registration fields and records are
+  normalized on read. Read bound run outcomes from `run.{status,failureReason,completedAt}`
+  separately from the task's launch-control `status`.
+- **Planner scope is an estimate.** It no longer grants or forbids project writes, and authors
+  sharing a project execute serially. Scope-revision requests no longer suspend execution or
+  grant paths. Remove `live_constraint_exempt_patterns`, `live_constraint_fallback_scan_ms`
+  and `live_constraint_monitor_deadline_ms`; Git ignore rules own disposable-output inventory.
+  Declare evidence that must remain unchanged as frozen inputs.
+- **Declare inputs and freezing in frontmatter.** Prose paths no longer declare inputs or
+  authorize reuse of existing outputs. Use `inputs` and boolean `frozen: true` on structured
+  entries for immutable files or trees; ordinary inputs remain mutable. Preservation prose,
+  headings and role text do not enforce freezing. Exact declared outputs take precedence.
+  Setup no longer verifies row-count, date-span, file-count or SHA-256 assertions inferred from
+  input annotations; put required assertions in explicit validation or declared reality checks.
+- **Retired commands and options are removed.** Replace `campaign status|pending|review` and
+  `brief head|log|diff|rollback` integrations; campaign brief/diff/review endpoints and the brief
+  patch workflow are gone. Campaign grouping and history remain. Remove the preflight option
+  `ship-preflight --no-baseline` and `events --include-maintenance`; preflight collects facts without
+  running validation. New artifact contracts must omit `artifact_contract.replays`; historical
+  replay metadata remains readable but is not executed.
+- **Versioned-JSON check failures are no longer demoted.** Fix checks that assume the wrong
+  JSON shape, or explicitly declare an advisory check when intended. A recognized missing
+  command at exit 127 still records an advisory environment failure.
+- **Program and gate controls are retired.** The `program` frontmatter block no longer enforces
+  `max_phases`, `max_wall_hours`, `stop_file` or `halt_after_consecutive_no_improvement`, or
+  updates the phase ledger. Move those controls to operator tooling. Gate controls for
+  `remedyFeasibility` and per-criterion `checkAssessments`/`rulingTreatments` are removed;
+  state required evidence in the brief and use ordinary guidance.
+  Research supports only `greedy_stack`: replace `best_of_n` or `replace_if_better` only when
+  cumulative stacking is intended, otherwise keep that policy outside the engine.
+- **Lifecycle readers must use the current vocabulary.** New cancellation records use
+  `cancelled`; archived `stopped` remains a read alias. `awaiting_approval` and `phase_complete`
+  are no longer known run statuses; inspect historical records before attempting continuation.
+  Resume no longer repairs unsettled legacy cancelled attempts during admission: recover their
+  execution records before resuming, or request a fresh run after settlement.
+- **A continuation refusal keeps the deployment hold active.** Any incompatible held run keeps
+  compatible peers parked too. Resolve or explicitly cancel the refused work, then retry
+  `daemon continue` with the same state root and socket.
+- **Record consumers must use retained sources.** New runs no longer write `progress.md`,
+  per-stage `input.md`, `trace.jsonl` or duplicate deadline-event logs.
+  Use `summary.md`, immutable invocation records, state and the canonical event feed. Retired
+  scope, lease, supervisor, command-start/completion and synthetic artifact lifecycle events
+  are no longer emitted.
+  Markdown task-summary PASS/FAIL labels no longer determine a task's verdict; the run does.
+- **Scratch cleanup no longer compacts historical workspaces.** Put disposable compiler output
+  and caches in invocation `$TMPDIR`, and copy final evidence to declared locations. Daemon
+  startup no longer sweeps retained run history; explicit `prune --apply` retires invocation
+  scratch, while historical stage build/scratch trees remain durable history.
+- **Supplied numbers are explicit.** `supplied_numbers` must be an array of finite YAML numbers.
+  A nonempty array requires both `within_expected_range` and
+  `method_was_not_adjusted_to_match_expectation` as positive result requirements. Prose-only
+  expectations now warn; malformed declarations or missing declared requirements make brief
+  preflight report a failure and rehearsal refuse. Malformed YAML is refused before setup
+  or launch; fix its syntax rather than relying on a partial interpretation.
+- **Scripts must honor shared parsing and exits.** Unknown options, duplicate value options
+  and malformed counts refuse with exit 1. Ordinary commands use 0 for completion, 1 for known
+  failure/refusal and 2 for an unknown outcome that may have taken effect; inspect state before
+  retrying after 2. Status probes retain their fresh/unavailable/stale contract, and session-push
+  hook/wake uses its frontend blocking contract. See the [CLI reference](guide/cli.md).
+
+### Changed
+
+- **One owner for each execution decision.** Attempt write evidence, content settlement,
+  gate-group results, run conclusions, retries and native usage accounting share their persisted
+  decisions instead of independently recomputing them. Gates settle after their complete stage
+  group and validation receipt; repair and terminal choices use that settled result.
+- **Setup baselines can be reused by content identity.** Matching project/base content,
+  declared inputs, validation commands, dependency preparation, executables, effective command
+  environments and timeout can reuse a measured baseline across briefs, targets and caller
+  sessions. Unknown identities, corrupt records and unmeasured results run validation again;
+  live gate validation still prepares dependencies from current lockfiles.
+- **Wrap-up returns to the launcher.** Foreground and background launches record their session
+  address. Durable session-push events request verification, preservation and explicit wrap-up
+  through Claude's hook wake/session inbox or Codex's queue, with retries and notifier fallback.
+  Delivery receipts, event ACK and ledger completion remain separate; terminal status closes
+  none of those obligations. Reinstall the shipped integrations and check `flowcrew doctor`;
+  see [launch-side delivery](guide/session-push.md).
+- **CLI help follows the parser.** One command grammar supplies argument validation and help;
+  `--help` and `-h` return before engine operations, and usage failures include the relevant
+  synopsis. Equivalent value spellings and command exits follow the shared contract.
+- **Daemon startup pins an immutable runtime.** Portable backend/UI build files are snapshotted
+  with configuration at startup, so later imports and scheduler children keep the loaded
+  generation. Startup verifies its own child, socket and RPC identity; `serve` binds before
+  registry maintenance. Deployment uses the durable hold without a separate transaction receipt.
+- **Landing can archive before reclamation.** `land --archive` copies unique outputs and the
+  run store with SHA-256 manifests and verifies both copies. Reclamation still requires
+  `--remove` and the existing non-force removal gate. Ordinary audits remain read-only.
+
+### Removed
+
+- Retired runtime negotiation, resource leases, replay machinery, campaign directories and
+  brief patching, prose implementation lint, setup population collectors, redundant planner
+  admission/fingerprint checks, model-supervisor readers and systemd fallback mirrors.
+- Duplicate run projections, command lifecycle event channels, workspace citation scans and
+  historical startup retention scans. Invocation scratch and explicit preservation own their
+  respective lifetimes.
+
+### Fixed
+
+- The daemon replaces a stale Unix socket left by an unclean exit while refusing a second live
+  listener. Process-bound locks publish atomically, startup reaps a failed child, and tick
+  failures are recorded without escaping the daemon loop.
+- Bound task failures retain their public run outcome after lifecycle unification. Explicit
+  continuation selects the latest bound task and preserves completed work, remaining budgets
+  and genuine approval requirements.
+- Frozen-input restoration preserves admitted bytes and topology, refuses outward ancestor
+  substitutions and retains unknown preimages without treating them as deletion authority.
+- Product review and research publication use retained content and attempt evidence, including
+  same-value publication, without accepting unrelated equal-content copies or stale results.
+- Provider retries are limited to temporary failures; authentication and permanent refusals
+  keep their failure kind, and native session recovery remains owned by the adapter.
+- Validation recognizes failed exits against green baselines and retains dependency-preparation
+  failures with their direct exit codes. Baseline reuse recovers from missing executables and
+  corrupt cache entries without reusing unmeasured results.
+- Brief metadata and dispatch declarations share refusal diagnostics. Persistent plan retries
+  retain admission evidence, and ordinary prose numbers no longer trigger supplied-number
+  refusals without a declaration.
+
+## [0.10.2] - 2026-10-18
+
+Ordinary tasks run a fixed review workflow, stage races are gone, and in-flight runs survive an
+engine deploy.
+
+### Migration
+
+- **Stage races are removed.** Every authoring stage runs one author. New structured competition
+  requests are refused; historical plans, ownership markers, candidate artifacts and accepted gate
+  provenance remain readable.
+
+### Changed
+
+- **Fixed review workflow by default.** Ordinary tasks run author → review → repair → re-review
+  instead of planner decomposition, and fixed workflows receive the full execution and review
+  contracts. Repair waves respect their dependencies, keep pending slices and the existing round
+  budget, and refresh scope-guard preimages each wave.
+- **Deploy while tasks are in flight.** `daemon hold` waits for the current stage group, the engine
+  can be rebuilt and restarted, and held runs continue.
+- **Stage budgets** deliver wrap-up guidance through the shared invocation control path on both
+  adapters. Cooperative and bounded forced stops keep admitted work and a done/remaining handoff for
+  the next finite iteration; independent gates receive their own budgets.
+- **Claude adapter model selection.** A machine-local `~/.config/flowcrew/claude.json` sets the
+  default model; shipped roles inherit the backend's model and effort settings at invocation time.
+- **Smaller stage outputs.** Gates read the winner's evidence and receipts instead of re-running
+  checks; FlowCrew no longer adds its own report sections.
+
+### Fixed
+
+- Research rounds keep completed static work across iteration resets, ingest reviewed snapshots and
+  record every candidate settlement before completion.
+- Cancelled and re-pended stages stay continuable; disagreeing ledgers are preserved on cancellation;
+  legacy stopped runs can continue.
+- Settled run workspaces are compacted while evidence is preserved, and scratch cleanup is bounded.
+- Rollback baselines follow an admitted writer back to its batch preimage.
+- Verification duties are admitted and required work is settled before terminal outcomes; terminal
+  product review settles from executed evidence.
+
+## [0.10.1] - 2026-10-14
+
+The Claude adapter now does what the Codex adapter does, and a few engine records that
+were lost or missing are kept.
+
+### Changed
+
+- **Claude adapter parity with Codex.** A stage on the Claude adapter keeps its native
+  session: retries, repairs and corrections resume it instead of resending the whole
+  prompt, and session ownership and cleanup use the same path as Codex. Results honour
+  the stage's output schema; timeouts and cancellation keep their exit status after a
+  result; errors reported after progress are classified and kept in the output; token,
+  cache and cost usage is read from the native events in the same shape as Codex. An
+  empty role tool list means read-only inspection on both adapters. User settings, MCP
+  servers and hooks do not reach stages.
+- The Claude adapter uses the operator's normal login. It no longer moves the CLI to a
+  private configuration directory, which left it without credentials.
+- An authentication failure is classified for both adapters and is not retried.
+
+### Fixed
+
+- Each execution attempt keeps its own native stage log. A later attempt, repair or gate
+  re-evaluation no longer deletes the earlier attempt's stream, so its result and usage
+  stay readable. Runs written by older releases are still read.
+- Every attempt publishes its wall-clock deadline in the stage status, including retries
+  and resumed runs.
+- A file published by rename could be adopted as trusted state after a child process had
+  replaced or deleted it. The integrity check now verifies the published bytes instead.
+- Test suite: removed duplicate and timing-dependent specs; the suite runs about a quarter
+  faster.
+
+## [0.10.0] - 2026-10-14
+
+This release removes more than it adds: about 26,000 fewer lines across 661 files. The
+engine keeps one owner for each decision and drops restrictions that only refused valid
+work. Several interfaces changed; read the migration notes before upgrading.
+
+### Migration — breaking changes
+
+- **Model stage supervision is removed**, together with its launch flags. `quick --supervise`
+  is now an unknown option. The deterministic idle watchdog and immutable attempt deadlines
+  remain; portable process supervision is separate.
+- **Engine configuration comes only from the package.** Defaults, roles and workflows are
+  read from the installed package's `config/` directory; a target project's `config/` no
+  longer overrides them. Choose a campaign with `--campaign` (default: the repository
+  basename). Task-specific `planner_policies` belong in brief frontmatter.
+- **Dedicated campaign roles are removed** (`campaign_scout`, `campaign_planner`).
+- **Run history is `run-history.jsonl`.** Records no longer carry a format version; the
+  version lives in the run's reference to the file. Runs written by older releases are still
+  read through that reference.
+- **The `ship` skill installs as a directory.** `install.sh` installs `SKILL.md` and a
+  `references/` bundle of the guides it cites, so an installed skill works offline and stays
+  consistent with the engine it shipped with. Remove an old single-file `ship.md` command if
+  one is left over.
+
+### Changed
+
+- Duplicate admission, settlement and approval checks were consolidated or removed; a single
+  shared decision now covers artifact safety, and unnecessary human-approval parks are gone.
+- Brief validation declarations replace inferred validation commands when present.
+- `ship` briefs for minimal, modular rewrites require production-entrypoint scope, a
+  reachability inventory, base/final behaviour parity (including failure paths and old
+  on-disk records), runtime discovery, and a design account in the report, while leaving
+  the implementation to the run.
+- The test suite fails when a tracked file matches the ignore rules, or when tracked text
+  contains a user-home path or a run identifier.
+
+## [0.9.2] - 2026-09-26
+
+### Changed — supervisor review threshold defaults to the shipped value
+
+`supervisor.min_delta_bytes` now defaults to 98304 in the engine, the same value
+`config/defaults.yaml` ships. A project's configuration travels with its branch,
+so a project that omitted the key, or whose branch predated 0.9.1's value, still
+reviewed at the former engine default of 4096. Measured over the runs of
+2026-09-24 to 2026-09-26, FlowCrew's own runs at 98304 made about a quarter of
+the supervisor calls per run hour and about a third of the uncached supervisor
+input of its runs at 4096; runs in two other projects made about a third of the
+calls and half the uncached input. These are observational comparisons across
+different tasks. A project that sets the key explicitly is unaffected.
+
+## [0.9.1] - 2026-09-26
+
+### Fixed — places where the engine said one thing would happen and did another
+
+Three runs stopped emitting events for 35 to 100 minutes because two reads on the
+scheduler's own loop grew without bound: the approval monitor re-read a
+run-history file that had reached 168 MB, and the live guard re-hashed changed
+ignored content such as an 18 GB model directory on every scan. Both are bounded
+and off the loop, and an independent watcher now reports a scheduler whose
+heartbeat stops advancing. Live-constraint incidents are persisted in one append
+per scan with a shared scope-revision instruction stored once by digest; one scan
+of 12,888 paths had produced a 23 GB incident file and held the loop for minutes.
+
+An accepted scope revision's re-dispatched attempt keeps a required file the stage
+produced before acceptance. Plan retry no longer resubmits an identical refused
+proposal, and `task retry` starts the run it reports. The artifact contract
+resolves a bare filename that the prompt placed in the run directory against that
+directory. A stage that wrote nothing cannot receive incidents for files that
+existed before it started.
+
+Eight checks whose answer did not depend on what they were meant to check were
+tied back to it, among them adapter-capacity attribution: a stage that quotes
+"model is at capacity" is no longer recorded as an upstream failure. Supervisor
+GUIDE, direction ABORT and REPLAN must cite current ACTION evidence, and text a
+stage merely read cannot establish what it pursued. Validation deltas no longer
+merge "could not run" with a named test failure. The engine's own bookkeeping
+writes are no longer charged to stages, and ledger entries close where their work
+is accepted rather than where their run ends.
+
+### Changed — supervisor cadence
+
+`supervisor.min_delta_bytes` defaults to 98304, bounding content-triggered review
+to about one per three minutes of busy output. After a WAIT on an artifact event
+spanning at least two running stages and two changed paths, further such events
+wait for `routine_assessment_interval_ms`; replayed over seven recorded days this
+omits 281 of 8,633 assessment opportunities and keeps all 127 non-WAIT decisions
+at their original times. The configuration comments now describe what each
+supervisor key does, including that the per-iteration maximum is telemetry only.
+
+## [0.9.0] - 2026-09-20
+
+### Fixed — twenty-seven controls that judged from evidence they did not have
+
+A control deciding something about a run from evidence that does not support that
+decision, or enforcing a contract it never told the part that had to satisfy it.
+Twenty-five changed behaviour; two were measured and found not to be defects.
+
+`ship-setup` recorded each validation command's failure identity and labelled it
+`must_remain_green` or `no_regression_from_baseline`; `evaluateValidationDelta`
+implemented the comparison; three specs covered it; nothing in `src` called it. A
+QA stage, told nothing, invented "the suite must be green" on a project whose own
+recorded baseline is red with thirteen known failures. The baseline now reaches
+the gate, and a new failing identifier overturns an otherwise accepting verdict.
+
+Rollback no longer reads an unrecorded preimage as proof of absence. Provenance is
+`observed` or `unknown`, and `unknown` is not deletion authority — it produces a
+visible rollback failure. A path proven absent before the run is still removed.
+
+Research rounds are told the artifact contract before they work, including that
+the no-candidate discriminator is `outcome` and not `status`; a round already
+written the other way is normalised on ingestion with a durable repair record
+rather than refused after its work stage completed. Planners receive the declared
+terminal paths and the exact-one-owner rule. The rehearsal ship probe is the
+nearest crossing satisfying both the stop policy and the declared schema, so a
+brief declaring numeric bounds can be rehearsed at all.
+
+Also in this release: launch distinguishes missing, refused, invalid and ready
+setup state; declared outputs are archived at terminal commit; guidance reports
+envelope disposition instead of predicting consumption; an ambiguous cancellation
+is followed by one bounded observation; zero extracted criteria is an explicit
+refusal, ordered after the adapter check so a newcomer still sees the install
+command; impossible finite-domain condition literals are rejected at admission;
+engine-created run-root entries are classified before cleanup; one generated-path
+catalog supplies three policy projections; build freshness is content-addressed;
+research rounds are compared with the engine iteration limit; campaign health
+respects optimization direction; terminal failure summaries name the refusal that
+ended the run rather than a union across attempts; violation paths appear in the
+published event row; a stage's named output is checked rather than assumed; and an
+empty test population is no longer reported as a matched one.
+
+Each item carries a before/after replay and a case that must still be judged the
+old way. The independent verification gate rejected this work three times across
+two rounds before accepting it.
+
+### Engine state truthfulness
+
+### Fixed — generated caches and honest plans no longer stop guarded work
+
+The live constraint guard now exempts narrowly configured, untracked tool-cache
+output while preserving tracked-first rollback for every real project file. Its
+fallback and clean-scan deadline are configurable, cache trees are pruned from
+fallback walks, and deadline events carry the last scan's duration and file
+count. Existing process-group cancellation and symlink-safe walking are covered
+by regressions.
+
+Scope admission now treats literal parent scopes as directory trees and proves
+ordinary wildcard scopes disjoint when a later aligned literal segment differs;
+ambiguous glob languages remain serialized. Write authorization now evaluates
+the declared glob itself, so concurrency does not grant either stage the shared
+literal-prefix tree, and a batch-first preimage keeps cross-scope writes
+restorable after peer observation. Temporal research-test failures are charged
+only to the attempt with reliable structured authorship, and an exhausted
+rejected research round now escalates or parks instead of advancing; its event,
+artifact, and approval target name only non-passing structured criteria when the
+verdict supplies them.
+
+Ship setup gives `git worktree add` a configurable 30-minute default, periodic
+progress, and ownership-proved cleanup of a failed creation. It reserves the
+target exclusively, atomically creates the branch ref, and compare-deletes only
+that exact ref/object pair, leaving concurrently created or changed resources
+untouched. Only frontmatter `inputs:` entries can block setup or preflight;
+missing source inputs are also checked on the selected base ref, while prose path
+mentions are warnings.
+
+### Fixed — parallel work now runs in parallel without hiding serialization
+
+Read-only stages no longer take a writer lease, and stages whose declared scopes are
+provably disjoint receive separate batch-scoped leases. Potentially overlapping work
+remains serialized, but dispatch admission and run events now explain that decision;
+`task show` also reports stages currently waiting for a writer lease. Live-guard
+restoration and violation attribution are unchanged.
+
+### Fixed — control requests suspend the attempt that made them
+
+An accepted scope expansion now suspends a successful attempt and re-dispatches the
+same stage with its durable effective scope. Approval artifacts are watched while every
+ordinary, gate, and repair stage runs: unresolved requests park within one polling
+heartbeat, suspend active attempts, and resume by re-running the requesting stage.
+Operators may explicitly add project-and-action approval rules for otherwise unknown
+risk, with the stable rule id recorded on automatic decisions. A live replacement
+scheduler now takes precedence over the terminal status of the unit it replaced.
+
+### Fixed — registry growth no longer blinds task links
+
+The daemon invokes the existing backup-first registry compactor after growth thresholds
+are crossed and emits a maintenance event; the shared registry lock keeps concurrent
+appends intact. Task-link lookup keeps its bounded tail fast path but performs an exact
+forward scan for requested ids that fell outside it. Operational reasons now carry and
+display their stage, attempt, time, and whether they are historical.
+
+### Fixed — guidance reaches worker invocation boundaries
+
+Workers consume newly addressed guidance at every attempt start and before every adapter
+invocation, recording both delivery events and `guidance_consumed.md`. `flowcrew guide`
+accepts `--stage <id>` for direct, audited delivery while preserving supervisor routing
+for unaddressed messages.
+
+### Fixed — live commands can be stopped and gate remedies must be costed
+
+Guidance is now checked at typed command start and completion boundaries as well as
+attempt/adapter boundaries. A note written while one long command runs is recorded in
+`guidance_consumed.md`, ends only the current adapter invocation when the command reaches
+its boundary, and is supplied to a same-attempt continuation. Explicit GNU-style command
+timeouts that exceed the remaining attempt budget emit a projection with the command,
+timeout, remaining budget, and shortfall, then give those facts to the stage instead of
+silently burning past the available time.
+
+`flowcrew interrupt --run <run-id> --stage <stage-id> "reason"` now publishes a one-shot,
+attempt-and-command-bound operator interrupt after durably writing the reason as guidance.
+The resulting control path is distinct from crashes, supervisor aborts, and timeouts;
+repeating the normalized command is reported. New event types are
+`stage_command_started`, `stage_command_completed`, `command_timeout_projection`,
+`stage_command_interrupt_requested`, `stage_command_interrupted`, and
+`interrupted_command_repeated`. Command events carry stage/attempt/invocation and command
+identity; projections add `commandTimeoutMs`, `remainingBudgetMs`, and `shortfallMs`;
+interrupt events add request/guidance identity. `guidance_delivery_checked` adds
+`tool_call_start`, `tool_call_completion`, and `operator_interrupt` boundaries plus optional
+command identity, while `guidance_written` now records `guidanceId` and mapped `criteria`.
+
+Operator notes that unambiguously name canonical criteria now follow those criteria into
+later evaluations. A failing verdict must quote and reason about each matching ruling.
+Quantified sample/block/iteration remedies carry known-or-unknown cost evidence, with known
+cost arithmetic checked against an attributed completed attempt and the target stage budget.
+Structured cost discovery traverses JSON arrays and accepts array-indexed JSON Pointer
+citations. The target must be a stage admitted to the run (a pending stage uses the project
+default budget), and the verdict prose must include the computed numeric wall time rather than
+only calling the remedy feasible or infeasible.
+Stage-authored checks with reliable criterion attribution must be assessed against matching
+rulings; declared conflicts emit `criterion_check_conflict` naming the check, author,
+criterion, and guidance through `criterionId`, `checkPath`, `authorStageId`, and `guidanceId`.
+No new configuration keys were added.
+
+Directory-wide write scopes such as `.cache/**` and `dist/**` now include hidden descendants,
+including build manifests and atomic temporary files. Scope-revision preimage checks inspect
+only paths matched by the requested glob, so an already-authorized sibling write cannot make
+an unrelated dotfile capability impossible to approve. A generated literal already contained
+by a stable declared tree is returned in `alreadyAuthorizedPaths` without widening effective
+scope or requiring an impossible rotating-literal preimage.
+
+### Known — rollback must not treat an uncaptured ignored path as absent
+
+Run `example-run-1` exposed a separate guard defect while verifying these
+controls: a rollback sweep deleted 379 pre-existing files across nine ignored dependency trees
+after treating uncaptured preimages as absent, then stopped partway and left the installation
+unusable. The dependency trees were restored from a byte-matching install for this run; the
+guard itself is deliberately unchanged here. A follow-up must permit delete-on-rollback only
+for a path whose absent preimage was explicitly captured, refuse deletion when capture was
+unavailable, and record each path already changed if a rollback sweep aborts.
+
+### Fixed — clean worktree setup and repeatable staging builds
+
+Incremental TypeScript state now shares the temporary build generation's lifecycle, so
+an absent staging directory cannot yield a false up-to-date build. Ship setup prepares
+missing npm dependencies with an audited `npm ci` when a lockfile exists, can safely
+retry the same worktree, and resolves TypeScript and Vitest through Node's standard
+module lookup instead of requiring a worktree-local `node_modules` path.
+
+## [0.8.6] - 2026-09-04
+
+Two engine fixes found by real runs the day 0.8.5 went live, and the loop change the 0.8.5
+review pointed at: the engine now closes its own loop. Every change carries a replay that fails
+on 0.8.5 and passes now. No new brief syntax.
+
+### Fixed — a prompt too large for a command line
+
+Four parallel stages of one run failed within a second of starting with `spawn E2BIG`. Their
+assembled prompts were 372 KB, 370 KB of it predecessor context the engine had injected, and
+every adapter passed the whole prompt as a single command-line argument, above the Linux
+per-argument limit of 128 KiB. The prompt now reaches the child through stdin on every shipped
+adapter, spawn errors keep their diagnostics, and the context injected from a predecessor stage
+is bounded per dependency with the omitted material reachable by path. Separately, the
+`node_modules` link that `ship-setup` places in a target worktree is now ignored as a link as
+well as a directory, after a commit made in a worktree carried the link into a merge.
+
+### Changed — the loop closes on its own
+
+Four behaviours observed across a week of real runs are replaced by properties.
+
+A write outside the effective scope, to a protected path, or to an existing test the scope
+does not list, is detected during the attempt, the offending path alone is restored, the
+child is terminated and reinvoked inside the same attempt with the scope-revision
+instruction the post-attempt audit would have given; the audit stays as the backstop. On the
+recorded incident, restore latency is about 25 ms where the write had previously survived a
+3.2-hour attempt.
+
+The supervisor assesses only on deterministic events — a stage transition, a gate verdict, an
+artifact change above a stated size, a deadline within a margin, a guidance or scope request,
+an adapter failure — and every verdict records the event that triggered it; a tick with no
+event makes no model call. Elapsed time is the attempt's, not the stage's; the two false
+ABORTs on the evidence run no longer occur.
+
+`status`, `watch`, and `task show` render the same six measured rows — the training dose
+against the brief's floor and its trend, first-plan admission, supervisor rejections and how
+many were overturned, engine overhead per attempt, registry and log growth — each with its
+threshold, provenance, and crossing state. A crossing is marked, never acted on.
+
+A campaign declares its goal, yardstick, and budget once. When a run ends short of the goal,
+the engine derives the successor brief from the terminal artifact, the guidance history, and
+the declined items — goal and yardstick unchanged, guidances promoted to constraints, a
+criterion that never failed while its quantity stayed flat converted into a graded floor —
+records the diff, passes preflight, rehearsal, and admission, and launches; the campaign stops
+at its budget or its no-progress rule with an escalation.
+
+### Fixed — the live guard acts on content, not timestamps
+
+The first research run on the new guard, on a project mounted over 9p, saw a read-only
+scouting stage with an empty scope terminated twice: the guard's fallback trigger read a
+newer timestamp as a write and reported nearly every repository file as reverted, and a failed
+restore left six tracked files deleted. A write is now a content change, live and in the
+post-attempt reconciliation alike; an empty scope is protected by the same rule; a restore
+failure is diagnosed and recorded and never deletes a tracked file or by itself terminates an
+attempt whose content equals its preimage.
+
+### Known — an unchanged rewrite of a terminal artifact is not yet credited
+
+Under the content-based write rule, a terminal stage that rewrites its report with identical
+bytes on a later attempt records no write, and the run ends `incomplete` with the correct
+report on disk. Violation detection and terminal attribution share one definition of a write
+and need two; that separation is the next fix.
+
+## [0.8.5] - 2026-09-04
+
+A day of watching the engine run for real — a seventeen-hour research campaign and an
+implementation batch, each with the daemon, supervisor, and gates in the loop — produced a
+review of eighteen behaviours that wasted the operator's hours. Seventeen are changed here,
+one is deliberately declined, and each change carries a replay that fails on 0.8.4 and passes
+now. Two engine fixes that preceded the batch are included, as is one configuration change.
+No new brief syntax.
+
+### Fixed — a supervisor rejection built from two different attempts
+
+When a gate attempt failed and the engine retried it, the retry started with a placeholder
+metric file while the previous attempt's closing words were still the tail of the shared live
+log. The supervisor read both, concluded the stage was contradicting itself, and its rejection
+was then applied to the retry's correct output; repairs chased a phantom for two hours.
+Supervisor evidence is now bound to the attempt it observed, and a rejection whose target has
+moved on is dropped rather than applied.
+
+### Fixed — scope revisions that vanished, stalled, or flooded the log
+
+A revision request carrying the wrong attempt index was silently ignored, so the agent waited
+for a decision that never came; a scope accepted in one attempt was forgotten by the next, so a
+repair that reused it was rolled back as a violation; and the contract told the agent to wait
+without saying how. Every request now receives a decision file, accepted scope survives into the
+next attempt of the same stage, the contract names the attempt and the wait, and a stale
+request is logged once — not on every twenty-millisecond poll, which had filled a task log to
+168 MB.
+
+### Fixed — tests pinned to the round that wrote them
+
+Research rounds kept writing verifiers that asserted the shared result file named their own
+round, true when written and false as soon as the next round succeeded, so every round repaired
+the previous round's test. The rule reached only the planner and a post-hoc guard that missed
+assertions of the shared artifact's existence. The temporal-test contract now reaches the stage
+that writes tests, with the resolved paths, and the guard covers existence assertions.
+
+### Fixed — a crash at the terminal gate left the daemon waiting forever
+
+A scheduler that died between writing its terminal artifact and committing the run status left
+the run marked running with no process behind it, and the daemon deferred on it every thirty
+seconds indefinitely. The daemon now reconciles a dead scheduler against a non-terminal run
+under the task's retry policy. The crash itself came from a rebuild deleting `dist` under a
+live scheduler that loaded its reality-gate checks lazily; the build is now atomic through a
+manifest, the checks are registered statically, and a build warns when it would touch a
+deployed `dist`.
+
+### Fixed — research conditions copied into non-research runs
+
+A `research.*` dispatch condition copied into a run with no research block was admitted,
+evaluated false forever, skipped the terminal owner, and ended a run `incomplete` with its
+correct report on disk while the failure reason named neither cause nor remedy. Admission now
+rejects the condition, and a skipped stage records why.
+
+### Changed — the operator can see what a run is doing
+
+`task list` shows the run, the current stage and attempt, and elapsed time; `task show` renders
+the stage table, the last rejection reason, the current guidance, and pending scope requests
+instead of hundreds of kilobytes of raw tick JSON; `status` carries a Now line. The run event
+log is the canonical feed — guidance, attempt failures, scope decisions, admission rejections,
+and status changes are emitted, every stage-scoped event carries its stage id, and a follow mode
+streams them as JSON lines. `ship-preflight` announces each baseline command with elapsed time,
+can skip the baseline, and warns when a live run shares the project. Help exits are consistent,
+`watch` no longer reports test fixtures as unreadable runs, deadline journals and empty outputs
+say what they are, and the three meanings of "attempt" are named apart.
+
+### Changed — engine overhead no longer scales with the project tree
+
+Every attempt walked the whole project tree twice and hashed every file once more, regardless
+of the declared scope — about a minute per attempt on a 9p-mounted project, three times per
+gate re-evaluation round. Snapshots are now scoped, shared between the closing walk and the
+next opening one, and a large file contributes its size and mtime rather than its bytes. The
+codex reasoning-effort diagnosis is remembered for the run instead of failing once per stage;
+the supervisor's static goal is placed where the provider caches it, its elapsed clock is the
+attempt's, and a tick with nothing new skips the call; the task registry no longer appends an
+unchanged record every tick and readers no longer re-parse its whole history; two
+twenty-millisecond polling loops watch the filesystem instead; the run state file is compact.
+
+### Changed — the test suite runs in under a minute
+
+The worker cap that assumed a 9p checkout is gone in favour of the machine's CPU count; the
+fixed 300 ms sleep at the end of every spec file is replaced by flushing the pending refresh;
+specs that execute `dist` assert its freshness instead of passing against a stale build; the
+heap-bound child fixtures run with headroom and assert the signal they die by; and CI cancels
+superseded runs and times out stuck ones. Measured on the same machine against the 0.8.4 suite,
+the wall time fell by 41.8% at the median with no test identity regressing.
+
+### Declined — rewriting a plan's mutable result path automatically
+
+A fresh research campaign's first plan is still rejected when a hard reality check references
+the optional numeric result path, which a valid no-candidate round never writes. Rewriting it to
+the framework manifest automatically would admit a check whose producer is not guaranteed, so
+the fail-closed admission stays; the rejection now carries the resolved rule and the remedy, and
+the planner is told the rule with the resolved paths before it plans.
+
+### Fixed — plan retries ratchet
+
+A rejected plan's retry could repair one admission requirement while losing another it had
+already satisfied, and oscillate. A requirement once satisfied is now held across retries while
+the remaining ones are repaired.
+
+### Fixed — a fresh campaign directory is plannable
+
+Two admission rules pointed at each other for a campaign directory that did not exist yet: one
+demanded the framework-emitted manifest instead of the mutable result path, the other refused
+the manifest because nothing owned it. The framework's manifest emitter is now credited for
+fresh directories; a path nothing will ever write is still rejected.
+
+### Changed — the validation-command timeout comes from project configuration
+
+`ship-setup` runs a project's build, test, and lint twice, and a project's suite grows as
+research rounds add tests; the hardcoded fifteen-minute limit refused baselines and named the
+timeout rather than the load. The limit is `default_validation_timeout_ms` in
+`config/defaults.yaml` (forty-five minutes here), and the stage timeout `default_timeout_ms`
+rises from one hour to three.
+
+## [0.8.4] - 2026-09-01
+
+Five fixes, all found by watching real runs on the day 0.8.3 went live. Four repair the engine's
+own new admission and settlement machinery where practice disagreed with it; one makes a spec
+independent of operator-tuned configuration. No new commands.
+
+### Fixed — a task display that let a dead wait look alive
+
+An entry recording "waiting on task N" stayed ordinary-looking for days after task N ended, and
+whether it carried a run annotation at all depended on whether a task id happened to be persisted.
+Entries are now linked deterministically, and an open entry whose referenced run has ended renders
+with an explicit wrap-up-overdue marker and the run's terminal status, counted in the header. The
+ship workflow records the task id explicitly at launch.
+
+### Fixed — an admission that rejected what the planner emits
+
+The 0.8.3 dispatch admission rejected sound shapes: a three-writer terminal topology with one path
+per writer, narrow eligibility conditions expressing the same guarantee as the demanded literal,
+and criteria owned by the terminal stage. Retries repeated the identical rejection without ever
+showing the planner why. Recoverable shapes now admit, the two protected rejections — a measuring
+stage owning a terminal path, and continue releasing a terminal write — keep their red tests, and
+a rejected plan's retry receives the exact archived errors and converges or stops after bounded
+identical refusals, with every rejected proposal quarantined durably.
+
+### Fixed — code mistaken for paths
+
+The admission's literal-path extraction claimed identifiers inside embedded check scripts as
+project paths needing owners: property accesses, standard-library calls, even bare numerals. Plans
+carrying ordinary node or shell reality checks were rejected for phantom paths across two
+unrelated projects. Extraction now distinguishes a path from a token of code, on both sides of the
+boundary, and a check that genuinely requires an artifact before its writer runs is still refused.
+
+### Fixed — a finished campaign that could not say so
+
+Three defects interacted so that a campaign whose stop condition had fired could burn its
+remaining plan attempts and end failed with its ceiling report already on disk: gate pass was
+conflated with beating the metric, which a ceiling by definition does not; settlement-only
+iterations were held to work-iteration criteria coverage; and every recomposition of an
+already-admitted reality check mangled its escaping. A verified losing ceiling now settles, a
+winning metric cannot be labeled a ceiling, and admitted checks are reused byte-for-byte instead
+of recomposed.
+
+### Fixed — a spec whose budget moved with operator configuration
+
+The negotiation spec asserted absolute retry budgets inherited from the repository's own
+config/defaults.yaml, so retuning that operator-owned file failed two tests that had nothing to do
+with the change. The spec now seeds its own default and asserts the doubling rule against it.
+
+## [0.8.3] - 2026-08-31
+
+Thirteen failure classes observed across a day of real runs, each reproduced before it was changed.
+No public CLI command changed. Two compatibility tightenings are called out at the end.
+
+### Fixed — instructions addressed to one stage reaching another
+
+Supervisor and operator guidance was appended to a single run-level file and copied whole into every
+stage. A stage told to finalize a plan handoff received that instruction while it was supposed to be
+implementing a research round; it complied, finished in eighty-eight seconds, and reported that it
+had implemented nothing. Guidance is now a framed envelope carrying an explicit stage target, and a
+stage receives only entries addressed to it or to the run.
+
+### Fixed — gates that only a later stage could satisfy
+
+A reality check declared at planning time required exactly one terminal report to exist, while the
+only stage allowed to write one ran after the check. Verification and repair cycled four times
+against it. A measuring stage that also owned the terminal paths ended its own campaign after one
+round of a twelve-round budget, skipping its audit. An iterative finalizer told to write exactly one
+terminal artifact wrote an escalation for a campaign whose own audit said continue. Terminal
+ownership is now admitted before work starts: one owner, downstream of every mandatory stage, and a
+continuing campaign releases no terminal path.
+
+### Fixed — criteria and evidence that quietly went missing
+
+A numbered brief criterion could vanish between the brief and the stage that had to honour it.
+Criteria now carry stable identities bound to the admitted brief digest, and a dispatch that leaves
+one uncovered is rejected. Generated round tests that pinned a shared campaign file to one round, or
+required a terminal artifact to stay absent, made a legitimate campaign close look like a failure;
+those patterns are now rejected at attribution. A round with no acting candidate had no honest value
+for a two-field result file, so it now records a sidecar with explicit provenance instead of a zero
+indistinguishable from the baseline.
+
+### Fixed — blockage and quiet work that nothing counted
+
+Identical blockage recurred for iterations without escalating, because no durable mechanism
+fingerprinted the cause. A long command whose output was fully redirected was killed as idle by the
+Codex adapter's watchdog, which could see neither adapter output nor stage artifacts. Both are now
+observable: repeated identical causes escalate, and an active structured command suppresses idle
+inference without weakening deadlines.
+
+### Changed — guidance is steering, not a new contract
+
+`skills/ship.md` and the brief contract now state that mid-run guidance may clarify or repair a
+property but cannot erase a criterion, widen authority, substitute a named result, or invalidate a
+better conforming result. A real contract change requires new brief bytes and a fresh rehearsal.
+
+### Compatibility
+
+Malformed dynamic dispatch is refused rather than accepted. A non-empty existing target for a
+declared create-only output blocks preflight, rehearsal and setup unless it is declared as input or
+given an explicit disposition. Both refusals are intentional: each corresponds to a defect above
+that reached a run because nothing checked.
+
+## [0.8.2] - 2026-08-29
+
+No product source changed in this release. It repairs how the suite decides, and how a brief hands
+work over.
+
+### Fixed — a suite whose verdict depended on how fast the machine ran it
+
+A concurrency regression failed on a macOS runner and passed on a rerun of the same tree. The helper
+it failed in waited five wall-clock seconds for a spawned Node process to write a readiness file,
+which is a bet on machine speed rather than an assertion about the behaviour under test.
+
+- **Thirty-seven cases carried that shape and now wait on events.** Enumerating every collected test
+  found budgets a loaded runner can exceed and, more damagingly, path selectors: a fixed sleep of
+  250 ms, and others at 10, 15, 30 and 900 ms, after which the test branched on whichever party
+  happened to be ready. Those do not merely fail intermittently — they send fast and slow machines
+  down different code paths, so a green run on one does not say what a green run on the other said.
+  A shared `waitForPathEvent` helper observes atomic filesystem publication and checks on both sides
+  of watch installation, closing the usual check/subscription race.
+
+- **Forty-two cases remain intrinsically timed and say so.** Elapsed time is part of what they
+  assert. Each is listed with the budget it needs and why it needs it, so the distinction between a
+  necessary clock and an accidental one is visible rather than assumed.
+
+- **Every changed case carries three pieces of evidence:** it passes intact, it fails when the
+  production behaviour it guards is mutated, and it still passes under deliberate delay. The suite
+  goes in and comes out at 171 files and 1,851 cases with four skipped.
+
+### Changed — the `ship` skill asks what the run must find, not what you already concluded
+
+Every constraint a brief states is treated as settled, including the ones its author did not know
+they were stating. Naming the attributes of a problem closed the one that was never listed; naming a
+prior report closed the modules sitting beside it; carrying a baseline forward as a number carried it
+without the fact that nothing had to beat it; obeying a minimum update count left the batch size it
+depended on unmentioned and unchanged. None of those exclusions were written down — each was inferred
+from what the brief chose to enumerate.
+
+- The section no longer asks for the approach. It asks for the outcome, the paths where evidence
+  lives, the constraints that are real, and what the report must show.
+- A summary the author writes is a claim the author asserts, so a prior artifact is pointed at rather
+  than compressed; where a figure must appear, it appears as a cross-check with the anti-anchoring
+  fields rather than as a premise.
+- The anti-anchoring rule now covers configured values, which is where it was being skipped: a
+  baseline asserts what a result must beat and can be wrong the way a measurement can.
+- Criteria fix how a result is produced and shown rather than what it must be, each pinned to a
+  moment — after the last write, not at some point.
+- A path-shaped string in prose costs something whether the path exists or not: absent, preflight
+  demands it; present, setup wants to overlay the working copy of it. An `Out of scope` heading is
+  not an exemption.
+
+Two tests come with it, both independent of the wording, because the guidance itself is a hypothesis
+and a rule asserted into a test is harder to remove than to keep. Section cross-references must
+resolve, since renumbering is otherwise silent. The revision stamp is pinned to a digest of the
+guidance it describes, so an edit that leaves the stamp behind — and therefore leaves installed
+copies reporting themselves current while carrying different guidance — fails instead of passing.
+
+## [0.8.1] - 2026-08-28
+
+**Breaking:** an unrecognised `research.policy` is refused instead of being silently coerced to
+`greedy_stack`. A brief that names a policy which does not exist — a typo, or a value invented for
+the occasion — used to launch anyway under a default nobody chose, and the run then behaved
+correctly for a question nobody asked. A campaign was lost to exactly that: its brief named
+`heuristic_policy_v1`, got `greedy_stack`, and no warning was emitted anywhere. Fix the value, or
+keep the default deliberately by omitting the field.
+
+This ships as a patch because what it refuses was never valid: a brief naming a policy that exists
+is unaffected, and a brief naming one that does not was already running under a policy nobody chose.
+Nothing else in this release changes an existing behaviour — the ledger below is a new command that
+no current workflow touches.
+
+### Added — a durable record of what a session still owes
+
+A session accumulates obligations it must come back to: a launch to verify, a worktree to reclaim,
+a finding to act on. Until now it carried them only in whatever its transcript happened to
+preserve, which is to say it lost them. `flowcrew fc_tasks` gives that record a home outside the
+conversation — entries created and patched by the CLI, rendered in the terminal, and repaired by a
+tool built for the job when a write leaves one damaged.
+
+- An update changes one field without the caller resending the whole entry. A caller obliged to
+  resend everything in order to change a subject will eventually resend something stale.
+- A damaged ledger is repaired rather than discarded, because the entries in it are the reason it
+  exists.
+- Every write publishes through a temporary file and a rename, so a reader never observes a
+  half-written entry.
+
+### Fixed — an acknowledged write that could not survive the crash it claimed to
+
+The ledger above shipped with defects an independent review then found. Auditing the same diff a
+second time found more, implementing the fixes found more still, and the gate that verified them
+reproduced seven the implementation had missed: thirty-nine in total, each reproduced on unmodified
+code before being fixed, each carrying a regression that fails on the pre-fix tree and passes after.
+
+- **Success was reported before durability was established.** `fsyncDirectory` swallowed every
+  error, so a directory flush returning `ENOSPC` or `EIO` still returned success to a caller that
+  had already been told its entry was safe. A first create flushed only the child session directory
+  and never the parent that had just acquired its entry, so a crash could lose the whole
+  acknowledged session while the child flush reported fine.
+- **Two updates to the same entry both succeeded and one of them vanished.** Each read the original
+  record, each published with an unconditional rename, and no version check or shared lock sat
+  between the read and the publication. The later writer's stale snapshot won, and the earlier
+  writer had already been told its patch was durable.
+- **A write that reported success left the ledger unreadable.** The scan limit rejected only a count
+  *greater* than the maximum, so the entry that landed exactly on the limit was accepted — and the
+  next default read, seeing one more file than it would scan, refused the ledger to renderers and
+  writers alike.
+- **An over-budget attempt was persisted as complete.** An adapter doing synchronous work across its
+  deadline starved the timer that was supposed to enforce it; the resolved promise settled first,
+  the still-pending timer was cleared on the way out, and exit zero was accepted. Three further
+  settlement paths — a late rejection, an abort during starvation, and an abort between the deadline
+  signal and the child's exit — each reported a different wrong cause or code.
+- **Untrusted names reached places that trusted them.** The exported reader followed `..` out of its
+  store root; a ledger filename could carry terminal control sequences into refusal output; a
+  session directory swapped between the check and the open let an acknowledged create write outside
+  its target; and the static scan's walk-before-filter let an excluded symlink either fail the gate
+  or leave the project.
+
+### Fixed — two adjacent claims that were true only by accident
+
+- **A write conflict was claimed when only one stage had reported.** Parallel dispatch treated a
+  single structured report as evidence of a collision, so a stage that wrote nothing could be told
+  it had raced. The claim now requires both sides to have reported their writes.
+- **A terminated attempt was killed before it could clean up.** Termination gave no window for the
+  adapter to release what it held, so a cancelled run left its temporary state behind. The attempt
+  now gets a bounded chance to finish cleanly before the process group goes.
+
+## [0.8.0] - 2026-08-15
+
+**Breaking:** `timeout_ms` and `timeout_total_ms` are no longer accepted in a brief's stage
+frontmatter. A brief carrying either is refused with the migration in the message: stage duration is
+governed by `config/defaults.yaml::default_timeout_ms` and nowhere else. This is the only change in
+this release that requires editing an existing file.
+
+### Fixed — a baseline that recorded a failure but could not name it
+
+The validation baseline exists so a later failure can be attributed to the round or to the base it
+started from. It was recording that a test command failed while leaving *which* tests failed
+unknown, which makes the attribution it was built for impossible.
+
+- **The failure extractor never saw the shape its own runners emit.** It recognised a `FAIL`-prefixed
+  name, a cross-marked name, and a compiler diagnostic — and not TAP, which is what `node --test`
+  produces. The count patterns all expected the number before the word, so `# fail 10` matched
+  nothing either. The gap survived because this repository's own suite emits one of the recognised
+  shapes, so the engine could always identify its own baseline and never its users'. Separately, the
+  extractor was handed the byte-bounded copy of the output while the unbounded text was still in
+  hand. A shared TAP reader now serves both the failure path and the population path, facts are read
+  from the raw output while only a bounded copy is stored, and an unresolved identity carries a
+  recorded cause — no output, truncated by capture, structurally incomplete TAP, complete TAP with no
+  failing record, or an unrecognised format — which reaches the ready record and the operator-visible
+  gate line.
+
+- **The repair above refused too broadly, and the next launch showed it.** An invalid TAP parse
+  returned immediately, so a truncated buffer never reached the line-oriented adapters below it. A
+  recorded baseline carried a `FAIL` line and an explicit count inside the bytes it had kept and
+  reported the identity as unavailable — something the previous extractor would have found.
+  Truncation is a sound reason to distrust TAP, whose plan and version lines describe a whole run; it
+  is not a reason to distrust a line. Per-line adapters now run when the structural reader cannot
+  conclude, and what they recover is marked partial: bytes were dropped, so the identifiers are a
+  lower bound. Partial evidence is barred from the red-to-red comparison — when either side is
+  partial the delta is unresolved with that reason, because a partial list treated as complete would
+  let a genuinely new failure be dismissed as pre-existing.
+
+- **A test's identity moved when an unrelated test was inserted before it.** Population parity built
+  each identity from a top-level ordinal joined to a name, so inserting one test renamed every test
+  after it, and a real launch was refused with the same test listed as both missing and extra.
+  Identities are now name-local and position-independent, duplicate names stay distinguishable, and a
+  target that legitimately carries more tests than its source is reported as source-plus-additions
+  rather than as a wholesale mismatch.
+
+- **"I cannot verify this" shared an exit with "I refuse."** Parity was resolved with per-runner
+  knowledge, and a runner it did not recognise produced `unavailable`, wired straight to a refusal
+  before any baseline ran. A project was unshippable for choosing Node's own test runner, which has
+  no collect-only mode at all, so no branch of the existing shape could be written for it. Adding a
+  branch for `node --test` would have been the wrong repair — enumerating runners is the same losing
+  game as enumerating shell forms — so the model now separates verified, unverified and refused.
+
+### Fixed — state the engine could describe but not decide
+
+- **A run finished, said so, and stayed `running`.** Every stage complete, the supervisor's own
+  verdict `DONE`, the declared terminal artifact present and declaring complete — and the lifecycle
+  status unchanged until a human intervened. The divergence was not invisible: the watch surface
+  printed it in plain words. It was recognised where it was displayed and nowhere that could act on
+  it. Every site that decides on a run status now supplies a value per status through an exhaustive
+  record, so adding a member fails the build at each of them until someone answers for it there —
+  listing a case is no longer enough. `resolveRunStatus` gives the archive a boundary: raw text
+  becomes either a known status carrying its lifecycle semantics or an explicit unknown that keeps
+  the raw value and states why, so a padded or differently-cased spelling stays unknown instead of
+  being normalised into a status nobody wrote. Closure is automatic but gated — it runs only through
+  the scheduler's existing full terminal check, on a declared artifact that is unique, safe and
+  fresh, because a wrong automatic transition would be worse than the stall it replaces.
+
+- **A dependent was released although its producer had been skipped.** A research round lost its only
+  measurement and still produced a terminal document: the measuring stage carried a dispatch-level
+  condition on the preceding audit, the audit passed, and the stage was recorded skipped with zero
+  retries anyway. A passing gate now leaves only its `retry_to` repair branch skipped, and a
+  dependent whose producer was skipped or failed stays pending while the run ends incomplete. A run
+  that stops with nothing is recoverable; a run that reports on nothing is not. A frozen-rule scan
+  of 1,998 readable terminal workflows found the affected edge in exactly one — the run that
+  surfaced it.
+
+- **A re-plan deleted the records it was replacing.** A repeatedly-rejecting gate triggered a
+  re-plan, and the re-plan removed every completed stage record before persisting the replacement
+  graph. One stage's output was zero bytes after an hour of work whose repairs were on disk and
+  verified; in a later run the stage that vanished was the audit that would have checked a lint now
+  live in this engine. The defect does not destroy deliverables — it destroys the account of how they
+  were produced, which is worse in the case where the account was the deliverable. Evidence is now
+  captured before deletion, into iteration-qualified records.
+
+- **Stage duration had more than one control.** Overrides in brief frontmatter competed with project
+  configuration, so the answer to "how long may this stage run" depended on where you looked. There
+  is now one control: `config/defaults.yaml::default_timeout_ms`. See the breaking note above.
+
+### Changed — rules a correct task can actually satisfy
+
+- **Three more rules had the right intent and a form that made them either impossible to obey or safe
+  to ignore.** The safety clause forbidding agents to touch other run directories bound reading to
+  writing, so a task authorising the run corpus as read-only evidence collided with it — and the
+  collision was not theoretical: two stages quoted the clause as a prohibition and the first skipped
+  an entire audit, reporting its central claim as unverifiable. The mutation ban is now absolute and
+  stated separately; read authorisation never grants mutation authority. A rule that must be worked
+  around teaches that rules are advisory, which costs more than the rule protected.
+
+- **A brief could not declare feasibility without also declaring a metric loop it did not have.** The
+  lint demanded a machine-readable `research.feasibility` model from any brief committing to a
+  selection procedure before measuring, and the parser recognised the block holding that model only
+  when a numeric baseline was present. A diagnostic round has no metric to beat, so its only routes
+  were to invent a baseline or to delete the wording that made the lint fire. Feasibility now parses
+  ahead of the baseline gate; the research loop stays gated on the numeric baseline exactly as
+  before.
+
+- **A project that never declared its validation could not be shipped to at all.** `ship-setup`
+  discovered build, test and lint from project configuration and refused when it found none — right
+  when a target's dependencies are missing, wrong when a project simply never declared them
+  anywhere. A brief may now supply argv-shaped commands in its frontmatter, resolved role-by-role and
+  fail-closed: project configuration governs a role it declares, a brief fills a role configuration
+  leaves empty, and a conflict refuses.
+
+- **The pre-registration lint could not tell a task's own commitment from a description of one.** It
+  fired whenever the vocabulary appeared beside a rule-like noun, so a brief about the detector, a
+  post-mortem, and a guide section explaining the requirement were indistinguishable from a brief
+  that actually froze a rule. A later gap left the opposite hole: a commitment stated in a single
+  sentence escaped while full-length historical briefs were still caught, making detection depend on
+  how much surrounding text a brief happened to carry. Both are closed, measured across a full
+  traversal of the historical brief corpus, and checks now report what they saw rather than only
+  their verdict.
+
+- **Reality-Gate checks are authored fresh every run and were reviewed by nothing.** The suite audit
+  that removed 31 value-fastened assertions could not reach them, so the habit survived exactly where
+  it decides whether a run may succeed: two correct rounds were marked `reality_gate_failed` by
+  checks they had written about themselves. The planner rule meant to prevent this named two bad
+  shapes rather than what makes them bad, and both failures were shapes the enumeration did not
+  reach; it now states the criterion. Prose alone was already the instrument that failed, so
+  generated checks are inspected after planning and before dispatch, with findings tiered by whether
+  the declaration a check refers to can be read.
+
+### Changed — what the watcher believes, and what the published project contains
+
+- **A stall was reported at three stage attempts, and measurement says that is not a stall.** One
+  verify stage reached attempt four while converging from seventeen failing tests to one; another hit
+  attempt three with its second gate round clean. The attempt threshold is removed rather than
+  raised, because the count was never the signal. What replaces it is directional and read from
+  archived rejected verdicts: a gate whose metric moves away from its threshold across rounds is not
+  converging, and one whose count is identical across two rounds has stopped progressing.
+  Reconstructing that history also corrected an operator claim — the real series is seven with one
+  regression, not eight with two.
+
+- **The private verification tree is no longer part of the published project.** Nothing under it is
+  tracked, the test config no longer collects it, and the only places that still name it are the
+  ignore rules and two past changelog entries describing what was true when those versions shipped.
+  Editing a past entry so it stops mentioning a path that existed then would falsify the record. The
+  published suite now stands alone and names its subjects, and only the fixtures a published test
+  actually reads are tracked.
+
+- **A spec that a lost round had covered is guarded again.** The condition-fact resolution it
+  verified had no other coverage after the work was destroyed by a bad commit, and is now specified
+  independently of that history.
+
+- **Conventions that lived only in one machine's memory now live in the procedure.** Memory is scoped
+  per working directory, so rules recorded while working from one path were invisible to a session
+  started from another — same skill, same person, different behaviour. Work of one kind belongs in
+  one task, because the planner parallelises inside it better than a chain can be sequenced from
+  outside. And a launch held back on purpose still needs its task entry at rehearsal time, carrying
+  its precondition and measured baseline and marked blocked by what it waits on: creating the entry
+  is prompted by the launch, so work waiting on elapsed time gets no prompt at all.
+
+- **The README described what a run does without saying what the thing is.** The Atom Architecture is
+  referenced throughout the source — P1 through P4, role atoms, the context primitive — and had no
+  statement anywhere a reader would find it. It is now named in the tagline, the opening, and where
+  the design is explained: a self-evolving multi-agent system built on execution primitives and a
+  harness loop, whose engine stays task-agnostic because every task-specific rule lives in the brief
+  and its declared checks rather than in the core.
+
+## [0.7.0] - 2026-08-11
+
+### Changed — the launch path is composed of tested commands instead of remembered steps
+
+- **`ship-preflight`, `ship-setup`, `watch`, `land`, and `audit-report` replace steps an
+  operator used to carry in their head.** The `ship` skill drops from 995 lines to 300, not by
+  cutting content but by moving each rule to the layer that has ground truth: what a command
+  can check, it checks; what the planner owns, the planner states; only judgement stays as
+  prose. Both front ends now derive the same procedure from the same file — verified by
+  running the real `claude` and `codex` CLIs against one brief and comparing their rehearsal
+  digests, which had silently diverged: one front end was executing an older contract because
+  it inferred execution order from heading order.
+
+### Fixed — guards that refused for the wrong reason, or never refused at all
+
+- **`land --remove` could not succeed on any repository that gitignores its build output.** It
+  graded regenerable paths for display and then refused on the raw count, so fail-closed had
+  become fail-always, and an operator who cannot use a guard removes worktrees by hand. Hand
+  removal is what lost a 2,379-line generator. Removal now takes
+  `--acknowledge-regenerable=<count>` matching the audited figure, re-derived at removal time
+  so a stale number refuses; anything the grader could not prove regenerable still refuses
+  unconditionally and cannot be acknowledged away. An injected probe found the complementary
+  hole: ignored source directly beneath a dependency root graded as an installed dependency,
+  so a correct acknowledgement authorised deleting it. It now grades as source.
+
+- **`ship-setup` recorded the validation baseline before dependencies existed and printed
+  `READY`.** All three roles exited 127, every gate degraded to "failed with an unparseable
+  identity", and the headline said the workspace was ready. A guard that never fires is worse
+  than one that always does, because nothing about the run looks wrong. A target that cannot
+  run the project's own commands now refuses and writes no ready record.
+
+- **Explicitly declared brief inputs could vanish without a message.** The heuristic that
+  keeps prose scanning from treating ordinary words as paths was also applied to the explicit
+  declaration list, where the key already states that the value is a path. A bare directory
+  name was discarded silently. Declarations are now taken at their word, and an unresolvable
+  one is reported as unresolved rather than dropped.
+
+- **Ready records are keyed by what the brief says, not only where it lives.** Five
+  consecutive invocations with different briefs produced a byte-identical record path, so
+  nothing downstream could verify that the brief being launched was the brief that was
+  baselined.
+
+- **Terminal evaluation was inside `if (!failed)`, and an unmatched terminal persisted no
+  conclusion at quiescence.** A settled batch could therefore leave no decision at all.
+  Evaluation is now unconditional and records an explicit `incomplete` rather than silence: a
+  run that cannot decide must say so. Both directions of status mismatch are surfaced without
+  changing what the persisted lifecycle status means.
+
+- **A launch target silently ran a smaller suite than its baseline was measured on.** Version
+  control cannot populate an ignored directory in a fresh worktree, so a target held 150 of
+  the source's 193 discoverable test files and every "full suite green" claim covered that
+  smaller set. This is the same root cause 0.6.2 named and could not act on — a contract test
+  living in `tests/`, gitignored, never running. Setup now completes the target and refuses,
+  before recording a baseline, when it cannot.
+
+- **A gate whose brief supplied no metric could reject a passing verdict indefinitely.** The
+  implementation had nothing left to change while the repair loop kept running. The contract
+  is stated at the planner layer and checked mechanically. Adversarial verification then found
+  the guard could be bypassed outright: raw JSON `1e400` parses to `Infinity`, which satisfied
+  a finite threshold. The candidate search filters on `Number.isFinite` before selecting a
+  value, which closes all four sources — the original defect was a guard present on one path
+  and absent from another, so the shared selector was the place to fix it.
+
+### Changed — the test suite verifies properties instead of fastening onto values
+
+- **An audit of every collected test module found 35 weak verification sites**: 20 overfit a
+  fixture value, 8 guarded source text where behaviour was claimed, 5 policed style, and 2
+  could not fail under any input. The proportions are the finding. Tautologies are the shape
+  that is easy to grep for and they were rarest; the common defect is a well-formed assertion
+  aimed at the wrong thing, which goes red when a fixture changes legitimately and stays green
+  when the logic breaks in a way that preserves the number. Finding those required tracing a
+  value's provenance across functions — the one that motivated the audit had its literal and
+  its assertion 23 lines apart, in different functions, and no same-line search finds it.
+
+  31 sites became relational or structural checks derived from what they test, each proved
+  capable of failing through a transcribed red-then-green mutation. Exact values that are
+  genuine contracts stayed exact rather than being loosened into range checks, which would
+  have widened what passes. The 4 assertions removed without replacement are listed with the
+  property now unguarded and why that is acceptable.
+
+- **Documentation describes the surface instead of tallying it.** Counts of commands and
+  statuses helped no reader decide anything and needed editing in three places on every
+  addition. The CLI reference is now checked against the dispatcher's own command list, which
+  cannot go stale and fails when a command goes undocumented.
+
+## [0.6.2] - 2026-08-09
+
+### Fixed — three defects found while running research tasks through the engine
+
+- **A gate could be made unpassable by a naming difference between two files it wrote
+  itself.** A gate wrote `verdict.metric = "failing_checks"` — its own health metric, zero
+  checks failing — beside `metric.json.metric = "max_abs_train_spearman_to_vanilla_momentum"`,
+  the domain metric its brief had asked it to report. Both files agreed the gate passed.
+  `validateVerdictAgainstMetricFile` rejected the pair for the naming difference alone, so
+  `readGateVerdict` returned `pass:false` for a file that said `pass:true` — every time, no
+  matter what the stage did. On one run all four audits were rejected this way, fifteen times
+  in the log; it escaped only when the three-round repair budget ran out, after ~2.5h of
+  repair rounds that had nothing to repair. A rename is evidence of self-deception only when
+  there is a failure for it to hide, so the check now also requires the metric file to
+  indicate one — an explicit `pass: false`, or a numeric value missing its own threshold. The
+  case the guard exists for, a failing domain metric replaced by a different passing one,
+  still rejects. The violation now names both sides; it was a bare `metric name redefined`
+  carrying neither, so the clash could not be diagnosed from the message.
+
+  The repair stage was also handed the archived verdict as its "rejection evidence" — a file
+  saying `pass:true` — with no way to see what the engine had objected to.
+  `engine_verdict_<gate>.json` now records the engine's effective verdict and reason beside
+  it, and the re-evaluation preamble points at it.
+
+  This was never caught because its contract test lives in `tests/`, which is gitignored
+  **and** outside the CI command. Every existing case sets `metric.pass === false`, which
+  returns at the first branch and never reaches the name comparison, so the breaking
+  combination was never constructed. One fixture even uses that exact clash but asserts null
+  via the `phaseComplete` early return. That file now lives in `spec/`.
+
+- **A run is no longer called stale just because it is quiet.** Both stale sites demoted a
+  running campaign purely because neither `state.json` nor `iteration_log.jsonl` had been
+  touched for 30 minutes. A single long stage — a fetch, a test suite, a research backtest —
+  is silent for far longer than that while its scheduler works normally, so live runs were
+  reported lost. Silence is now checked against the process holding the run: only a live
+  process bound to *that* run suppresses the warning, so an absent, malformed or dead
+  `scheduler.pid` still goes stale, and a recycled pid bound to a different run does not
+  suppress. This deliberately does not reuse `hasLiveScheduler`, which guards
+  `performStartupRecovery` rewriting a run to `failed` and must therefore over-report
+  liveness; the two fail safe in opposite directions and must not be merged.
+
+### Changed — the default campaign follows the repository, not the directory
+
+- **Worktrees of one repository now share one campaign.** The default campaign name was
+  `slug(basename(projectDir))`, so every linked git worktree got a campaign of its own and a
+  single line of work split across as many campaigns as there were worktrees — auditing what
+  a project had actually tried meant opening all of them. Any directory inside a repository
+  now resolves to its main worktree.
+
+  Two cases move: a linked worktree, and a subdirectory of a repository — `repo/src/deep`
+  gave `deep` and now gives `repo`. **A checkout's own root, the common case, is unchanged**,
+  as are an explicit `--campaign`, `defaults.yaml::campaign`, and any directory that is not a
+  repository. If you have been running from worktrees, your next run lands in a campaign
+  named for the repository rather than the worktree; the earlier campaign directories stay as
+  they are. Inside a worktree `flowcrew quick` now prints which directory the name came from,
+  since it no longer matches the one you are standing in.
+
+## [0.6.1] - 2026-08-08
+
+### Fixed — a 0.6.0 launch regression, and nullable fields in declared schemas
+
+- **The agent runs under a login shell again.** v0.5.0 used `bash -lc`; v0.6.0 dropped the
+  `-l` while the supervisor was rewritten around the portable shim. The systemd user
+  manager's PATH does not include nvm or `~/.local/bin`, and only the login profile puts
+  them there, so on a machine where `codex` or `claude` was plainly installed every
+  background launch failed with *"No adapter CLI is installed or visible on PATH"*. `-lc` is
+  accepted by `/bin/bash`, `/bin/sh` and `/bin/dash`, so this does not narrow which shells
+  can host a run. Three CI axes missed it because a runner's PATH is already complete.
+
+- **`type: [string, "null"]` in a declared schema can pass.** A union arrived as an array,
+  which is truthy, so validation ran — but every type comparison then checked a string
+  against an array and could not match, so a nullable field failed for *both* `null` and a
+  string, i.e. always, regardless of content. The error read `expected string,null`, which
+  was the array flattened by string interpolation. Unions now pass if any member matches, an
+  empty union constrains nothing, and errors render as `string|null`. This affected both
+  reality-gate `json-schema-match` checks and the research loop's per-round `result_schema`
+  enforcement, so a brief that declared an optional reason field the standard way had its
+  terminal state blocked by a false negative.
+
+## [0.6.0] - 2026-08-07
+
+### Changed — supervision no longer requires a service manager
+
+- **A background run is owned by a portable shim, not by systemd.** Off a systemd user
+  session — macOS, a container, a WSL2 install without systemd enabled — `flowcrew task
+  cancel` could never confirm: `NodeSystemd.isActive` threw `ENOENT`, the catch discarded a
+  *terminal* process-fallback record and returned the string `unverified:systemctl-error`,
+  which was in neither `STOPPED_UNIT_STATES` nor the active set. The task pinned in
+  `cancelling`, the daemon retried the same failing cancellation every 30s with no timeout
+  and no route out, and cancelling an already-finished task wiped its terminal record. A
+  small Node shim now owns each run and writes its exit status to disk atomically, so the
+  outcome survives even the death of FlowCrew's own daemon — the one capability nothing in
+  the Node supervisor ecosystem provides, because every one of them learns of an exit from
+  an in-memory `child.on('exit')` in a live parent. Where a systemd user session exists it
+  is still used for cgroup cleanup and tree-kill, but the recorded exit status, not systemd,
+  is what the engine treats as truth.
+- **Unit state is a closed six-member union.** The same string was previously read with
+  opposite fail directions in two files, and a third, unimported copy of
+  `STOPPED_UNIT_STATES` lived in `cancellation-client.ts` behind a `typeof x === 'string'`
+  guard: once the state became an object that guard would have rejected every valid daemon
+  response and silently re-run the coordinator inside the CLI — while still printing
+  `Task #N cancelled` and exiting 0. `unitIsStopped` is now an exhaustive switch with a
+  `never` check, so a seventh variant is a compile error rather than a silently pinned task.
+- **`terminal-unknown` is a first-class outcome.** A `SIGKILL`ed shim records no exit status
+  and may leave its agent alive, reparented. The engine does not round that to `failed`:
+  the run ends marked unrecoverable and `flowcrew task cancel` refuses to report success.
+- **Process identity is portable.** Linux keeps its exact `/proc` start-time token; Darwin
+  binds by `ps -o lstart=` plus the recorded argv. `ps` is resolved absolutely rather than
+  through `PATH` — a caller that strips service-manager tools from `PATH` must not thereby
+  lose the ability to identify its own processes. On Linux this was invisible because procfs
+  answers first; on macOS, where there is no procfs fallback, it broke everything downstream.
+
+### Added — CI that can actually catch this class of defect
+
+- **Three supervision axes, not one.** `quality` (systemd present), a new
+  `no-service-manager` job that symlink-farms a `PATH` without `systemctl`/`systemd-run`/
+  `journalctl`, and the existing blocking `macos` job (no procfs at all). Varying one axis
+  silently pins the other at its Linux value, which is why every earlier "macOS is covered"
+  claim was untestable. `macos-latest` is pinned to `macos-15`: GitHub's docs page and the
+  runner-images README currently disagree about which release it points at.
+- **Distribution jobs.** `npm pack` + global install exercising the documented first steps
+  (the only way to catch a missing `files` entry, which no in-repo test can see), a cold
+  `git clone` over HTTPS with a cold npm cache, and the four adapter-installation states.
+  They run on `main` and `tests` pushes.
+- **Verified on real hardware.** Darwin 24.6.0 arm64, GitHub run 31162993188, all ten jobs
+  green. Every prior macOS claim in this repository was inferred from Linux.
+
+### Fixed
+
+- **A passing gate still dispatched a fix stage.** `gate_phase0` passing correctly skipped
+  its fix stage; `gate_phase2` passing dispatched one anyway, which then re-ran the gate —
+  about 24 minutes per occurrence.
+- **`flowcrew status` and `/fc-status` are project-scoped.** They reported the most recent
+  run on the whole machine, possibly belonging to an unrelated project.
+- **The stage timeout had two sources of truth.** `config/defaults.yaml` said 60 minutes and
+  the ship skill's confirmation message said 5, so a run driven by the skill timed out on
+  the first attempt of every substantial stage. The skill no longer carries a number.
+- **Replanning could drop an undone stage while the run still reported `complete`.**
+- **A task title took the YAML frontmatter delimiter as its name**, so any brief with
+  frontmatter was listed as `---`.
+- **Two timing-sensitive specs made "CI is green" unreliable** as a judgement.
+- **`flowcrew quick --background` registered a task without checking that an adapter CLI
+  existed** to execute it: the submit path returned before the availability check.
+
+### Changed — documentation states only what has been verified
+
+- Three false platform claims removed; two known issues that this release fixes removed.
+  Known issues is now defects only — a deliberate limitation is stated where the feature is
+  described, so fixing a bug cannot silently rewrite a design decision.
+- The README leads with what the tool does rather than with prerequisites; the value
+  proposition moved from 31% depth to the first screen, and about 670 words of restatement
+  and design rationale moved to `guide/` or were cut. A `spec/readme-contract.test.ts`
+  pins the properties that cut relied on, including the passages that carry the project's
+  voice, so a future trim cannot quietly remove them.
+- Worked examples are labelled as illustrative shapes rather than transcripts: the one
+  brief in the repository that runs as written is `examples/hello-research.brief.md`.
+
+## [0.5.0] - 2026-08-06
+
+### Added — absorbed from openworker (code-level comparison)
+
+- **Approval inbox / park-and-resume.** A run that reaches a consequential action no longer has to choose between doing it autonomously and escalating (killing the run). A stage writes `<run_dir>/approval_request.json`; the engine records it in an append-only `<run_dir>/approvals.jsonl` and either auto-approves it via a standing rule or PARKS the run — new non-terminal `parked` status, process exits, project lock and daemon queue slot freed. `flowcrew inbox list|show|approve|deny|rules|revoke` resolves it and resumes the SAME runId, DAG and iteration. Idempotent on `(runId, requestId)`; **first resolution wins**, so two operators on two surfaces can never produce two decisions (append order is the arbiter — no lock, no read-modify-write). Standing rules ("always allow") are mintable ONLY for an `external`-risk action bound to an exact target; shell/write/untargeted actions ask every time.
+- **Daemon queue policies.** Single-in-flight is now enforced at ADMISSION (`src/run-lock.ts`), not only inside a launched run: a busy project defers the task (`deferred` + `not_before` + reason) instead of launching into a conflict that the child would discover and die on. Deferring never consumes the retry budget; retries are queued with 30s-doubling backoff (capped 10 min) instead of relaunching inline; the tick sweep is reentrancy-guarded, drains the launch queue serially and polls running units concurrently; a catch-up sweep runs at daemon start and ADOPTS a queued task whose unit is already live rather than double-launching it.
+- **Surgical param-fix retry** (`src/adapters/diagnose.ts`). When a failure's output tail names a fixable parameter — anchored on the attested `400 invalid_request` wire shape, not on guessed markers — the codex adapter retries once with exactly that parameter omitted (a dedicated sentinel, because `default` now *inherits* the global config that may be the source of the bad value), at most two distinct fixes. Timeouts and supervisor aborts are never "fixed". `RunResult.friendlyError` surfaces one actionable sentence instead of a bare exit code.
+
+### Added — operator can now prove what the engine is doing
+
+- **`flowcrew daemon status` / `restart` / `stop` / `logs`.** The orchestrator is `dist/cli.js daemon serve`; `flowcrew start` is the web dashboard. Nothing previously distinguished them, so a restart script matching the wrong name left a stale orchestrator running — for two days, silently, while every fix shipped in that window sat unloaded in `dist/` and a terminal run had its brief replayed against its own committed tree. The daemon now records a SHA-256 build identity at startup; `daemon status` reports the socket-owning pid, startup time, loaded build and registry health, and exits nonzero with `STALE` when `dist/` no longer matches what the process loaded. `daemon restart` resolves the listener from the Unix-socket inode in `/proc` — never from a command-line pattern — and refuses by default when a running task has no `run_id`, because such a task would have its brief replayed.
+- **RPC responses carry the daemon pid and build**, so a registration can be attributed to a specific process rather than to "some daemon".
+- **Public `spec/` suite and CI.** A clean clone previously failed `npm test` with "No test files found" while the PR template asked contributors to run it. `spec/` now carries the portable suite; CI runs the quality pipeline plus a second job that executes `spec/` in a container with `--network none`, a tmpfs `$HOME` (no `~/.fc`), and assertions that `codex` and `claude` are absent from `PATH` — the mechanical form of "if a test needs anything on your machine, it does not belong in `spec/`".
+- **`guide/`** — run lifecycle (all 13 statuses, each marked terminal/successful and who writes it), approvals, rehearse, the brief contract, CLI, contributing.
+- **`--campaign-context=inherit|skip`** replaces `--no-inherit-campaign` (kept as an alias). The two campaign flags act on independent dimensions — `--no-campaign` drops *attribution*, `--campaign-context=skip` keeps attribution and drops only *prior-phase context* — and the near-identical old names made that invisible.
+- **Dashboard inbox consolidates everything waiting on a human**: approvals, deferred tasks with their reason and retry time, stale runs, and pending brief patches, with a real empty state.
+
+### Fixed
+
+- **Adapter selection stopped guessing, and stopped lying about the guess.** With no agent CLI installed, `flowcrew start` used to print `Auto-detected: claude` — because the detector had no way to express "none found" and fell back to a hardcoded name — and then silently rewrote the project's `defaults.yaml` on that false premise. Selection now lives in one place (`src/adapters/availability.ts`), the shipped template seeds the `auto` sentinel instead of a hardcoded `codex`, `flowcrew init` decides once and says why, `flowcrew doctor` diagnoses read-only, and the new `flowcrew adapter [auto|codex|claude]` is the one place that writes. Runtime paths never prompt and never write; with no CLI at all a launch now refuses with both real install commands instead of creating a run that dies at its first stage.
+- **`npm i -g @anthropic/claude-code` does not exist.** Both places that printed it — including the last line before a hard exit — named a package that 404s; the correct `@anthropic-ai/claude-code` appeared nowhere in the repo. A test now pins every install hint to a real package name.
+- **A failed run prints why it failed.** The cause and its fix were already computed and stored in `run.json`, then discarded before printing, leaving only `plan: failed`.
+- **A YAML typo under `## Reality checks` no longer deletes every gate in silence.** A parse failure fell through to an empty check list, which is indistinguishable from "no checks were declared", so `rehearse` printed `Contract ready` and the run reached a terminal state with zero evidence checks. A parse failure is now a hard failure; a brief that declares no such section remains admissible, as before.
+- **`flowcrew doctor` can no longer go green for someone else's checkout.** Its PATH check was a bare `which`, so any other install's `npm link` satisfied it; it now resolves through realpath and names the other install when they differ.
+- **A brief containing a single quote could not be launched in the background.** The daemon rebuilt the relaunch command with the brief embedded as raw text, which survives neither `shellJoin` nor systemd's own `ExecStart` unescaping, so the relaunched CLI digested different bytes than the operator admitted and refused before creating a run. The brief now travels `--brief-input-base64`, the byte-safe channel the admission record already used.
+- **The published package was missing the CLI's runtime inputs.** `files` omitted `skills/` (which is what `/ship` is), `examples/` (the brief the quickstart tells you to rehearse) and `guide/`. A test now pins the allowlist, and a second one derives the README's command total from the dispatch table so the two cannot drift.
+- **A terminal run is no longer retried as a crash.** systemd reports only "the process exited nonzero", which cannot distinguish a crash from an engine verdict (`failed` / `reality_gate_failed` / `escalated` / `incomplete`). The daemon now pre-allocates the run identity before launch and settles a bound terminal run instead of replaying the brief — replaying meant re-running a brief against a tree the first attempt had already modified and committed.
+- **Exit 127 with a command-not-found diagnostic is an environment defect, not a failed check.** A reality check that cannot execute provides no evidence that the requirement is unmet; three consecutive successful runs were failed by a check invoking `rg`, which is not installed here. A bare 127 without that diagnostic still fails hard.
+- **An RPC timeout no longer claims the daemon is not running.** Connection failure and "written but unanswered" were collapsed into one message, so an operator who had in fact cancelled a task was told it never arrived — and repeated a destructive command.
+- **Every dashboard path that starts work now honors project admission control.** `isProjectBusy` appeared zero times in the dashboard: approve, execute, rerun, stage rerun, gate re-evaluation and task creation each spawned a run while checking only that *this* task was idle, never whether the *project* was. All six now return 409 with no launch and no pre-mutation side effects.
+- **A registry lock left by a killed writer no longer bricks task registration permanently.** Locks record owner pid, acquisition time and a token; a lock whose owner no longer exists is taken over with a warning, a live owner's lock is never stolen, and release only unlinks its own token. Previously a zero-byte leftover produced a bare `EEXIST` that reached no log — only the abandoned client socket.
+- **Run-status semantics are derived from one vocabulary.** 143 status-literal comparisons across 14 files are now zero outside `store.ts`, with an AST gate that fails on any new one and names file:line. Adding `parked` had touched 11 files, missed two, and shipped two defects that executed a high-risk action twice.
+- **A clean clone passes `npm test` again.** Four UI suites imported React through a hardcoded `../../ui/node_modules` path — available only after a separate install under `ui/` — so a fresh checkout failed at import time.
+
+- `campaign.ts` read terminality as an inverted denylist, so any newly-added run status was misread as terminal and `pollRunCompletion` would fabricate an outcome from an unfinished run. Both it and `run-summary.ts` (whose hand-copied terminal set had already drifted) now derive from the engine's single source of truth.
+- `terminal_states` frontmatter may now only declare a REAL terminal status. A brief could previously declare a non-terminal one and have it written into run.json *with* `completedAt` while every terminal guard reported false — an agent-reachable way to forge a run that no consumer treats as finished or alive.
+- The supervisor ABORT poller was torn down after the first stage attempt, but the adapter-error backoff ladder (30s+60s+120s) and the cross-adapter fallback that follow are four more full-length agent runs: a stage in backoff was unkillable for minutes. The signal is now both passed to those attempts and kept live for them, and the backoff sleep checks it instead of sleeping on.
+- The catch-all stage retry now preserves the failed attempt's `error`, so `buildRetryPreamble` can state the real cause; without it every non-timeout failure was announced to the agent as "timed out".
+
+### Fixed — honest terminals, all exit doors (engine bugs #1-#7, found by live audit + wind-tunnel)
+
+- **Confirm-fail no longer kills the research program.** A ship candidate that fails the brief's confirm gate is marked `confirmFailed`, excluded from kept/running-best (so the same unconfirmed number cannot re-trigger ship→confirm→fail forever), and the loop continues under the normal stop rules instead of terminating as a premature ceiling.
+- **Ceiling floors are enforced on the research loop.** A `terminal_states.ceiling_hit.floor` (research semantics: measured rounds are the attempted stages) defers a premature policy ceiling while round/wall budget remains; forced commits under exhausted hard budgets are annotated honestly.
+- **Engine-initiated terminals honor the declared artifact contract.** Research-loop, unified-gate, and budget-exhausted terminals all mirror the terminal report to the brief-declared `paths[0]` (never clobbering an agent-authored artifact) and set `terminalArtifact`.
+- **Leftover pending stages are swept to `skipped`** (with the reason) on every terminal commit instead of freezing `pending` in run.json forever.
+- **Terminal reality gate no longer false-blocks on the consumed round result.** The engine restores the last consumed `round_result.json` before running planner-authored checks that reference it.
+- **Agent-authored `ship_report.md` can no longer bypass the confirm gate.** The unified terminal-state gate runs the same brief-declared confirm on a research run's `shipped` terminal file and rejects the artifact on failure (guidance hint, run continues).
+- **codex adapter effort key fixed** (`model_reasoning_effort`, not the silently-ignored bare `reasoning_effort`) — effort pins never took effect before.
+
+### Added
+
+- **Model/effort inheritance.** `model: default` / `reasoning_effort: default` now resolve explicit pin → the user's global `~/.codex/config.toml` → CLI built-in default, so projects follow the user's own codex setup with zero per-project maintenance across CLI upgrades.
+- **`flowcrew rehearse <brief.md>`** — pre-flight wind tunnel: runs the brief through the REAL scheduler against a scripted fake agent in an isolated temp project + temp FC home (seconds, zero tokens), validating the engine × brief contract: frontmatter, confirm wiring, stop rules vs ceiling floor, declared terminal paths, round-result plumbing. `--static-only`, `--keep`.
+- **ScriptedAdapter** (`src/adapters/scripted.ts`) — deterministic per-stage playback adapter powering rehearse and the repo-local engine-scenario regression suite.
+- **`FC_HOME` env / `setFcGlobalDir()`** — structural isolation of the global state root for tests and rehearsal (never write runs/campaign ledgers into the real `~/.fc`).
+- Supervisor `reasoning_effort` is now a role default (`low`, overridable via `supervisor.reasoning_effort`) instead of inheriting the work-agent effort — an inherited global `max` would blow the 30s assess timeout and silently un-steer runs.
+
+## [0.4.1] - 2026-07-10
+
+### Changed
+
+- **Bounded run-directory disk growth.** Each codex stage's `codex_home` — transient CLI cruft (~90 MB/stage, dominated by the `.tmp/plugins` git packs, ~99% of a run's on-disk size) — is now purged automatically when the stage **succeeds**, and **kept on failure/abort/timeout** for debugging (dropping only the already-checkpointed SQLite WAL/SHM). Previously it accumulated unboundedly, so `~/.fc/runs` could grow to hundreds of GB; it now stays at result-file scale (~KB per run). Extends the existing WAL-only cleanup — same automatic-cruft-cleanup category, no new config. `flowcrew clean --keep N` remains the manual escape hatch for pruning old run residue.
+
+## [0.4.0] - 2026-07-05
+
+FlowCrew 0.4.0 hardens the autonomous loop so that honesty becomes a property of the engine, not of the operator's diligence. It internalizes *verify-before-trust*, makes honest negatives first-class, adds self-remediation, and is validated across 6 task domains and 2 objective kinds (research `metric` and engineering `acceptance`).
+
+### Highlights
+
+- **Confirm-gate (verify-before-trust).** A brief-declared `research.confirm` command runs as an independent check before any `shipped` terminal; a candidate that beats the metric but fails confirmation is downgraded, not shipped. Generalizes the Reality-Gate mechanism to the ship path.
+- **Honest terminal taxonomy.** Added a first-class `incomplete` status (budget-exhausted mid-search — distinct from a crash and from an honest ceiling); unified the terminal-status guard so honest negatives are never mislabeled `failed` or scored at baseline by the outer loop.
+- **Anti-smoke integrity floors.** Brief-declared `research.integrity.field_floors` reject token/"smoke" rounds (e.g. `real_train_iters >= 150`) instead of banking them as results.
+- **Self-remediation.** Planner failures (empty/invalid `dispatch.yaml`) now bounded-retry with a specific re-prompt instead of a fatal punt (`default_plan_stage_retries`); the supervisor gains a **REJECT** verdict to send an insufficient deliverable back for re-work (`default_supervisor_max_rejects`); a deterministic no-progress stage watchdog aborts stalled stages.
+- **Fail-loud on degraded config.** A `workflow=research` run whose frontmatter fails to parse now fails loud (a `research_mode_degraded` event) instead of silently degrading to plain dispatch.
+- **Observability precision.** Integrity-rejected round counts surface in the terminal report; run summaries derive their decision label from the true terminal status; a declared confirm-gate that is skipped on a non-ship terminal is recorded rather than silently dropped.
+- **Literature scout + portfolio coverage.** The outer loop can expand its portfolio from web search before exploring, with a deterministic coverage floor and domain-ledger awareness to avoid re-proposing dead directions.
+- **Regression-guarded.** The hardening above is developed against a task-agnostic engine-contract suite (policy, terminal/verdict, dispatch retry/reject, stall detection, confirm-gate).
+
+## [0.2.0] - 2026-05-28
+
+FlowCrew 0.2.0 is the first release positioned as a full agent workflow control plane rather than a browser-first alpha. It adds a Codex-default execution path, campaign memory, run knowledge graphs, deterministic Reality-Gate checks, supervisor steering, daemon/background task surfaces, and a rebuilt dashboard/documentation experience.
+
+### Highlights
+
+- **Codex-default execution**: project defaults now route agent stages through Codex by default, while still supporting Claude as a per-run or per-role override.
+- **Recommended Claude Code -> Codex workflow**: README and skills now present the intended loop: discuss and shape the plan in Claude Code, then `/ship` the confirmed task to FlowCrew for Codex-backed execution.
+- **Workspace dashboard redesign**: added workspace/campaign views, run detail pages, campaign KPIs, phase progress, run lists, brief revision panels, and knowledge graph panels.
+- **Run Memory Graph**: added dashboard and documentation support for persisted goals, approaches, findings, insights, results, user hints, and dead ends.
+- **Campaign intelligence**: added campaign iteration state, brief versioning, diagnosis/review surfaces, cross-campaign knowledge graph support, plateau/regression triggers, and research workflow policy support.
+- **Reality-Gate framework**: added deterministic evidence checks that can block unsupported terminal success, plus an audit command for retrospective verification.
+- **Supervisor and daemon runtime**: added supervisor escalation, background task registry, daemon/task CLI surfaces, and run summary parsing.
+- **Release-facing documentation refresh**: rewrote the README, refreshed screenshots and demo assets, and added focused reference docs for architecture, campaigns, CLI, configuration, Reality-Gate, and skills.
+
+### Changed
+
+- Raised the package version to `0.2.0`.
+- Kept generated framework campaign logs local-only via `.gitignore`.
+- Removed older dashboard screenshots and replaced them with current workspace, campaign, agent, architecture, and run-memory visuals.
+
+## [0.1.0-alpha]
+
+Public alpha release for early feedback on the browser-first multi-agent workflow experience.
+
+### Added / Improved
+
+- Added campaign iteration visibility in the dashboard.
+- Added research-injection and campaign pivot surfaces.
+- Improved campaign trigger logic with previous run history.
+- Added safe campaign ID persistence.
+- Added existing campaign selection when creating new tasks.
+- Removed internal `new:` prefixes from campaign names.
+- Improved the live monitor with DAG, attempt history, and output panels.
+- Persisted task settings across page reloads.

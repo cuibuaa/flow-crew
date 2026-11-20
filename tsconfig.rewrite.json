@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "incremental": false,
+    "allowJs": true,
+    "checkJs": true,
+    "lib": [
+      "ES2023"
+    ]
+  },
+  "include": [
+    "rewrite-src/**/*.ts",
+    "rewrite-src/**/*.mjs",
+    "integrations/claude/flowcrew-session.mjs",
+    "spec/rewrite-hooks-*.test.ts",
+    "spec/native/rewrite-hooks-*.test.ts",
+    "spec/fixtures/rewrite-port-composition.ts",
+    "spec/fixtures/rewrite-core-projection.ts",
+    "spec/rewrite-ops-fixture.ts",
+    "scripts/package-install.mjs",
+    "spec/native/rewrite-integration-engine.test.ts",
+    "spec/native/fixtures/public-cli.mjs"
+  ]
+}

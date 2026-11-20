@@ -1,0 +1,167 @@
+{
+  "method": "Synthetic obligations; no original text or physical grants. Optional command scheduling does not waive a criterion.",
+  "rows": [
+    {
+      "brief": "sample-a",
+      "criterion": "criterion-01",
+      "commands": [
+        "command-01"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-a",
+      "criterion": "criterion-02",
+      "commands": [],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-a",
+      "criterion": "criterion-03",
+      "commands": [],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-a",
+      "criterion": "criterion-04",
+      "commands": [
+        "command-02"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-a",
+      "criterion": "criterion-05",
+      "commands": [
+        "command-02"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-01",
+      "commands": [
+        "command-01",
+        "command-02",
+        "command-03",
+        "command-04",
+        "command-05",
+        "command-06"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-02",
+      "commands": [],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-03",
+      "commands": [
+        "command-07"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-04",
+      "commands": [
+        "command-08"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-05",
+      "commands": [
+        "command-09"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-06",
+      "commands": [
+        "command-18"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-07",
+      "commands": [
+        "command-10",
+        "command-11",
+        "command-12",
+        "command-13"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-08",
+      "commands": [
+        "command-14"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-09",
+      "commands": [
+        "command-15"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-10",
+      "commands": [
+        "command-16"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-11",
+      "commands": [],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-12",
+      "commands": [
+        "command-17"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-13",
+      "commands": [
+        "command-18"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-14",
+      "commands": [
+        "command-23",
+        "command-19",
+        "command-20",
+        "command-21",
+        "command-22"
+      ],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    },
+    {
+      "brief": "sample-b",
+      "criterion": "criterion-15",
+      "commands": [],
+      "obligation": "Retain evidence for this synthetic criterion, including optional-command evidence where linked."
+    }
+  ]
+}

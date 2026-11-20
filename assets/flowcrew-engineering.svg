@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380" role="img" aria-label="Engineering: a moving map. From Your brief the crew's coral track goes around a storm, circles once after review says try again, and is now on final approach to the runway, where a board of three ticked checks reads Done. No route is drawn ahead.">
+  <defs><linearGradient id="me-fus" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F6B19B"/><stop offset=".45" stop-color="#E78368"/><stop offset="1" stop-color="#C9644F"/></linearGradient>
+    <filter id="me-soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>
+    <filter id="me-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="5"/></filter>
+    <clipPath id="me-clip"><rect x="18" y="18" width="564" height="344" rx="16"/></clipPath><g id="me-sil">
+      <path d="M18-8-18-62H-31L-16-8Z"/><path d="M18 8-18 62H-31L-16 8Z"/>
+      <path d="M-44-6-60-28H-67L-56-6Z"/><path d="M-44 6-60 28H-67L-56 6Z"/>
+      <path d="M62 0C62-6 55-9.5 46-9.5L-50-8C-58-8-64-4-66 0-64 4-58 8-50 8L46 9.5C55 9.5 62 6 62 0Z"/></g><g id="me-plane">
+      <path d="M18-8-18-62H-31L-16-8Z" fill="#E07A61"/><path d="M18 8-18 62H-31L-16 8Z" fill="#D46F57"/>
+      <path d="M18-8-18-62H-23L12-8Z" fill="#F4AE97"/><path d="M18 8-18 62H-23L12 8Z" fill="#EB9A82"/>
+      <ellipse cx="7" cy="-30" rx="11" ry="5" fill="#C9624E"/><ellipse cx="7" cy="30" rx="11" ry="5" fill="#C05B48"/>
+      <ellipse cx="17" cy="-30" rx="2.2" ry="3.6" fill="#173247"/><ellipse cx="17" cy="30" rx="2.2" ry="3.6" fill="#173247"/>
+      <path d="M-44-6-60-28H-67L-56-6Z" fill="#E07A61"/><path d="M-44 6-60 28H-67L-56 6Z" fill="#D46F57"/>
+      <path d="M62 0C62-6 55-9.5 46-9.5L-50-8C-58-8-64-4-66 0-64 4-58 8-50 8L46 9.5C55 9.5 62 6 62 0Z" fill="url(#me-fus)"/>
+      <path d="M44-4.2-48-3.4" stroke="#FAD0C2" stroke-width="2.6" stroke-linecap="round" opacity=".85"/>
+      <path d="M49-5.2Q57-4.4 59 0 57 4.4 49 5.2 51.5 0 49-5.2Z" fill="#173247"/>
+      <path d="M-48 0H-66" stroke="#C05B48" stroke-width="3" stroke-linecap="round"/></g></defs>
+  <rect x="6" y="6" width="588" height="368" rx="26" fill="#173247"/>
+  <rect x="7.5" y="7.5" width="585" height="365" rx="24.5" fill="none" stroke="#2E5068" stroke-width="1.5"/>
+  <g clip-path="url(#me-clip)">
+    <rect x="18" y="18" width="564" height="344" fill="#DCE8E2"/>
+    <g fill="none" stroke="#173247" stroke-opacity=".08" stroke-width="1.2"><path d="M18 120Q300 96 582 120M18 200Q300 176 582 200M18 280Q300 256 582 280M150 56Q138 190 150 318M300 56Q294 190 300 318M450 56Q462 190 450 318"/></g>
+    <g fill="#F5F1E8" stroke="#173247" stroke-opacity=".42" stroke-width="1.6" stroke-linejoin="round">
+      <path d="M18 160C60 150 100 168 118 196 132 220 120 262 140 290 150 304 144 314 138 318H18Z"/>
+      <path d="M150 56H330C320 74 290 82 262 78 230 74 200 82 176 75 162 70 152 63 150 56Z"/>
+      <path d="M218 268C238 252 280 256 290 272 296 286 272 300 246 296 226 292 210 280 218 268Z"/>
+      <path d="M424 236C430 196 458 168 498 166 538 164 560 146 582 140V318H462C440 298 418 270 424 236Z"/>
+    </g>
+    <g transform="translate(190 158)">
+      <path d="M-46 16C-62 16-64-6-46-9-46-28-20-35-9-22-3-39 26-39 30-18 49-20 56 12 38 16Z" fill="#6A8494"/>
+      <path d="M-1 12-11 32H1L-7 48 13 24H1L9 12Z" fill="#F2B544" stroke="#173247" stroke-width="1.2" stroke-linejoin="round"/>
+    </g>
+    <path d="M72 236C110 214 140 212 178 214 214 216 230 196 262 182 300 165 340 160 372 140 398 124 396 92 368 90 338 88 316 108 312 136 307 170 300 232 344 230" fill="none" stroke="#E78368" stroke-width="12" stroke-linecap="round" opacity=".35" filter="url(#me-glow)"/>
+    <path d="M72 236C110 214 140 212 178 214 214 216 230 196 262 182 300 165 340 160 372 140 398 124 396 92 368 90 338 88 316 108 312 136 307 170 300 232 344 230" fill="none" stroke="#DD6447" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="304" y="102" text-anchor="end" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="21" font-style="italic" font-weight="600" fill="#C9553A">try again</text>
+    <g transform="translate(38 212)">
+      <path d="M0 0H22L32 10V42H0Z" fill="#FFFFFF" stroke="#173247" stroke-width="2.2" stroke-linejoin="round"/>
+      <path d="M22 0V10H32" fill="none" stroke="#173247" stroke-width="2.2" stroke-linejoin="round"/>
+      <path d="M6 18H26M6 25H26M6 32H19" stroke="#173247" stroke-width="2.2" stroke-linecap="round"/>
+    </g>
+    <text x="30" y="284" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="21" font-weight="600" fill="#173247">Your brief</text>
+    <g transform="translate(466 210) rotate(-10)">
+      <rect x="0" y="-12" width="112" height="24" rx="3" fill="#173247"/>
+      <path d="M18 0H104" stroke="#F5F1E8" stroke-width="2.4" stroke-dasharray="9 7"/>
+      <path d="M5-8V8M9.5-8V8" stroke="#F5F1E8" stroke-width="2"/>
+    </g>
+    <g transform="translate(474 70)">
+      <rect x="0" y="0" width="100" height="92" rx="10" fill="#FFFFFF" stroke="#173247" stroke-width="2.2"/>
+      <text x="50" y="27" text-anchor="middle" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="21" font-weight="700" fill="#173247">Done</text>
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 45l4 4 7-8M14 62l4 4 7-8M14 79l4 4 7-8" stroke="#32988C" stroke-width="3"/>
+        <path d="M34 45H84M34 62H78M34 79H82" stroke="#173247" stroke-opacity=".55" stroke-width="3"/>
+      </g>
+    </g>
+    <use href="#me-sil" fill="#173247" opacity=".2" filter="url(#me-soft)" transform="translate(422 239) rotate(-10) scale(0.9119999999999999)"/>
+    <use href="#me-plane" transform="translate(406 219) rotate(-10) scale(0.95)"/>
+    <rect x="18" y="18" width="564" height="38" fill="#1F4058"/>
+    <text x="38" y="44" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="2.4" fill="#F5F1E8">ENGINEERING</text>
+    <circle cx="502" cy="37" r="6.5" fill="#F07F64"/>
+    <text x="516" y="44" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="2" fill="#F5F1E8">REC</text>
+    <rect x="18" y="318" width="564" height="44" fill="#173247"/>
+    
+    <text x="40" y="347" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="22" font-weight="600" fill="#F5F1E8">No flight plan</text>
+  </g>
+</svg>

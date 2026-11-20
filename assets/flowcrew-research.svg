@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380" role="img" aria-label="Research: a discovery chart. The known world on the left is labelled Today's best; past its edge the sea is uncharted. The crew's coral track plants flags on two new islands, some side trips turn back, and the plane is crossing the coast of a new land whose outline is still being drawn. The compass that measures sits under glass, marked with a snowflake and labelled Judge frozen.">
+  <defs><linearGradient id="mr-fus" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F6B19B"/><stop offset=".45" stop-color="#E78368"/><stop offset="1" stop-color="#C9644F"/></linearGradient>
+    <filter id="mr-soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>
+    <filter id="mr-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="5"/></filter>
+    <clipPath id="mr-clip"><rect x="18" y="18" width="564" height="344" rx="16"/></clipPath><g id="mr-sil">
+      <path d="M18-8-18-62H-31L-16-8Z"/><path d="M18 8-18 62H-31L-16 8Z"/>
+      <path d="M-44-6-60-28H-67L-56-6Z"/><path d="M-44 6-60 28H-67L-56 6Z"/>
+      <path d="M62 0C62-6 55-9.5 46-9.5L-50-8C-58-8-64-4-66 0-64 4-58 8-50 8L46 9.5C55 9.5 62 6 62 0Z"/></g><g id="mr-plane">
+      <path d="M18-8-18-62H-31L-16-8Z" fill="#E07A61"/><path d="M18 8-18 62H-31L-16 8Z" fill="#D46F57"/>
+      <path d="M18-8-18-62H-23L12-8Z" fill="#F4AE97"/><path d="M18 8-18 62H-23L12 8Z" fill="#EB9A82"/>
+      <ellipse cx="7" cy="-30" rx="11" ry="5" fill="#C9624E"/><ellipse cx="7" cy="30" rx="11" ry="5" fill="#C05B48"/>
+      <ellipse cx="17" cy="-30" rx="2.2" ry="3.6" fill="#173247"/><ellipse cx="17" cy="30" rx="2.2" ry="3.6" fill="#173247"/>
+      <path d="M-44-6-60-28H-67L-56-6Z" fill="#E07A61"/><path d="M-44 6-60 28H-67L-56 6Z" fill="#D46F57"/>
+      <path d="M62 0C62-6 55-9.5 46-9.5L-50-8C-58-8-64-4-66 0-64 4-58 8-50 8L46 9.5C55 9.5 62 6 62 0Z" fill="url(#mr-fus)"/>
+      <path d="M44-4.2-48-3.4" stroke="#FAD0C2" stroke-width="2.6" stroke-linecap="round" opacity=".85"/>
+      <path d="M49-5.2Q57-4.4 59 0 57 4.4 49 5.2 51.5 0 49-5.2Z" fill="#173247"/>
+      <path d="M-48 0H-66" stroke="#C05B48" stroke-width="3" stroke-linecap="round"/></g>
+    <linearGradient id="mr-fade" gradientUnits="userSpaceOnUse" x1="190" y1="0" x2="268" y2="0"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>
+    <mask id="mr-known"><rect x="18" y="18" width="564" height="344" fill="url(#mr-fade)"/></mask>
+  </defs>
+  <rect x="6" y="6" width="588" height="368" rx="26" fill="#173247"/>
+  <rect x="7.5" y="7.5" width="585" height="365" rx="24.5" fill="none" stroke="#2E5068" stroke-width="1.5"/>
+  <g clip-path="url(#mr-clip)">
+    <rect x="18" y="18" width="564" height="344" fill="#EFE7D6"/>
+    <g fill="none" stroke="#173247" stroke-opacity=".1" stroke-width="1"><path d="M545 283L18 120"/><path d="M545 283L18 200"/><path d="M545 283L120 18"/><path d="M545 283L260 18"/><path d="M545 283L400 18"/><path d="M545 283L582 18"/><path d="M545 283L18 300"/><path d="M545 283L300 362"/><path d="M545 283L200 362"/></g>
+    <g mask="url(#mr-known)">
+      <rect x="18" y="18" width="300" height="344" fill="#DCE8E2"/>
+      <g fill="none" stroke="#173247" stroke-opacity=".08" stroke-width="1.2"><path d="M18 120Q300 96 582 120M18 200Q300 176 582 200M18 280Q300 256 582 280M80 56Q72 190 80 318M200 56Q194 190 200 318"/></g>
+    </g>
+    <path d="M18 66C70 62 118 78 148 98 174 116 166 150 184 174 196 194 176 222 160 240 146 256 158 292 132 318H18Z" fill="#F5F1E8" stroke="#173247" stroke-opacity=".5" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M60 110C80 140 70 170 96 196 112 214 104 250 120 280" fill="none" stroke="#7FB3C2" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round"/>
+    <circle cx="62" cy="236" r="3" fill="#173247" opacity=".55"/><circle cx="124" cy="132" r="3" fill="#173247" opacity=".55"/>
+    <text font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="21" font-weight="700" letter-spacing="2.4" fill="#173247" opacity=".78"><tspan x="34" y="168">TODAY'S</tspan><tspan x="34" y="194">BEST</tspan></text>
+    <g fill="#F5F1E8" stroke="#173247" stroke-opacity=".5" stroke-width="1.6"><path d="M246 228C256 216 280 218 284 232 288 246 266 254 252 250 240 246 238 236 246 228Z"/><path d="M322 150C330 136 356 138 360 152 364 166 344 172 330 168 318 164 316 158 322 150Z"/></g>
+    <path d="M430 252C416 222 420 186 436 150 448 120 464 98 484 86 520 76 560 72 582 72V212C566 222 544 232 516 242 486 252 456 258 430 252Z" fill="#F5F1E8"/>
+    <path d="M484 86C464 98 448 120 436 150 420 186 416 222 430 252 456 258 486 252 516 242 530 237 540 233 546 230" fill="none" stroke="#173247" stroke-opacity=".55" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M484 86C520 76 560 72 582 72M546 230C560 224 572 218 582 212" fill="none" stroke="#173247" stroke-opacity=".45" stroke-width="1.8" stroke-dasharray="5 6"/>
+    <g fill="none" stroke="#E07A61" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="6 6" opacity=".7">
+      <path d="M214 214C222 240 226 268 240 284"/><path d="M332 152C320 128 306 104 296 88"/>
+    </g>
+    <g fill="none" stroke="#9A8F7C" stroke-width="2.6" stroke-linecap="round"><path d="M234 278l12 12m0-12-12 12M290 82l12 12m0-12-12 12"/></g>
+    <path d="M180 188C210 200 236 232 258 232 282 232 296 176 330 156 350 146 372 142 390 139" fill="none" stroke="#E78368" stroke-width="12" stroke-linecap="round" opacity=".35" filter="url(#mr-glow)"/>
+    <path d="M180 188C210 200 236 232 258 232 282 232 296 176 330 156 350 146 372 142 390 139" fill="none" stroke="#DD6447" stroke-width="4.5" stroke-linecap="round"/>
+    <circle cx="180" cy="188" r="6.5" fill="#F5F1E8" stroke="#173247" stroke-width="3"/>
+    <g><path d="M266 230V200" stroke="#173247" stroke-width="2.4" stroke-linecap="round"/><path d="M267 200 288 207 267 214Z" fill="#32988C"/></g>
+    <g><path d="M346 152V122" stroke="#173247" stroke-width="2.4" stroke-linecap="round"/><path d="M347 122 368 129 347 136Z" fill="#32988C"/></g>
+    <text x="300" y="300" font-family="Georgia, 'Times New Roman', serif" font-size="23" font-style="italic" fill="#173247" opacity=".55">Uncharted</text>
+    <g transform="translate(545 279) scale(1.1)">
+      <path d="M-30 6A30 30 0 0 1 30 6V28H-30Z" fill="#FFFFFF" fill-opacity=".45" stroke="#173247" stroke-opacity=".45" stroke-width="1.6"/>
+      <circle cx="0" cy="8" r="17" fill="#F5F1E8" stroke="#173247" stroke-width="1.8"/>
+      <path d="M0-7 4 4 0 8-4 4ZM0 23-4 12 0 8 4 12Z" fill="#173247"/><path d="M0-7 4 4 0 8Z" fill="#E78368"/>
+      <path d="M-15 8-4 4 0 8-4 12ZM15 8 4 12 0 8 4 4Z" fill="#173247" opacity=".6"/>
+      <path d="M-22-14-12-24" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity=".8"/>
+      <g transform="translate(19 19) scale(.75)"><g fill="none" stroke="#173247" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8"/><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8" transform="rotate(60)"/><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8" transform="rotate(120)"/></g></g>
+    </g>
+    <use href="#mr-sil" fill="#173247" opacity=".2" filter="url(#mr-soft)" transform="translate(468 146) rotate(-14) scale(0.9119999999999999)"/>
+    <use href="#mr-plane" transform="translate(452 126) rotate(-14) scale(0.95)"/>
+    <rect x="18" y="18" width="564" height="38" fill="#1F4058"/>
+    <text x="38" y="44" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="2.4" fill="#F5F1E8">RESEARCH</text>
+    <circle cx="502" cy="37" r="6.5" fill="#F07F64"/>
+    <text x="516" y="44" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="2" fill="#F5F1E8">REC</text>
+    <rect x="18" y="318" width="564" height="44" fill="#173247"/>
+    <g transform="translate(51 340)"><g fill="none" stroke="#F5F1E8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8"/><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8" transform="rotate(60)"/><path d="M0-9V9M-3-8 0-5 3-8M-3 8 0 5 3 8" transform="rotate(120)"/></g></g>
+    <text x="70" y="347" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="22" font-weight="600" fill="#F5F1E8">Judge frozen</text>
+  </g>
+</svg>
