@@ -1,0 +1,61 @@
+{
+  "scope": "Separate author address grammar from observed filesystem byte names; independent of the 64 declaration cells. Native import/capture/restore runs at step 2.",
+  "cases": [
+    {
+      "id": "glob-literal",
+      "pathHex": "5b69645d",
+      "authorAddress": "refuse",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "newline",
+      "pathHex": "6c696e650a627265616b",
+      "authorAddress": "refuse",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "raw-ff",
+      "pathHex": "7261772dff",
+      "authorAddress": "not-utf8",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "leading-dash",
+      "pathHex": "2d6f7074696f6e",
+      "authorAddress": "admit",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "composed",
+      "pathHex": "c3a9",
+      "authorAddress": "admit",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "decomposed",
+      "pathHex": "65cc81",
+      "authorAddress": "admit",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "nested-vcs",
+      "pathHex": "6e65737465642f2e6769742f636f6e666967",
+      "authorAddress": "admit",
+      "workspaceImport": "preserve",
+      "restore": "literal-bytes"
+    },
+    {
+      "id": "root-vcs",
+      "pathHex": "2e6769742f636f6e666967",
+      "authorAddress": "admit",
+      "workspaceImport": "exclude-before-open",
+      "restore": "not-imported"
+    }
+  ]
+}

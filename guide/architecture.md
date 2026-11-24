@@ -1,153 +1,107 @@
 # Architecture
 
-For a contributor: which engine boundary enforces each guarantee and limitation?
+For contributors locating the owner of a guarantee. Operator procedures live in
+[operations](operations.md); typed model contracts live in [agent protocol](agent-protocol.md).
 
 ## Execution and settlement
 
 ```mermaid
 flowchart LR
-  Brief --> Admission --> Plan
-  Plan --> Workers --> Gate
-  Gate -->|rejection with admitted repair| Repair --> Gate
+  Brief --> Setup[Setup: record, runtime pin and project copy]
+  Setup --> Start[Start run id]
+  Start -->|decompose: true| Plan
+  Start -->|default| Work
+  Plan --> Work
+  Work --> Commands
+  Commands --> Gate[Independent gate]
+  Gate -->|admitted repair| Work
   Gate --> Settlement
   Settlement --> Records
 ```
 
-This diagram summarizes the engineering path, not every terminal research or approval branch.
-The scheduler owns graph execution and settlement; the worker owns one adapter execution.
-Planning and judging are model work when live adapters are selected. Admission, declared
-checks, deadlines, process identity and publication integrity are code boundaries.
+The brief declares criteria, resources, exact commands and allowed results. By default the
+graph is fixed: an author stage, an independent gate and a repair stage the gate can route
+to. A brief with `decompose: true` starts with a planner stage whose proposed graph replaces
+it. Pure admission checks role/command membership, dependencies and
+independent delivery topology for any graph, including an operator's `guide --plan`. The core selects and settles one mutable frontier at a time; DAG dependencies do not
+promise parallel execution. Authors produce work; independent gates judge all criteria
+in separate invocations without author guidance. Declared command
+receipts and output preservation constrain delivery beyond a model's verdict.
 
-A planner's typed result supplies the graph. Roles and check descriptors are supplied from
-registries; unknown roles and invalid whole-plan topology refuse admission.
-[Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and retained continuation.
-[Brief contract](brief-contract.md) owns research policy and deterministic checks.
-Ordinary failed work follows admitted bounded repairs, then stops; it does not force an
-unbounded outer re-plan. Deliberate next-phase/research advancement can plan more work.
+Provider adapters decode their native stdout incrementally. One decoder supplies live
+activity, the final answer and usage; provisional tool, message and turn events do not bypass
+closure, content or schema authentication. Activity summaries are at most 200 characters
+and omit command arguments, message bodies and environment values.
 
-Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
-[worker](../src/worker.ts), [gate loop](../src/scheduler/sched_loop/gate-loop.ts),
-[completion](../src/scheduler/sched_settlement/completion.ts).
+Claude uses stream-json input and output. It sends the initial prompt as a user message,
+keeps stdin open for same-turn operator guidance and closes it after the final result.
+It starts Claude with `--replay-user-messages`, so Claude echoes each stdin user message
+when it takes it into a turn. The live steering hook becomes available when input can be
+written; a guide counts as delivered only when its echo arrives, not when it is written.
+A root result with a written guide still unechoed is not the end: Claude runs another turn
+for that guide, and the invocation stays open until that turn's result, which supplies the
+answer. The adapter keeps at most one guide message outstanding and sends guides steered meanwhile as one message after the echo. A guide still unechoed when the invocation ends stays pending. A single reader
+consumes new raw-file bytes while the provider runs; it needs no filesystem watcher. Final
+decoding or native exit closes stdin. The final root result ends the invocation: Claude
+gets 2 s to exit, then the owner is closed. Codex keeps exec with its configuration and rules isolation
+flags. It streams activity but exposes no same-turn steering hook; requested steering
+is refused and guidance waits for the next author invocation. Independent gates receive
+no operator guidance.
 
-## Deadlines and idle progress
+## Owners
 
-Each scheduled execution receives one budget and an immutable hard stop, shared by
-adapter retries, backoff, correction and guidance continuations. Before the budget ends,
-the worker delivers actionable wrap-up guidance through the existing invocation control
-path on both adapters. A finishing interval and child-retirement reserve keep orderly
-handoff separate from forced termination; [the protocol](agent-protocol.md#stage-budgets-and-retained-continuation)
-states the exact timing formula and very-short-budget behavior.
+| Boundary | Responsibility |
+|---|---|
+| `contract/` | Strict brief/runtime/plan/answer grammars and canonical status decoding |
+| `core/` | Pure admission, scheduling, review/repair decisions, C2 and settlement |
+| `exec/` | Output facts and settings, invocation composition, provider adapters and command execution |
+| `records/` | SQLite event/current authority, immutable evidence, checkpoints, runtime pin and preservation |
+| `host/` | Native process identity, invocation containment and closure, detached Node supervisor and operation workers |
+| `ops/` | CLI composition, setup, control, status and land |
 
-Cooperative and bounded forced wrap-ups retain admitted files and a done/remaining
-handoff, and continue the same DAG in the next finite iteration. They are not technical
-failures and do not grow the budget. Each later gate has its own clock. Legacy timeout
-retry history remains readable; an older interrupted technical chain retains its recorded
-budget on continuation. Settlement synchronously checks monotonic expiry when timers were
-starved. Current-execution abort authority still wins.
+Code lives under `rewrite-src/`. Monitor readers consume canonical status; the standalone
+session hook uses the same decoder without invoking the CLI or SQLite.
 
-The always-used deterministic watchdog polls at a default 30 seconds and binds observations
-to the active execution index/start. Changed output, artifact or command CPU/I/O evidence
-advances idle progress. A provider with no active command needs growing socket receive-byte
-counters or output/artifact progress; CPU activity/writes alone are not provider receive progress.
-Linux receive sampling uses `ss` and owned socket inodes. Missing/inaccessible counters provide
-no evidence. Unchanged counters cannot rule out GPU/container/remote work. Local commands
-and finalization remain subject to the silence bound; old verdicts cannot protect a new attempt.
-A verified idle abort does not consume an ordinary failure retry.
+## Isolation and process recovery
 
-On POSIX, deadline/abort termination sends SIGTERM to the detached stage process group, then
-SIGKILL after a fixed five-second grace if needed. Cleanup time does not extend the deadline;
-records retain elapsed time and overrun through child settlement. Windows keeps immediate
-direct-child termination because Node does not provide equivalent process-group signal
-semantics. There is no model supervisor or supervision launch flag; settings live in
-[configuration](configuration.md#engine-defaults).
+Setup copies the entire project except `.git` into a per-run workspace, including ignored
+files, and imports declared external inputs. Default cwd and private
+mutable Git metadata separate ordinary work from the source and checkpoint metadata.
+All authors, providers and commands run with host-account rights. Declared inputs and
+outputs define content checks and retained evidence. Frozen-input audits detect changes
+at observation boundaries; plan/gate project changes are rejected. Same-account programs
+can still reach other host paths. The full limits are in
+[operations](operations.md#platform-boundaries).
 
-Sources: [deadline](../src/attempt-deadline.ts), [watchdog](../src/stage-watchdog.ts),
-[adapter process boundary](../src/adapters/base.ts),
-[technical policy](../src/scheduler/sched_admission/configuration.ts).
+The detached Node supervisor survives launcher exit. Recorded boot/start/group identities
+distinguish owners from reused PIDs. On Linux, each author invocation and engine command
+uses a cgroup v2 scope when available; closure kills its descendant hierarchy and confirms
+that it is empty, including children that create another process group or session. Normal
+ending, cancellation and controller recovery use the same typed closure owner. Otherwise,
+including on macOS and Linux without a systemd user manager, each invocation carries a
+unique environment marker. Closure kills the authenticated group, then repeatedly scans
+only current-user processes and kills those retaining the marker until no readable match
+remains. The marker owner retires, allowing later work. Receipts name the guarantee:
+`cgroup` proves descendant closure; `marker` is best effort and excludes processes that
+cleared their marker. Unreadable or macOS SIP-hidden environments are unknown and are
+not signalled; their PIDs and the limitation appear in the receipt and status interpretation.
+Old owner records without containment still close only their authenticated group. Cancel fences work. Restart is
+observed as an interruption; continuation requires manual resume. There is no automatic
+startup pickup.
 
-## Process supervision and recovery
+## Runtime and records
 
-Background tasks run through a portable Node shim that records running/exit facts atomically.
-Where a systemd user session is usable, a unit supplies cgroup cleanup with `KillMode=mixed`;
-it is not configured for automatic crash restart. Both paths use the captured launch
-environment and a non-login shell, excluding invocation/service-manager keys. This process
-shim is separate from the removed model supervisor and the stage idle watchdog.
+Each run uses a digest-authenticated runtime copy, including production dependencies.
+Upgrading the package cannot change an existing run's operation imports. SQLite owns
+committed history and current rows; `status.json` v4 is a derived view for hooks and monitor.
+One canonical decoder also reads historical v2/v3 snapshots. A snapshot records the last
+observation; it is not continuous proof that a controller is alive.
+Evidence/checkpoints use immutable content identities. Publication of a derived view
+never retracts an already committed event.
 
-Linux binds PIDs to procfs start tokens. Without procfs, the fallback uses second-resolution
-`ps -o lstart=` start time and recorded command, a weaker identity. An unreadable binding means unbound,
-not proven dead. A shim exit record can survive daemon death; a hard-killed shim may never
-publish an exit. Unknown fate cannot justify automatic retry, because work may still exist.
-
-New checkpoints record boot, loaded generation and owned command groups. Startup reconciliation
-first excludes a live scheduler. Proven prior-boot death or closed owned command groups can
-establish a resumable interruption, preserving completed work and budget and repending
-interrupted work. Missing checkpoints, unknown fate or an incompatible admitted plan prevent
-continuation. Historical runs retain their older recovery limits.
-
-Sources: [shim](../src/supervise-shim.ts), [supervision records](../src/supervision.ts),
-[orchestrator](../src/orchestrator.ts), [process identity](../src/process-liveness.ts), [PID binding](../src/run-lock.ts),
-[recovery](../src/restart-recovery.ts).
-
-## Write and publication ownership
-
-The scheduling frontier admits one stage at a time into a shared mutable project tree.
-Planner scopes describe estimated work and product ownership. They never veto legitimate
-project writes. The run baseline binds task-declared immutable evidence once, including its
-canonical identities, exact output precedence and restorable bytes. Settlement owns content
-rejection and restoration; the audit projects its result without assigning snapshot changes
-to an invented author. Git owns ordinary disposable-output accounting. Tracked and frozen
-content remains evidence regardless of spelling, and unknown preimages never imply absence.
-
-Settling an admitted write retains its bytes in the existing run rollback content store before
-the next writer starts. Task-frozen preimages remain bound to run admission and are never
-relearned from a changed tree. Ordinary input locators remain mutable; unknown preimages
-never authorize destructive restoration.
-
-Project validation owns dependency preparation. Each configured validation batch
-installs from the current project lockfiles with the discovered package manager's
-frozen install command before running checks; preparation failures stop the batch.
-Setup captures the target baseline. The ready record fixes comparison commands and
-results, not the installed dependency set:
-live gates and settlement prepare from the run's current lockfiles through the same
-[validation owner](../src/project-validation.ts).
-
-Declared artifact roots remain confined to their stated trees. Directory members
-may reference external tools and dependencies; engine carrier aliases remain refused.
-Authored build outputs survive retries and resumes.
-
-Engine mutation-capable filesystem access goes through `engine-fs`, enforced by ESLint.
-Reserved run carrier identities and acknowledged history are checked independently of
-process supervision. Worker-authored outputs do not become engine records merely by
-occupying a stage directory or resembling a reserved name. Native shared SQLite carrier
-families have their own ownership boundary. Cross-process approval resolutions are projected
-by the resident owner under the run lock; parked status alone does not grant another writer
-ownership while children close. Integrity refusal is an execution failure, not ordinary
-work that can be retried into authority.
-
-These checks do not turn shell-enabled workers into an OS sandbox. Use an isolated host/workspace
-when the task needs stronger access isolation. The brief and injected constraints remain part
-of the agent's instructions.
-
-Sources: [batch owner](../src/scheduler/sched_scope/scope-batch.ts),
-[restoration](../src/scheduler/sched_scope/restore.ts), [integrity](../src/engine-integrity.ts),
-[filesystem](../src/engine-fs.ts), [ownership](../src/engine-owned-carriers.ts),
-[lint rules](../eslint.config.js).
-
-## Evidence and builds
-
-`run.json` is the compact projection; append-only histories and events retain earlier facts.
-Its history ref owns the format version and carrier path. New runs use `run-history.jsonl`;
-history records have no version field, and readers and resumed writers follow the ref's path.
-Built-in adapters record compressed immutable invocation inputs before each native transport
-call, including retry inputs. Unknown provider defaults/hidden instructions remain unresolved.
-Private adapter homes isolate invocations; session continuation needs explicit compatible UUID
-binding and never grants scope. [State and operations](operations.md#inspect-guide-and-stop)
-explain the read surfaces and archived aliases.
-
-Build compilation stages a complete backend/UI generation and publishes with a manifest-last
-transaction. It refuses changes to live output roots; archived generations cannot redirect
-a running process's later imports. [Contributing](../CONTRIBUTING.md#build-and-validation)
-owns validation commands and private output guidance.
-
-Sources: [store](../src/store.ts), [invocation capture](../src/run-state-view.ts),
-[adapter homes](../src/adapter-home.ts), [build publication](../src/build-manifest.ts).
+`land` is the sole reclamation path, after preservation and process/accounting
+closure. It preserves the declared outputs first, then removes the project copy, work root,
+pin and raw evidence while retaining SQLite history, status and the materialized deliveries.
+Status reads the retained file-size measurement (`heldBytes`), or reports `heldSpacePending`
+until an ending or control writer measures it; the measurement remains until cleanup completes.
+See [preservation](operations.md#preserve-and-reclaim).

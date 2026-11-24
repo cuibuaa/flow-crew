@@ -8,6 +8,165 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
+## [0.12.0] - 2026-11-20
+
+### Added
+
+- Optional command `dependsOn` paths let delivery reuse passing results when repairs leave those project dependencies unchanged, with the source shown in evidence and status.
+- A required command that exits non-zero at the delivery gate is run once on the run's base tree. If it fails there too, the gate records basis `pre-existing` (shown in status) and the failure does not block acceptance; otherwise the basis is `introduced` and it blocks. See the [brief contract](guide/brief-contract.md#required-commands-that-already-fail-on-the-base).
+- Optional brief field `decompose: true` starts the run with a planner stage; without it every run uses a fixed author, gate and repair graph.
+- Two runnable research example briefs, a positive case and a negative control, checked by the test suite. See [examples](examples/README.md#research-briefs).
+- Brief-contract lessons: prove each claimed visual difference with paired crops of the product and the mock, and keep the data that decides whether a research result is adopted out of the run's reach.
+
+### Changed
+
+- **Roles: one short wording for engineering and research briefs.** The plan, work and gate role texts keep only what a model cannot infer and what changed its behaviour in replays. When an existing test or fixture contradicts the brief, the author follows the brief and reports the contradiction; it runs each example, expected output or measurement the brief gives before reporting delivered, and does not report a requirement delivered while it is unverified. The gate compares results as well as behaviour on the base and changed tree, treats the author's reports like its tests (not proof), and no longer mentions inputs it never receives. In replays where review named the real problem, authors had kept a stale test instead of applying the finding.
+- **Thin-engine rewrite.** The old scheduler, daemon and React control dashboard are
+  replaced by a small engine with strict brief/plan/answer contracts, one SQLite journal,
+  per-run project copies, independent review and retained command evidence. The package
+  executable is now `dist-rewrite/cli.js`.
+- **One public dashboard entry: `flowcrew monitor`.** It prints a URL and serves GET only,
+  by default at `http://127.0.0.1:8795`, using the CLI's selected store. `--port N`,
+  `--host H` and repeated `--store-root DIR` select the listener and stores. The old
+  standalone monitor CLI is removed; packaged consumers use `flowcrew monitor` too.
+  The page shows Needs you / Running / Ended counts, one stage time track per run,
+  current stage, tries, review results, checkpoints and stop reasons. Act in the owning
+  Claude Code or Codex session; the page cannot change runs.
+- **Status files are v4.** `runs/<run-id>/status.json` contains journal facts; public
+  readers apply one shared read-only controller/stage availability view. Titles,
+  stage segments and summaries, command progress, checkpoints and resume-refusal causes
+  are retained when available. Historical v2/v3 displayed snapshots remain readable;
+  unsupported development journal-only v3 files are not a migration format. Missing
+  historical facts remain absent. A dead controller is interrupted, not silently resumed.
+- **Independent runtime copies and explicit recovery.** Each new run keeps its own built
+  runtime and production dependencies; upgrades affect new runs. After a host restart,
+  inspect status and explicitly resume using the original copy. Recorded process-group
+  closure and cleanup attention stay visible even on terminal runs.
+- **Sandbox removed.** Authors, providers and declared commands have the OS account's
+  ordinary rights. Separate project copies, frozen-input observations, checkpoints and
+  independent review replace the engine's confinement mechanisms as accountability
+  tools; they do not enforce OS security. Processes outside the recorded closure
+  guarantee and remote effects require workload-owned cleanup.
+  See [execution boundaries](guide/operations.md#platform-boundaries).
+- **Declarations replace inferred policy.** Briefs declare criteria, inputs, outputs,
+  exact argv/env commands, result labels and `allowBlocked`. Required commands must
+  complete successfully at the delivery gate, retain applicable passing evidence
+  for unchanged declared dependencies, or fail identically on the unmodified base. Setup checks declarations/settings without executing any
+  declared command. Research-specific engine policy and artifact contracts give way to
+  ordinary criteria, declared evaluators, outputs and independent gate evidence.
+- **One progress backstop replaces execution budgets.** Three consecutive gate rejections
+  (counting the one that last set the best pass count), or four failures without a
+  completion, pause while retaining work. The former engine iteration,
+  stage/idle and retry budgets are retired. Provider context exhaustion remains native;
+  optional `commands[].durationMs` limits that command alone. See [configuration](guide/configuration.md).
+- **State moves to the platform state directory.** Default: `$XDG_STATE_HOME/flowcrew`
+  or `$HOME/.local/state/flowcrew`, containing `state.sqlite` and `store/`. `FC_HOME`
+  overrides the state directory and default store; `FLOWCREW_STORE_ROOT` overrides the
+  store independently. The store contains `runs/`, `pins/`, `work/` and, after `land`,
+  `deliveries/`. `FLOWCREW_RUNTIME_ROOT` selects the installation for new runs.
+
+### Migration
+
+This is a CLI, brief, configuration and storage break from 0.11.0. There are no legacy
+command aliases or automatic imports of the old store. Preserve old results and settle
+old work with the old installation before switching; keep old state separate. Historical
+v2/v3 **rewrite status snapshots** are readable, but that does not make 0.11.0 engine
+records resumable. The old default was `$HOME/.fc`; an existing `FC_HOME` retains its
+literal directory selection, so choose a fresh directory for the new engine.
+
+Rebuild and relink the CLI, reinstall skills with `./skills/install.sh`, and check
+`which flowcrew` and `flowcrew --help`. The installer copies linked guides from their
+single source into skill references. Review the host-rights boundary and approve the
+exact brief digest, source and start options before new work. Rewrite old briefs using
+the [current contract](guide/brief-contract.md), and replace YAML workflow/defaults
+configuration with `config/runtime.json` roles (or `--config <file>`).
+
+| Previous interface or retired rewrite mechanism | Replacement in 0.12.0 |
+|---|---|
+| `init`, `adapter` | Build/link the package, install skills; select roles in runtime JSON or use `start --backend` |
+| `quick`, `ship-preflight`, `rehearse`, `ship-setup` | Author with `/ship` (`$ship` in Codex), check `setup <brief>`, then `start <brief>`; setup executes no commands |
+| `plan-check` and YAML dynamic workflow dispatch | Typed plans checked by the engine; pending-plan changes through `guide <run-id> <text> --plan <file>` |
+| `start` as a dashboard server, `dashboard status`, `watch` | `monitor`; `start <brief>` now starts a run |
+| `list`, `state`, `events` | `status [<run-id>]`, monitor details and retained evidence; no public event-follow command |
+| `interrupt`, `task cancel`, `task resume`, `task retry` | `cancel <run-id>`, `resume <run-id>`; terminal work requires a new brief/run |
+| `task list`, `task show`, `task tail` and numeric task registry | Run IDs from `start`, `status [<run-id>]` and retained command streams |
+| `daemon start/serve/stop/restart/status/logs/deploy/hold/hold-status/continue` and RPC deployment holds | Per-run supervisor/runtime copy; manage installation upgrades outside the engine, inspect and explicitly resume after restart |
+| `inbox list/show/approve/deny` and execution approval requests | Approve the saved brief before launch in the coding-agent session; use `guide`, `cancel` or `resume` during work |
+| `doctor` and registry repair/compaction | `setup` for declarations/settings; actual launches report process failures; no registry maintenance substitute |
+| `audit-reality` and research-specific engine policy | Declare evaluator inputs, commands, criteria and result labels; independent review judges their evidence |
+| `export`, `prune`, `clean`, old `land --run ... --remove` | `land <run-id>` preserves the declared outputs and then deletes the run's project copy, runtime pin, work root and raw evidence; it takes no options. Archive any additional raw evidence yourself first |
+| `fc_tasks render/list/reconcile/create/update` and `session-push wake-check/wake/ack/list/bind-display/hook/statusline` | Optional packaged Claude session hook reads status files; CLI status works without a bound session; no promise of live delivery or equivalent ledger-edit API |
+| `version`, `--version` | Installed package metadata (for example `npm list -g flowcrew`); `--help` owns current syntax |
+| Campaign grouping/history registry | Operator-owned grouping and prior evidence declared as brief inputs |
+| `artifact_contract` and prose-derived obligations | Explicit brief `inputs`, `outputs`, `commands` and criteria |
+| `config/defaults.yaml` execution budgets and workflow selection | Runtime JSON roles, the progress backstop, and optional per-command `durationMs` |
+| Sandbox grants and provider-home/cache/device restrictions | Ordinary host rights plus observed content and independent review; use external OS controls when confinement is required |
+
+Retired `bounds`, `adapterInputLimitChars`, `sharedCaches`, `devices`, `providerHomes`
+and `commands[].unconfined` values are ignored with a parse advisory where documented;
+they grant no limit or permission. Remove them from new declarations. Other unknown
+keys still refuse. Recheck automation against current [exit codes](guide/cli.md#exits-and-storage):
+0 success, 1 conflict/refusal, 2 invalid input, 3 unavailable/unknown/in-progress.
+
+### Fixed before release
+
+- **Keep cancelled work.** `flowcrew land` retains the current declared outputs of
+  cancelled and failed runs and labels outputs that were not accepted unreviewed, without
+  requiring a safe checkpoint or usable runtime pin. A run that has not ended, including one
+  shown as interrupted, is refused until `flowcrew cancel` ends it. Missing or unreadable
+  outputs remain partial and nothing is deleted.
+- **Land preserves and reclaims in one step.** `flowcrew land <run-id>` preserves the declared
+  outputs under `deliveries/<run-id>/` and then deletes the project copy, runtime pin, work root
+  and raw evidence. It is not a read-only audit, and the former `--reclaim` flag is gone: `land`
+  takes no options. Status (`heldBytes`) and the dashboard show the space each ended run still
+  holds until it is landed, and the dashboard totals it as "held, not landed".
+- **Release resources after a terminal run.** Confirmed closure and capture release
+  external output paths so a new run in the same store can use them without land or
+  reclaim. Unknown closure or failed capture keeps the affected path held for inspection.
+- **Cancel closes child processes too.** Linux with a systemd user session uses a
+  cgroup; other hosts use the invocation's environment marker. Processes that clear
+  their environment can escape marker cleanup; unreadable environments remain unknown.
+  Receipts name the guarantee. Remote effects remain the workload's to clean up.
+- **A finished Claude invocation ends at its result.** The root `result` event ends the
+  invocation: stdin is closed, Claude gets 2 s to exit, then every process the invocation
+  started is closed. A tool left blocked (for example `cat` waiting on input) can no longer
+  keep an answered invocation open until the stage deadline. An exit inside the 2 s is
+  recorded as before. A guide counts as delivered only when Claude echoes it
+  (`--replay-user-messages`), and a result does not end the invocation while a written guide
+  is still unechoed: Claude runs another turn for it, and its result is the answer. At most one
+  guide message is in flight per invocation: guides accepted meanwhile wait and go out together as one
+  message after the echo, so delivery never depends on how Claude merges queued messages.
+- **Deliver accepted guidance.** A running Claude author receives it through Claude Code's
+  streaming input; a Codex author receives it at its next invocation. Guidance is never
+  silently dropped, and no stage passes review while an accepted guide is undelivered. A guide
+  shows `pending` until the invocation that received it ends, then `delivered`.
+- **Show live activity and quiet notices.** The dashboard shows each author's tool
+  activity and posts one notice per quiet spell when a tool or command has shown no
+  observed progress for 10 minutes. The notice never stops or retries anything. Runs paused at their limit
+  now say “Paused at run limit”.
+- **A reviewer's byproducts no longer fail accepted work.** Plan and gate stages never
+  deliver bytes: when their tools leave files in the project (for example Python
+  bytecode from a test run), the engine restores the tree they reviewed, keeps the
+  verdict, and the run completes with exactly that tree. Previously such a run ended
+  `failed` / `isolation_refused`.
+- **`setup` previews what `start` runs.** `setup` accepts `--backend`, like `start`, so
+  its role lines show the backend the same arguments would start.
+- **Native execution on macOS.** Native tools are looked up on the operator's `PATH` and then in
+  `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`, so a narrowed `PATH` no longer hides macOS's
+  `/usr/sbin/sysctl` from process identity. Importing a project copies socket entries under a run
+  directory of any length (the copier names its destination relatively, within macOS's 104-byte
+  socket path limit). A worker that fails before it is ready reports its own error, and closure
+  observes the process group again after its marker pass. The full native suite passes on
+  macOS 15 in CI.
+
+### Known limitations
+
+- The Codex adapter does not accept mid-turn steering, so guidance waits for the next author
+  invocation.
+- On macOS and on Linux without a systemd user session, child-process cleanup uses the
+  invocation's environment marker and remains best effort: processes that clear their
+  environment can escape it.
+
 ## [0.11.0] - 2026-10-23
 
 This release removes retired control mechanisms, consolidates execution and settlement decisions,
@@ -31,7 +190,7 @@ checkout, with the same `FC_HOME` and socket throughout:
 
 The old CLI's `daemon deploy` cannot read the new daemon's replies. Cancel requests from a
 new client to a still-running old daemon fail as not-found until the restart. The durable hold
-survives the stop/build/start boundary; see [deployment operations](guide/operations.md#deploy-while-tasks-are-in-flight).
+survives the stop/build/start boundary.
 
 - **Socket selection is explicit.** `FLOWCREW_DAEMON_SOCKET` is ignored, and daemon/task
   `--port` is removed. Use `FC_HOME` for the state root and default socket, or `--socket`
@@ -42,7 +201,7 @@ survives the stop/build/start boundary; see [deployment operations](guide/operat
   to `validation_timeout_ms`, `default_max_iterations` to `max_iterations`,
   `default_gate_retry_loops` to `gate_retry_loops`, `default_stage_technical_retries` to
   `stage_technical_retries`, and `default_plan_stage_retries` to `plan_stage_retries`.
-  `default_timeout_ms` is unchanged. Remove custom role-template uses of `{default_timeout_ms}`;
+  `default_timeout_ms` is removed; only an author-declared `stage_duration_ms` supplies a stage allowance. Remove custom role-template uses of `{default_timeout_ms}`;
   that substitution is gone. The shipped planner file is now `config/workflows/planner.yaml`;
   `--workflow default` and saved default-workflow names still resolve to it.
 - **Task record readers use canonical launch settings.** `launch_options` replaces `launch_args`,

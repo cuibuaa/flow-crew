@@ -1,0 +1,513 @@
+import { DatabaseSync } from 'node:sqlite';
+import { publishRunStatus } from '../../dist-rewrite/ops/status.js';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { access, writeFile, readFile, readdir, readlink, lstat, rm, rename, symlink, chmod, mkdir, cp } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import * as host from "../../dist-rewrite/host/process.js";
+import { land } from "../../dist-rewrite/ops/land.js";
+import { main } from '../../dist-rewrite/ops/main.js';
+import { heldBytes, rawEvidence, reclaimTargets } from "../../dist-rewrite/records/held.js";
+import { captureCheckpoint, settleFrozenInputs, captureTree, captureExecutionOutputs, materializeDelivery } from "../../dist-rewrite/records/content.js";
+import { readEvidence } from "../../dist-rewrite/records/evidence.js";
+import { runServices } from "../fixtures/rewrite-run-services.js";
+import { stateFixture, get, digest, type StateFixture } from "../fixtures/rewrite-state.js";
+import * as records from '../../dist-rewrite/records/state.js';
+vi.mock("../../dist-rewrite/host/process.js", async (original) => ({ ...await original<typeof import('../../dist-rewrite/host/process.js')>(),
+ observeRun: vi.fn() }));
+let f: StateFixture;
+beforeEach(async () => { f = await stateFixture({ outputs: [{ path: 'delivery', kind: 'file', existing: 'replace' }] }); await f.admit();
+ vi.mocked(host.observeRun).mockResolvedValue({ ok: true, value: { unit: f.launch.unit, state: 'inactive', owner: null, evidence: [],
+ detail: 'fixture manager' } }); });
+afterEach(async () => { vi.clearAllMocks(); await f.close(); });
+async function checkpoint() { await writeFile(join(f.project, 'delivery'), 'preserved bytes');
+ const cp = get(await captureCheckpoint(f.scope, { run: 'Run', stage: 'work', attempt: 'Attempt', invocation: 1 }, null, 'safe', [], get(await settleFrozenInputs(f.scope)).inputs));
+ await f.append(f.execution, [{ type: 'checkpoint', checkpoint: cp }]); return cp; }
+it('uses real content and SQL to land a closed delivery: preserve, materialize, then reclaim', async () => {
+  const cp = await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'incomplete', reason: 'outputs_unpreserved',
+   detail: 'retained work' } }]);
+  await f.releaseClaims();
+  const report = get(await land(f.location, runServices(f).process, f.unitContext));
+  expect(report.state).toBe('reclaimed');
+  expect(report.outputs.artifacts).toHaveLength(1);
+  expect((await readEvidence(f.journal, cp.manifest)).ok).toBe(false);
+  expect(await readFile(join(f.location.storeRoot, 'deliveries', f.location.run, 'project', 'delivery'), 'utf8')).toBe('preserved bytes');
+  await expect(access(join(f.journal.root, 'git-common'))).rejects.toMatchObject({ code: 'ENOENT' });
+  await expect(access(join(f.location.storeRoot, 'runtime'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(get(publishRunStatus(f.location, new Date().toISOString(), null)).reclaimed).toMatchObject({ at: expect.any(String) });
+  const db = new DatabaseSync(f.database);
+  try { expect(db.prepare('SELECT * FROM resources WHERE holder=?').all(f.journal.root)).toEqual([]); } finally { db.close(); }
+  // A durable delivery can be cleaned up even when the old controller can no longer be observed.
+  vi.mocked(host.observeRun).mockResolvedValueOnce({ ok: false, kind: 'unavailable', detail: 'Controller observation unavailable after reclamation' });
+  expect(get(await land(f.location, runServices(f).process, f.unitContext)).state).toBe('reclaimed');
+  expect((await f.projection()).status).toBe('incomplete');
+  await expect(access(f.project)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it.each(['removed', 'moved'])('repeat land without acceptance finishes interrupted cleanup after delivery is %s', async disposition => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'cancelled', reason: 'cancelled', detail: 'Retained work' } }]);
+  await f.releaseClaims();
+  const runOperation = host.runOperation;
+  const interrupted = vi.spyOn(host, 'runOperation').mockImplementation(async (request, ...args) =>
+    request.method === 'reclaimTask' ? { ok: false, kind: 'unavailable', detail: 'Interrupted before cleanup' }
+      : runOperation(request, ...args));
+  expect(await land(f.location, runServices(f).process, f.unitContext)).toMatchObject({ ok: false, kind: 'unavailable' });
+  interrupted.mockRestore();
+  const partial = await f.projection();
+  expect(partial.reclaimed).toBeUndefined();
+  const delivery = partial.delivery!.delivery;
+  if (disposition === 'moved') await rename(delivery, join(f.root, 'moved-delivery'));
+  else await rm(delivery, { recursive: true });
+  await access(f.project);
+  const report = get(await land(f.location, runServices(f).process, f.unitContext));
+  expect(report).toMatchObject({ state: 'reclaimed', delivery, acceptedUnmet: [], outputs: partial.outputs.at(-1) });
+  expect((await f.projection()).reclaimed).toEqual(partial.delivery);
+  for (const target of Object.values(reclaimTargets(f.location.storeRoot, f.location.run, f.launch)))
+    await expect(access(target)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readdir(f.journal.root)).toEqual(['status.json']);
+});
+
+it('public land records latest gate evidence and human acceptance without changing cancelled status', async () => {
+  await f.close();
+  f = await stateFixture({ criteria: ['C1', 'C3', 'C4'].map(id => ({ id, text: 'Frozen ' + id })),
+    outputs: [{ path: 'delivery', kind: 'file', existing: 'replace' }] });
+  await f.admit();
+  const cp = await checkpoint();
+  for (const [index, evidence] of ['Score 0.800 < required 0.87', 'Score 0.842 < required 0.87'].entries()) {
+    const address = { run: 'Run', stage: 'gate', attempt: 'Gate' + index, invocation: 1 };
+    await f.append(f.execution, [
+      { type: 'invocation_reserved', invocation: { charge: 'work', address: { kind: 'stage', ...address } } },
+      { type: 'attempt_settled', receipt: { address, ending: 'delivered', before: cp.tree, after: cp.tree, audit: f.ref,
+        closure: 'dead', usage: { state: 'unknown', raw: [] }, evidence: [], inputChars: 0, answerRef: f.ref,
+        answer: { kind: 'gate', answer: { outcome: 'rejected_repairable', reason: 'Criteria unmet', findings: [], remainingWork: [],
+          criteria: { C1: { status: 'pass', evidence: 'Checked output' }, C3: { status: 'fail', evidence },
+            C4: { status: 'not_assessed', evidence: 'Later measurement pending', reason: 'pending_work' } } } } } }
+    ]);
+  }
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'cancelled', reason: 'cancelled', detail: 'Human accepts remaining gaps' } }]);
+  await f.releaseClaims();
+  let stdout = '', stderr = '';
+  const exit = await main(['land', 'Run', '--accept-unmet', 'C3=Accept plateau at 0.842', '--accept-unmet', 'C4=Accept missing measurement'], {
+    cwd: f.root, home: dirname(f.database), storeRoot: f.location.storeRoot, runtimeRoot: '', environment: { PATH: '/usr/bin' },
+    stdin: Buffer.alloc(0), abort: new AbortController().signal,
+    stdout: async bytes => { stdout += Buffer.from(bytes).toString(); }, stderr: async bytes => { stderr += Buffer.from(bytes).toString(); }
+  });
+  expect({ exit, stderr }).toEqual({ exit: 0, stderr: '' });
+  const report = JSON.parse(stdout);
+  const manifest = JSON.parse(await readFile(join(report.delivery, 'manifest.json'), 'utf8'));
+  expect(manifest).toEqual({ outputs: [expect.objectContaining({ path: 'delivery', archive: 'project/delivery' })], acceptedUnmet: [
+    { criterionId: 'C3', status: 'fail', evidence: 'Score 0.842 < required 0.87', reason: 'Accept plateau at 0.842', at: expect.any(String) },
+    { criterionId: 'C4', status: 'not_assessed', evidence: 'Later measurement pending', reason: 'Accept missing measurement', at: expect.any(String) }
+  ] });
+  for (const entry of manifest.acceptedUnmet) expect(new Date(entry.at).toISOString()).toBe(entry.at);
+  expect(report.acceptedUnmet).toEqual(manifest.acceptedUnmet);
+  expect((await f.projection()).status).toBe('cancelled');
+  const bytes = await readFile(join(report.delivery, 'manifest.json'));
+  for (const request of [manifest.acceptedUnmet.map(({ criterionId, reason }: { criterionId: string; reason: string }) => ({ criterionId, reason })),
+    [{ criterionId: 'C3', reason: 'Another reason' }]])
+    expect(await land(f.location, runServices(f).process, f.unitContext, request))
+      .toMatchObject({ ok: false, kind: 'conflict', detail: expect.stringContaining('first land') });
+  expect(await readFile(join(report.delivery, 'manifest.json'))).toEqual(bytes);
+  expect(get(await land(f.location, runServices(f).process, f.unitContext)).acceptedUnmet).toEqual([]);
+});
+
+it('records not assessed when no gate has judged the criterion', async () => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'cancelled', reason: 'cancelled', detail: 'Accept without review' } }]);
+  await f.releaseClaims();
+  const report = get(await land(f.location, runServices(f).process, f.unitContext, [{ criterionId: 'correct', reason: 'Human inspected output' }]));
+  expect(report.acceptedUnmet).toEqual([{ criterionId: 'correct', reason: 'Human inspected output',
+    status: 'not_assessed', evidence: 'not assessed', at: expect.any(String) }]);
+  expect(JSON.parse(await readFile(join(report.delivery!, 'manifest.json'), 'utf8')).acceptedUnmet).toEqual(report.acceptedUnmet);
+});
+
+it('land refuses identical or changed acceptance after publication before its journal fact, and recovers without declarations', async () => {
+  await checkpoint();
+  const artifacts = get(await captureExecutionOutputs(f.journal, f.scope.authority.outputs)).artifacts;
+  const delivery = join(f.location.storeRoot, 'deliveries', f.location.run);
+  const entries = [{ criterionId: 'correct', status: 'not_assessed' as const, evidence: 'not assessed',
+    reason: 'Human inspected output', at: '2026-11-23T12:00:00.000Z' }];
+  get(await materializeDelivery(f.journal, artifacts, delivery, f.launch.setup.tree, entries));
+  const bytes = await readFile(join(delivery, 'manifest.json'));
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'cancelled', reason: 'cancelled', detail: 'Accept without review' } }]);
+  await f.releaseClaims();
+  const operations = vi.spyOn(host, 'runOperation');
+  for (const reason of ['Human inspected output', 'Changed reason'])
+    expect(await land(f.location, runServices(f).process, f.unitContext, [{ criterionId: 'correct', reason }]))
+      .toMatchObject({ ok: false, kind: 'conflict', detail: expect.stringContaining('first land') });
+  expect(operations).not.toHaveBeenCalled();
+  operations.mockRestore();
+  expect((await f.projection()).delivery).toBeUndefined();
+  await access(f.project);
+  expect(await readFile(join(delivery, 'manifest.json'))).toEqual(bytes);
+  expect(get(await land(f.location, runServices(f).process, f.unitContext)).acceptedUnmet).toEqual(entries);
+  expect(await readFile(join(delivery, 'manifest.json'))).toEqual(bytes);
+});
+
+it('lands literal names, binary, executable, symlink and in-directory deletion as an applicable patch and archive', async () => {
+  await f.close();
+  const paths = ['changes.patch', '.fcrw-note', 'dir/.git/literal', 'dir/.fcrw-child', 'dir/报告.txt'];
+  f = await stateFixture({ outputs: [
+    ...paths.slice(0, 2).map(path => ({ path, kind: 'file' as const, existing: 'replace' as const })),
+    { path: 'dir', kind: 'directory', existing: 'replace' }
+  ] });
+  await mkdir(join(f.project,'dir'));await writeFile(join(f.project,'dir','gone.txt'),'removed later\n');
+  await writeFile(join(f.project,'dir','tool.sh'),'echo delivery\n');await chmod(join(f.project,'dir','tool.sh'),0o644);
+  await symlink('gone.txt',join(f.project,'dir','link'));
+  const base=get(await captureTree(f.scope));
+  Object.assign(f.launch.setup,{tree:base});await f.admit();
+  const applied = join(f.root, 'applied');
+  await cp(f.project, applied, { recursive: true, verbatimSymlinks: true });
+  await mkdir(join(f.project, 'dir', '.git'), { recursive: true });
+  for (const path of paths) await writeFile(join(f.project, path), 'delivered ' + path + '\n');
+  const binary=Buffer.from([0,1,2,255]);await writeFile(join(f.project,'dir','new.bin'),binary);
+  await rm(join(f.project,'dir','gone.txt'));await chmod(join(f.project,'dir','tool.sh'),0o755);
+  await rm(join(f.project,'dir','link'));await symlink('tool.sh',join(f.project,'dir','link'));
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: {
+    status: 'incomplete', reason: 'outputs_unpreserved', detail: 'Retain outputs' } }]);
+  await f.releaseClaims();
+    const report = get(await land(f.location, runServices(f).process, f.unitContext));
+    expect(report.state).toBe('reclaimed');
+    for (const path of paths) expect(await readFile(join(report.delivery!, 'project', path), 'utf8')).toBe('delivered ' + path + '\n');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+    execFileSync('git', ['init', '-q'], { cwd: applied, env });
+    execFileSync('git', ['apply', '--unsafe-paths', join(report.delivery!, 'changes.patch')], { cwd: applied, env });
+    for (const path of paths) expect(await readFile(join(applied, path), 'utf8')).toBe('delivered ' + path + '\n');
+    for(const tree of [applied,join(report.delivery!,'project')]){
+      expect(await readFile(join(tree,'dir','new.bin'))).toEqual(binary);
+      expect((await lstat(join(tree,'dir','tool.sh'))).mode&0o111).toBe(0o111);
+      expect(await readlink(join(tree,'dir','link'))).toBe('tool.sh');
+      await expect(access(join(tree,'dir','gone.txt'))).rejects.toMatchObject({code:'ENOENT'});
+    }
+    const patch=await readFile(join(report.delivery!,'changes.patch'),'utf8');
+    for(const fact of ['GIT binary patch','old mode 100644','new mode 100755','deleted file mode','报告.txt'])expect(patch).toContain(fact);
+    expect(JSON.parse(await readFile(join(report.delivery!, 'manifest.json'), 'utf8')).outputs)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ path: 'changes.patch', archive: 'project/changes.patch' })]));
+});
+it('settles interrupted reservations as closed-unmeasured after confirmed closure', async () => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'invocation_reserved', invocation: { charge: 'command', address: { kind: 'final', run: 'Run' } } },
+   { type: 'command_reserved', reservation: { identity: 'Check', state: 'reserved', key: { tree: 'a'.repeat(64), declaration: 'a'.repeat(64),
+   context: 'a'.repeat(64), inputHashes: [] }, invocation: { charge: 'command', address: { kind: 'final', run: 'Run' } } } }, {
+   type: 'lifecycle', conclusion: { status: 'failed', reason: 'attempt_failed', detail: 'terminal fixture' } }]);
+  await f.releaseClaims();
+  expect(await land(f.location, runServices(f).process, f.unitContext)).toMatchObject({ ok: true, value: {state:'reclaimed'} });
+  expect((await f.projection()).reservations[0]).toMatchObject({state:'closed-unmeasured'});
+  expect((await f.projection()).commands).toEqual([]);
+  expect(await readFile(join(f.location.storeRoot, 'deliveries', 'Run', 'project', 'delivery'), 'utf8')).toBe('preserved bytes');
+});
+import { recordOperation, readEvents } from "../../dist-rewrite/records/state.js";
+it('preservation failure before archive never deletes the project', async () => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'failed', reason: 'attempt_failed', detail: 'retained' } }]);
+  await f.releaseClaims();
+  // A real capture failure (aliased output), independent of checkpoint availability.
+  await writeFile(join(f.project, 'retained'), 'preserved bytes');
+  await rm(join(f.project, 'delivery'));
+  await symlink('retained', join(f.project, 'delivery'));
+  expect(await land(f.location, runServices(f).process, f.unitContext)).toMatchObject({ok:true,value:{state:'partial'}});
+  expect(await readFile(join(f.project, 'delivery'), 'utf8')).toBe('preserved bytes');
+});
+it('unavailable native ownership fences preservation and the SQL record-operation claim', async () => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'failed', reason: 'attempt_failed', detail: 'terminal fixture' } }]);
+  const worker = get(await host.beginOperation());
+  try {
+    get(await host.endOperation(worker.owner));
+    await f.append(f.control, [{ type: 'process', receipt: { owner: worker.owner, state: 'closure_unknown', exit: null,
+      signal: null, stdout: f.ref, stderr: f.ref, durationMs: 0, scope: 'group' } }]);
+    await f.releaseClaims();
+    const nativeKill = process.kill.bind(process);
+    const denied = vi.spyOn(process,'kill').mockImplementation((pid,signal) => {
+      if (pid === -worker.owner.group && signal === 0) throw Object.assign(Error('Synthetic observation denial'),{code:'EPERM'});
+      return nativeKill(pid,signal);
+    });
+    expect(await land(f.location, runServices(f).process, f.unitContext)).toMatchObject({ ok: false,
+     kind: 'unknown' });
+    denied.mockRestore();
+    expect((await recordOperation(f.journal, 'gc', { module: new URL("./fixtures/rewrite-native-operation.mjs", import.meta.url).href,
+     method: 'touch', args: [] })).ok).toBe(false);
+    expect(await readFile(join(f.project, 'delivery'), 'utf8')).toBe('preserved bytes');
+  }
+  finally {
+    await host.endOperation(worker.owner);
+  }
+});
+
+it('A15 complete run reclaims workspace, pin and raw evidence once while keeping delivered bytes, events and status', async ({ task }) => {
+  const { runWorkflow } = await import('../../dist-rewrite/core/loop.js');
+  const { workflowFixture } = await import('../fixtures/rewrite-workflow.js');
+  const { ports } = workflowFixture(f);
+  expect(get(await runWorkflow({ writer: f.execution, scope: f.scope, ports, abort: new AbortController().signal })).status).toBe('complete');
+  expect((await f.projection()).outputs.at(-1)).toMatchObject({disposition:'reviewed',detail:'Reviewed accepted delivery'});
+  const captured=get(await readEvents(f.journal,0)).findLast(event=>event.payload.type==='outputs_preserved');
+  expect(captured!.payload).not.toHaveProperty('receipt.disposition');
+  await f.releaseClaims();
+  const before = await heldBytes(f.location.storeRoot,f.location.run,f.launch), events = (await f.projection()).cursor;
+  const archived=get(await land(f.location, runServices(f).process, f.unitContext));
+  expect(archived.state).toBe('reclaimed');
+  expect(archived.outputs).toMatchObject({disposition:'reviewed',detail:'Reviewed accepted delivery'});
+  const after = await heldBytes(f.location.storeRoot,f.location.run,f.launch), projection = await f.projection();
+  expect(before).toBeGreaterThan(0); expect(after).toBe(0); expect(projection.cursor).toBeGreaterThan(events);
+  expect(projection.status).toBe('complete');
+  expect(await readFile(join(f.location.storeRoot, 'deliveries', 'Run', 'project', 'delivery'), 'utf8')).toBe('work');
+  expect(get(publishRunStatus(f.location, new Date().toISOString(), null)).reclaimed).toMatchObject({at:expect.any(String)});
+  expect(get(await land(f.location, runServices(f).process, f.unitContext)).state).toBe('reclaimed');
+  const { main } = await import('../../dist-rewrite/ops/main.js');
+  const output: string[] = [], errors: string[] = [];
+  const context = {cwd:f.root,storeRoot:f.location.storeRoot,home:f.database.slice(0,f.database.lastIndexOf('/')),
+    runtimeRoot:f.root,environment:{},stdin:new Uint8Array(),abort:new AbortController().signal,
+    stdout:async(bytes:Uint8Array)=>{output.push(Buffer.from(bytes).toString());},stderr:async(bytes:Uint8Array)=>{errors.push(Buffer.from(bytes).toString());}};
+  expect(await main(['resume','Run'],context)).toBe(1); expect(errors.join('')).toContain('Evidence was reclaimed');
+  expect(await main(['status','Run'],context),errors.join('')).toBe(0); expect(JSON.parse(output.at(-1)!).status).toBe('complete');
+  task.meta.reclaim = {beforeBytes:before,afterBytes:after,reclaimedBytes:before-after};
+});
+
+it('preserves a public-cancel delivery when the invocation never crossed its start barrier', async () => {
+  await checkpoint();
+  const worker = get(await host.beginOperation());get(await host.endOperation(worker.owner));
+  await f.append(f.control, [{ type: 'process', receipt: { owner: worker.owner, state: 'not_started', exit: null, signal: null,
+    stdout: f.ref, stderr: f.ref, durationMs: 0, scope: 'group' } },
+    { type: 'control_intent', intent: { id: 'CancelBeforeStart', kind: 'cancel', run: 'Run', unit: f.launch.unit,
+      expectedCursor: (await f.projection()).cursor } }]);
+  expect((await f.projection()).owners.find(entry => entry.owner.authority === worker.owner.authority)?.state).toBe('dead');
+  await f.releaseClaims();
+  expect(get(await land(f.location, runServices(f).process, f.unitContext)).state).toBe('reclaimed');
+});
+
+it('a populated recorded pgid fences preservation when closure is still unknown', async () => {
+  await checkpoint();
+  const worker = get(await host.beginOperation());
+  try {
+    await f.append(f.execution,[{type:'lifecycle',conclusion:{status:'failed',reason:'attempt_failed',detail:'Retained delivery'}},
+      {type:'process',receipt:{owner:worker.owner,state:'closure_unknown',exit:null,signal:null,stdout:f.ref,stderr:f.ref,durationMs:0,scope:'group'}}]);
+    await f.releaseClaims();
+    expect(host.groupState(worker.owner)).toBe('live');
+    expect(await land(f.location,runServices(f).process,f.unitContext)).toMatchObject({ok:false,kind:'conflict',detail:'Run owner is live'});
+    expect(host.groupState(worker.owner)).toBe('live');
+    expect(await readFile(join(f.project,'delivery'),'utf8')).toBe('preserved bytes');
+  } finally { get(await host.endOperation(worker.owner)); }
+});
+it('land accepts an owner whose only receipt is closure_unknown after fresh ESRCH on its recorded group', async () => {
+  await checkpoint();
+  const worker = get(await host.beginOperation());
+  get(await host.endOperation(worker.owner));
+  await f.append(f.execution,[{type:'lifecycle',conclusion:{status:'failed',reason:'attempt_failed',detail:'Retained delivery'}},
+    {type:'process',receipt:{owner:worker.owner,state:'closure_unknown',exit:null,signal:null,stdout:f.ref,stderr:f.ref,durationMs:0,scope:'group'}}]);
+  await f.releaseClaims();
+  const before = await f.projection();
+  expect(get(await readEvents(f.journal,0)).flatMap(event => event.payload.type === 'process' && event.payload.receipt.owner?.authority === worker.owner.authority ? [event.payload.receipt.state] : [])).toEqual(['closure_unknown']);
+  expect(before.owners.find(entry => entry.owner.authority === worker.owner.authority)?.state).toBe('unknown');
+  expect(host.groupState(worker.owner)).toBe('dead');
+
+  const roots = [f.project,join(f.location.storeRoot,'runtime'),join(f.journal.root,'git-common')];
+  const observation = vi.spyOn(process,'kill');
+  let result;
+  try {
+    result = await land(f.location,runServices(f).process,f.unitContext);
+    expect(observation).toHaveBeenCalledWith(-worker.owner.group,0);
+  } finally { observation.mockRestore(); }
+  expect(result,JSON.stringify(result)).toMatchObject({ok:true,value:{state:'reclaimed'}});
+  const after = await f.projection();
+  expect(after.owners.find(entry => entry.owner.authority === worker.owner.authority)?.state).toBe('dead');
+  expect(get(await readEvents(f.journal,0)).some(event => event.payload.type === 'owner_closed'
+    && event.payload.owner.authority === worker.owner.authority)).toBe(true);
+  expect(await readFile(join(f.location.storeRoot,'deliveries',f.location.run,'project','delivery'),'utf8')).toBe('preserved bytes');
+  for (const root of roots) await expect(access(root)).rejects.toMatchObject({code:'ENOENT'});
+  expect((await readEvidence(f.journal,before.checkpoints.at(-1)!.manifest)).ok).toBe(false);
+  expect(after.reclaimed).toMatchObject({at:expect.any(String)});
+  expect(after.status).toBe('failed');
+  expect(await readdir(f.journal.root)).toEqual(['status.json']);
+  expect(get(publishRunStatus(f.location,new Date().toISOString(),null)).reclaimed).toEqual(after.reclaimed);
+});
+
+it.each(['work','plan'] as const)('historical command, key, checkpoint, plan and %s answer fields decode through status, list and land',async kind=>{
+  const plan={...f.plan,observations:{retired:'uninterpreted'}};
+  await f.close();
+  f=await stateFixture({outputs:[{path:'delivery',kind:'file',existing:'replace'}]},plan);
+  await f.admit();
+  const cp=await checkpoint();
+  const address={run:'Run',stage:'work',attempt:'Historical',invocation:1};
+  const historicalAnswer=kind==='work'?{kind,answer:{status:'delivered',summary:'Historical work',caveats:[],remainingWork:[],blocks:null}}
+    :{kind,answer:{baseRevision:'Revision',plan:f.plan}};
+  await f.append(f.execution,[{type:'invocation_reserved',invocation:{charge:'work',address:{kind:'stage',...address}}},
+    {type:'attempt_settled',receipt:{address,ending:'delivered',before:cp.tree,after:cp.tree,audit:f.ref,closure:'dead',
+      usage:{state:'unknown',raw:[]},evidence:[],inputChars:0,answer:historicalAnswer} as never}]);
+  const { reserveCommand, commitCommand, withState, readProjection } = await import('../../dist-rewrite/records/state.js');
+  const key = {tree:cp.tree,declaration:cp.tree,context:cp.tree,inputHashes:[]};
+  const reservation = get(await reserveCommand(f.execution,(await f.projection()).cursor,'HistoricalCommand',key,
+    {charge:'command',address:{kind:'final',run:'Run'}}));
+  get(await commitCommand(f.execution,(await f.projection()).cursor,reservation,{command:'HistoricalCommand',key,
+    before:cp.tree,after:cp.tree,delta:f.ref,stdout:f.ref,stderr:f.ref,execution:{state:'complete',exit:0},spent:{durationMs:0}}));
+  await f.append(f.execution,[{type:'lifecycle',conclusion:{status:'incomplete',reason:'outputs_unpreserved',detail:'Retained historical delivery'}}]);
+  // Emulate bytes written before retirement, including indexed current facts. Appending today would strip the keys first.
+  get(withState(f.database,true,db=>{
+    const inject = (value: any, kind: string) => {
+      if(kind==='command') {value.observed={retired:true};value.key.observation=['ignored'];}
+      if(kind==='reservation') {value.key.observation=null;if(value.receipt){value.receipt.observed=17;value.receipt.key.observation={retired:true};}}
+      if(kind==='checkpoint') value.observed=['ignored'];
+      if(kind==='revision') value.plan.observations={retired:true};
+      if(kind==='attempt'||kind==='received') if(value.answer){value.answer.answer.observations={retired:true};if(value.answer.kind==='plan')value.answer.answer.plan.observations={retired:true};}
+      return value;
+    };
+    for(const row of db.prepare('SELECT kind,key,value FROM current_rows WHERE root=?').all(f.journal.root))
+      db.prepare('UPDATE current_rows SET value=? WHERE root=? AND kind=? AND key=?')
+        .run(JSON.stringify(inject(JSON.parse(String(row.value)),String(row.kind))),f.journal.root,row.kind,row.key);
+    const current=JSON.parse(String(db.prepare('SELECT current FROM runs WHERE root=?').get(f.journal.root)!.current));
+    current.plan.plan.observations={retired:true};current.launch.plan.observations=null;
+    const historicalCommand=inject(JSON.parse(String(db.prepare("SELECT value FROM current_rows WHERE root=? AND kind='command'").get(f.journal.root)!.value)),'command');
+    current.launch.setup.commands=[historicalCommand];
+    db.prepare('UPDATE runs SET current=? WHERE root=?').run(JSON.stringify(current),f.journal.root);
+    for(const row of db.prepare('SELECT seq,payload FROM events WHERE root=?').all(f.journal.root)) {
+      const payload=JSON.parse(String(row.payload));
+      if(payload.type==='command') inject(payload.receipt,'command');
+      if(payload.type==='checkpoint') inject(payload.checkpoint,'checkpoint');
+      if(payload.type==='plan_committed') inject(payload.plan,'revision');
+      if(payload.type==='attempt_settled') inject(payload.receipt,'attempt');
+      db.prepare('UPDATE events SET payload=? WHERE root=? AND seq=?').run(JSON.stringify(payload),f.journal.root,row.seq);
+    }
+    return {ok:true,value:true};
+  }));
+  const rawKeys=get(withState(f.database,false,db=>({ok:true,value:db.prepare('SELECT payload FROM events WHERE root=?').all(f.journal.root).map(row=>String(row.payload)).join('')})));
+  expect(rawKeys).toContain('"observed"');expect(rawKeys).toContain('"observation"');expect(rawKeys).toContain('"observations"');
+  const decoded=get(await readProjection(f.journal));
+  expect(decoded.commands).toHaveLength(1);
+  expect(decoded.commands[0]).not.toHaveProperty('observed');
+  expect(decoded.launch.setup.commands[0]).not.toHaveProperty('observed');
+  expect(decoded.launch.setup.commands[0].key).not.toHaveProperty('observation');
+  expect(decoded.commands[0].key).not.toHaveProperty('observation');
+  expect(decoded.checkpoints[0]).not.toHaveProperty('observed');
+  expect(decoded.plan.plan).not.toHaveProperty('observations');
+  expect(decoded.revisions[0].plan).not.toHaveProperty('observations');
+  expect(decoded.attempts[0].answer!.answer).not.toHaveProperty('observations');
+  await f.releaseClaims();
+  const {main}=await import('../../dist-rewrite/ops/main.js');
+  const output:string[]=[], diagnostics:string[]=[];
+  const context={cwd:f.root,storeRoot:f.location.storeRoot,home:f.database.slice(0,f.database.lastIndexOf('/')),
+    runtimeRoot:f.root,environment:{},stdin:new Uint8Array(),abort:new AbortController().signal,
+    stdout:async(bytes:Uint8Array)=>{output.push(Buffer.from(bytes).toString());},stderr:async(bytes:Uint8Array)=>{diagnostics.push(Buffer.from(bytes).toString());}};
+  expect(await main(['status','Run'],context),diagnostics.join('')).toBe(0);
+  expect(await main(['status'],context)).toBe(0);
+  expect(output.join('')).toContain('Run');
+  expect(get(await land(f.location,runServices(f).process,f.unitContext)).state).toBe('reclaimed');
+  expect(await readFile(join(f.location.storeRoot,'deliveries','Run','project','delivery'),'utf8')).toBe('preserved bytes');
+});
+
+it.each(['absent','quarantined'] as const)('land retains current bytes with an %s checkpoint and an unusable pin',async checkpointState=>{
+  await writeFile(join(f.project,'delivery'),'current unreviewed bytes');
+  if(checkpointState==='quarantined') {
+    const cp=get(await captureCheckpoint(f.scope,{run:'Run',stage:'work',attempt:'Unsafe',invocation:1},null,'quarantined',[],get(await settleFrozenInputs(f.scope)).inputs));
+    await f.append(f.execution,[{type:'checkpoint',checkpoint:cp}]);
+    await writeFile(join(f.project,'delivery'),'current unreviewed bytes');
+  }
+  await f.append(f.execution,[{type:'lifecycle',conclusion:{status:'cancelled',reason:'cancelled',detail:'cancelled author'}}]);
+  await f.releaseClaims();
+  if(checkpointState==='absent')await rm(join(f.location.storeRoot,'runtime'),{recursive:true});
+  else {
+    await chmod(join(f.location.storeRoot,'runtime','.pin'),0o644);
+    await writeFile(join(f.location.storeRoot,'runtime','.pin'),'unusable pin');
+  }
+  const {main}=await import('../../dist-rewrite/ops/main.js');
+  const output:string[]=[],errors:string[]=[];
+  const context={cwd:f.root,home:f.database.slice(0,f.database.lastIndexOf('/')),storeRoot:f.location.storeRoot,
+    runtimeRoot:f.root,environment:{},stdin:new Uint8Array(),abort:new AbortController().signal,
+    stdout:async(bytes:Uint8Array)=>{output.push(Buffer.from(bytes).toString());},stderr:async(bytes:Uint8Array)=>{errors.push(Buffer.from(bytes).toString());}};
+  expect(await main(['land','Run'],context),errors.join('')).toBe(0);
+  expect(JSON.parse(output.at(-1)!)).toMatchObject({state:'reclaimed',outputs:{disposition:'unreviewed',detail:'Unreviewed retained observation'}});
+  expect(await readFile(join(f.location.storeRoot,'deliveries','Run','project','delivery'),'utf8')).toBe('current unreviewed bytes');
+  expect(await main(['land','Run'],context),errors.join('')).toBe(0);
+  expect((await f.projection()).status).toBe('cancelled');
+});
+
+it('reclaim retries after partial GC has removed workspace, runtime, scratch parents and raw evidence',async()=>{
+  await checkpoint();
+  await f.append(f.execution,[{type:'lifecycle',conclusion:{status:'cancelled',reason:'cancelled',detail:'Retained cancelled work'}}]);
+  await records.recordHeldBytes(f.execution);
+  const frozen = get(publishRunStatus(f.location,new Date().toISOString(),null)).heldBytes;
+  expect(frozen).toBeGreaterThan(0);
+  await f.releaseClaims();
+  const runOperation=host.runOperation;
+  const interrupted=vi.spyOn(host,'runOperation').mockImplementation(async(request,...args)=>{
+    if(request.method!=='reclaimTask')return runOperation(request,...args);
+    for(const path of [f.project,join(f.location.storeRoot,'runtime'),join(f.location.storeRoot,'work'),join(f.journal.root,'git-common')])
+      await rm(path,{recursive:true,force:true});
+    return {ok:false,kind:'unavailable',detail:'Synthetic interruption after deleting reclaim directories'};
+  });
+  expect(await land(f.location,runServices(f).process,f.unitContext)).toMatchObject({ok:false,kind:'unavailable'});
+  interrupted.mockRestore();
+  const partial=await f.projection();
+  expect(partial.delivery).toBeDefined();expect(partial.reclaimed).toBeUndefined();
+  const published = JSON.parse(await readFile(join(f.journal.root, 'status.json'), 'utf8'));
+  expect(published.journalCursor, 'failed admitted land must publish its committed reclaim').toBe(partial.cursor);
+  expect(published.reclaimed).toBeUndefined();
+  expect(published.heldBytes).toBe(frozen);
+  const db = new DatabaseSync(f.database);
+  const operations = () => db.prepare("SELECT path,owner FROM resources WHERE holder=? AND id LIKE 'operation:%' ORDER BY path").all(f.journal.root);
+  try {
+  expect(operations()).toEqual([
+    { path: f.project, owner: null },
+    { path: join(f.journal.root, 'control'), owner: null },
+    { path: join(f.journal.root, 'execution'), owner: null }
+  ].sort((a,b)=>a.path.localeCompare(b.path)));
+  const retried=get(await land(f.location,runServices(f).process,f.unitContext));
+  expect(retried).toMatchObject({state:'reclaimed',delivery:partial.delivery!.delivery,outputs:partial.outputs.at(-1)});
+  expect(operations(), 'successful reclaim retry must retire every leftover operation row').toEqual([]);
+  const completed=get(publishRunStatus(f.location,new Date().toISOString(),null));
+  expect(completed.reclaimed).toEqual(partial.delivery);
+  expect(completed.heldBytes).toBeUndefined();
+  expect(get(await land(f.location,runServices(f).process,f.unitContext))).toEqual(retried);
+  expect(await readFile(join(retried.delivery!,'project','delivery'),'utf8')).toBe('preserved bytes');
+  } finally { db.close(); }
+});
+
+it('land removes its private reclaim targets and raw evidence, retaining the status snapshot', async () => {
+  await checkpoint();
+  await f.append(f.execution, [{ type: 'lifecycle', conclusion: { status: 'failed', reason: 'attempt_failed', detail: 'ended' } }]);
+  await f.releaseClaims();
+  const targets = Object.values(reclaimTargets(f.location.storeRoot, f.location.run, (await f.projection()).launch!));
+  const evidence = rawEvidence(f.journal.root);
+  const before = await readdir(f.journal.root);
+  expect(evidence.length).toBeGreaterThan(0);
+  get(await land(f.location, runServices(f).process, f.unitContext));
+  for (const path of [...targets, ...evidence]) await expect(access(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  // The actual removed record entries are exactly the raw-evidence entries.
+  const after = await readdir(f.journal.root);
+  expect(before.filter(name => !after.includes(name)).sort()).toEqual(evidence.map(path => path.slice(f.journal.root.length + 1)).sort());
+  expect(after).toEqual(['status.json']);
+});
+
+it('delivery distinguishes an unchanged relative patch from an unknown base in the existing patch file', async () => {
+  await writeFile(join(f.project, 'delivery'), 'retained bytes');
+  const tree = get(await captureTree(f.scope));
+  const artifacts = get(await captureExecutionOutputs(f.journal, f.scope.authority.outputs)).artifacts;
+  await writeFile(join(f.project, 'delivery'), 'later filesystem bytes must not enter the patch');
+  const unchanged = join(f.root, 'unchanged'), unknown = join(f.root, 'unknown');
+  get(await materializeDelivery(f.journal, artifacts, unchanged, tree));
+  get(await materializeDelivery(f.journal, artifacts, unknown));
+  expect(await readFile(join(unchanged, 'changes.patch'), 'utf8')).toBe('');
+  expect(await readFile(join(unknown, 'changes.patch'), 'utf8')).toContain('Base unknown');
+  expect(await readFile(join(unknown, 'project', 'delivery'), 'utf8')).toBe('retained bytes');
+});
+
+it('delivery recovery preserves acceptance time and authenticates immutable bytes and legacy arrays', async () => {
+  await writeFile(join(f.project, 'delivery'), 'retained bytes');
+  const artifacts = get(await captureExecutionOutputs(f.journal, f.scope.authority.outputs)).artifacts;
+  const destination = join(f.root, 'archive');
+  const entries = [{ criterionId: 'correct', status: 'fail' as const, evidence: 'Score 0.842 < required 0.87',
+    reason: 'Accept plateau', at: '2026-11-23T12:00:00.000Z' }];
+  get(await materializeDelivery(f.journal, artifacts, destination, undefined, entries));
+  const bytes = await readFile(join(destination, 'manifest.json'));
+  // Publication succeeded, but its delivery_preserved journal fact has not yet committed.
+  expect(get(await materializeDelivery(f.journal, artifacts, destination))).toEqual(entries);
+  const changed = get(await captureExecutionOutputs(f.journal, []));
+  expect(await materializeDelivery(f.journal, changed.artifacts, destination)).toMatchObject({ ok: false, kind: 'conflict' });
+  expect(await readFile(join(destination, 'manifest.json'))).toEqual(bytes);
+  // Old array deliveries remain readable and authenticatable without rewriting them.
+  const manifest = JSON.parse(bytes.toString());
+  await writeFile(join(destination, 'manifest.json'), JSON.stringify(manifest.outputs));
+  const legacyBytes = await readFile(join(destination, 'manifest.json'));
+  expect(get(await materializeDelivery(f.journal, artifacts, destination))).toEqual([]);
+  expect(await readFile(join(destination, 'manifest.json'))).toEqual(legacyBytes);
+});

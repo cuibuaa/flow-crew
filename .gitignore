@@ -23,7 +23,6 @@ Thumbs.db
 .idea/
 *.tsbuildinfo
 ui/*.d.ts.map
-docs/*
 tests/
 ui/tests/
 design/*
@@ -47,3 +46,14 @@ spec/delivery-truth-table.test.ts
 # Operator-local vitest config: names the machine-private verification tree, never published.
 vitest.local.config.ts
 .cache/
+
+# Disposable local trial repositories and receipts.
+tmp/
+dist-monitor/
+dist-rewrite/
+
+# Local working notes and task reports (never published)
+/docs/
+
+# Executor evidence written in a worktree; reports live outside the repository.
+.task-evidence/

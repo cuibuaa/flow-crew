@@ -206,36 +206,35 @@ export const readyAwareForkPool = {
   createPoolWorker: (options: PoolOptions): PoolWorker => new ReadyAwareForkWorker(options),
 };
 
+// The directory is the capability declaration. Purity consumes this same scope.
+export const portableProject = {
+  name: 'portable',
+  dir: 'spec',
+  include: ['**/*.test.ts', '**/*.test.tsx'],
+  exclude: ['native/**', 'benchmark/**'],
+};
+
+/** Authority declarations for the existing projects; selectors remain the directory declarations below. */
+export const testProjectNeeds = {
+  portable: { NETWORK: [], nativeChildren: false, sandbox: false, providers: false, fixtures: 'synthetic' },
+  native: { NETWORK: [],
+    nativeChildren: true, sandbox: false, providers: false, fixtures: 'synthetic' },
+  packageInstall: { NETWORK: ['Read-only public package retrieval from https://registry.npmjs.org/ into a private prefix'],
+    nativeChildren: true, sandbox: false, providers: false, fixtures: 'synthetic installed consumer' },
+} as const;
+
+// Hang backstop: step 6i full gate recorded 507.372 s for the physical content benchmark.
+// ceil(3 * 507.372 / 60) minutes = 26 minutes; one testTimeout per project.
+const TEST_HANG_BACKSTOP_MS = 26 * 60_000;
+
 export default defineConfig({
   esbuild: {
     jsx: "automatic",
   },
-  resolve: {
-    alias: [
-      { find: /^react$/, replacement: new URL("./ui/node_modules/react/index.js", import.meta.url).pathname },
-      { find: /^react\/jsx-runtime$/, replacement: new URL("./ui/node_modules/react/jsx-runtime.js", import.meta.url).pathname },
-      { find: /^react\/jsx-dev-runtime$/, replacement: new URL("./ui/node_modules/react/jsx-dev-runtime.js", import.meta.url).pathname },
-      { find: /^react-dom$/, replacement: new URL("./ui/node_modules/react-dom/index.js", import.meta.url).pathname },
-      { find: /^react-dom\/client$/, replacement: new URL("./ui/node_modules/react-dom/client.js", import.meta.url).pathname },
-      { find: /^react-dom\/server$/, replacement: new URL("./ui/node_modules/react-dom/server.node.js", import.meta.url).pathname },
-      { find: /^react-dom\/test-utils$/, replacement: new URL("./ui/node_modules/react-dom/test-utils.js", import.meta.url).pathname },
-      { find: /^react-router-dom$/, replacement: new URL("./ui/node_modules/react-router-dom/dist/index.js", import.meta.url).pathname },
-      { find: /^@testing-library\/react$/, replacement: new URL("./ui/node_modules/@testing-library/react/dist/@testing-library/react.esm.js", import.meta.url).pathname },
-    ],
-  },
   test: {
-    // spec/ is the machine-independent public contract suite. The recorded
-    // UX/performance replays are permanent regressions and therefore belong
-    // to the current full suite. `npm run test:baseline-identities` excludes
-    // only those additive cases when timing the frozen baseline population.
-    include: [
-      "spec/**/*.test.ts",
-      "spec/**/*.test.tsx",
-      "spec/ux-perf-*.replay.ts",
-      "spec/ux-perf-*.replay.tsx",
-    ],
-    setupFiles: [
-      "./vitest.setup.ts",
+    projects: [
+      { extends: true, test: { ...portableProject, testTimeout: TEST_HANG_BACKSTOP_MS, setupFiles: ['./spec/setup.ts'] } },
+      { extends: true, test: { name: 'native', include: ['spec/native/**/*.test.ts'], setupFiles: ['./spec/setup.ts'], testTimeout: TEST_HANG_BACKSTOP_MS } },
     ],
     globalSetup: ["./scripts/vitest-global-setup.ts"],
     pool: readyAwareForkPool,
@@ -248,7 +247,6 @@ export default defineConfig({
     clearMocks: true,
     mockReset: true,
     restoreMocks: true,
-    testTimeout: 30000,
-    hookTimeout: 30000,
+    hookTimeout: TEST_HANG_BACKSTOP_MS,
   },
 });

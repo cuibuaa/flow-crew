@@ -1,74 +1,93 @@
 # Getting started
 
-For a new user: how do I install FlowCrew and check a brief before live work?
+For new users installing FlowCrew and preparing a run before live work.
 
 ## Install in a development checkout
 
-Node.js 22.5 or newer is required. The package uses Node's built-in `node:sqlite`. Git is needed for
-the worktree setup procedure. Process supervision supports Linux with or without a systemd
-user session and macOS; see [architecture](architecture.md) for identity limits.
-
-Run these installation commands from a checkout you own:
+Use Node.js 22.22.2 or newer, Git, Python 3 and rsync. The system rsync on macOS
+is supported; GNU rsync is not required.
+Read [platform boundaries](operations.md#platform-boundaries) for macOS, Ubuntu and containers.
 
 ```bash
 git clone https://github.com/cuibuaa/flow-crew.git
 cd flow-crew
 npm ci --ignore-scripts
-npm ci --ignore-scripts --prefix ui
 npm run build
-node dist/cli.js --help
+npm link
+flowcrew --help
 ```
 
-The combined build produces the engine and dashboard. These commands use the local CLI;
-[contributing](../CONTRIBUTING.md) explains private build destinations for a checkout serving
-other work. The package's ordinary postinstall also installs UI dependencies and builds, so
-using `--ignore-scripts` above makes those steps explicit.
+The build produces the CLI, monitor and standalone session hook. Check `which flowcrew`
+to confirm the checkout selected. `npm unlink -g flowcrew` removes the command link.
 
-If you want `flowcrew` on your shell path, `npm link` changes the global command link. Check
-which checkout that link selects with `which flowcrew` before using it. `npm unlink -g flowcrew` removes that global
-link; it does not remove copied skills. Neither operation is necessary for the local commands
-above.
+## Prepare a run
 
-## First safe result
+Write a self-contained brief using the [contract](brief-contract.md). Save it outside the
+project in a separate folder per task, for example `<briefs-dir>/<task>/brief.md`, and use
+a new filename for each revision. Setup copies the entire project except `.git`, including
+ignored files, so keeping briefs outside it avoids copying unrelated tasks into every run.
+From your project directory:
 
-Use the exact recipe in [examples](../examples/README.md#rehearse-a-research-contract).
-Rehearsal launches no model. It parses the brief and exercises scripted research settlement;
-engineering briefs receive static checks without that research simulation. A ready verdict
-checks wiring, not research quality or a live agent's ability to complete the task.
+```bash
+flowcrew setup <brief>
+```
 
-Rehearsal executes a declared confirmation command in a disposable project. Review shell text
-in an unfamiliar brief, or select `--static-only` as documented in [CLI](cli.md#inspection-and-setup).
-The disposable project and state are removed unless `--keep` is selected; the diagnostics
-path printed by the command is retained for inspection.
+Here `<brief>` is the path to that saved file. Setup admits a run and prints its `run` id,
+brief digest, project, command IDs and effective settings. It creates the runtime pin and
+project copy without calling a model, provider or declared command. Optional `--project`,
+`--backend` and `--config` select the project and runtime at this point
+([CLI](cli.md#setup-and-start)); setup success proves no validation result.
 
-## Prepare live work
+## Start live work
 
-An authenticated Codex CLI or Claude Code is needed for live runs. FlowCrew's adapter resolver
-checks executable presence; presence alone does not establish authentication. `node dist/cli.js
-doctor` checks configuration, builds, skills, agent availability and authentication diagnostics.
-It can inspect local agent authentication state and query the dashboard port. Review warnings;
-exit zero can include warnings. Engine defaults, roles and workflows come from the installed
-FlowCrew package; project configuration files do not replace them.
+Live work needs an installed, authenticated Codex CLI or Claude Code. Runtime
+[configuration](configuration.md) chooses roles and provider settings. Read the brief,
+setup result and [execution boundary](operations.md#platform-boundaries) before starting:
 
-Install the shipped conversation integrations when you want them:
+```bash
+flowcrew start <run-id>
+flowcrew status <run-id>
+```
+
+Replace `<run-id>` with setup's returned `run`. Start launches that saved record; editing
+the original brief or configuration does not change it. Status shows its brief digest;
+`flowcrew status <run-id> --brief` prints the stored brief before land. To discard an
+unstarted run, cancel it and land it. A successful launch is not acceptance.
+
+## Inspect runs and storage
+
+```bash
+flowcrew monitor
+flowcrew status <run-id>
+```
+
+Monitor prints its URL, by default `http://127.0.0.1:8795`. It reads the CLI's selected
+store and serves GET only. Use `--port N`, `--host H` or repeated `--store-root DIR`
+to select another listener or stores. Expand run details to inspect tries, checkpoints
+and stop reasons; act in the owning coding-agent session. See [operations](operations.md#inspect-guide-and-stop).
+
+Use the [controls](cli.md#read-and-steer) to guide, cancel or resume a run; recovery after
+host restart needs explicit resume. After review, `flowcrew land <run-id>` preserves its
+outputs and patch, then deletes its project copy, runtime pin and raw evidence, including
+the stored brief. See [preservation](operations.md#preserve-and-reclaim) for the archive
+layout and applying changes. [Configuration](configuration.md#storage-and-runtime) owns
+storage locations and overrides.
+
+## Coding-agent skills
 
 ```bash
 ./skills/install.sh
 ```
 
-The installer skips absent agent executables. Selectors are `--claude`, `--codex`, `--global`
-and `--project`; the default is global and considers both agents. Claude copies go to the
-user's `.claude/skills` directory; Codex copies go to the user's `.agents/skills` directory.
-Each skill contains `SKILL.md` and linked guides copied into `references/`; checkout-only
-links become plain text. Verified Claude bundles replace the old command files.
-Project mode uses those directory names in the current project. Copies are byte-checked;
-Codex installation additionally asks its app server to enumerate the skills. Invoke `/ship`
-in Claude Code or `$ship` in Codex; the installer also supports `fc-status`.
+Selectors are `--claude`, `--codex`, `--global` and `--project`; default scope is global
+and absent agent executables are skipped. `--uninstall` reverses the install (changed skill
+files are preserved) and `-h`/`--help` prints usage. Claude skills go under `.claude/skills`,
+Codex skills under `.agents/skills`. Each has `SKILL.md` and linked guide files copied
+into `references/`; checkout-only links become plain text. Project mode uses these
+directories under the selected project. For Claude Code the installer also registers the session hook (Codex gets none), and
+`--uninstall` removes that registration; see the current
+[integration limitation](session-push.md#installation-boundary).
 
-Read [the ship procedure](../skills/ship.md) before handing off. It separates fact gathering,
-brief authoring, exact-byte rehearsal and approval, target setup, and launch. For a brief you
-already have, use [the CLI reference](cli.md#launch) and [brief contract](brief-contract.md).
-Monitor and stop it through [operations](operations.md); do not edit its project concurrently.
-
-Sources: [package](../package.json), [build](../scripts/build.ts),
-[installer](../skills/install.sh), [doctor](../src/cli.ts), [rehearsal](../src/rehearse.ts).
+Invoke `/ship` in Claude Code or `$ship` in Codex. The [ship procedure](../skills/ship.md)
+writes the brief with you, runs setup, shows both, waits for new explicit confirmation,
+then starts the admitted run id. `/fc-status` or `$fc-status` displays store/run status.

@@ -6,7 +6,7 @@ prompt: |
   Evaluate the assigned paper as an independent conference reviewer.
 
   # Verdict contract
-  Return the scheduler's typed verdict. Each concern includes section/page, severity (major/minor),
-  issue and suggested_fix. Each criticism cites the specific section/page; findings reflect the paper,
-  with no minimum count. Give Novelty, Rigor, Clarity, Soundness and Reproducibility their own 1–10 score.
+  Return the scheduler's typed verdict under the injected finding policy. Put section/page, severity,
+  issue and suggested fix in each finding's reason; there is no minimum finding count.
+  Include Novelty, Rigor, Clarity, Soundness and Reproducibility scores (1–10) in the verdict reason.
 handoff_visibility: minimal

@@ -1,417 +1,455 @@
 # Operations
 
-For an operator: how do I prepare, inspect, steer and preserve engine work?
-Command syntax belongs to [CLI](cli.md); typed stage requests belong to [agent protocol](agent-protocol.md).
+For operators preparing, steering, verifying and preserving a run.
+[CLI](cli.md) owns command syntax; the [brief contract](brief-contract.md) owns declarations.
 
 ## Identities and lifecycle
 
-A daemon **task** has a numeric registry ID. A **run** has its own persistent identity and
-stage graph. A stage **execution** is one attempt under a deadline; a gate **re-evaluation**
-is a separate counter. A **campaign** groups run history. A conversation **ledger entry**
-expresses human wrap-up intent and may link to an exact daemon task; it is optional.
+Setup admits a run and returns its `run` id; start launches that record. A run has a pinned
+runtime, admitted brief, graph, attempts, command receipts and independent reviews. Use that id for all controls.
 
-| Run status | Meaning |
+| Status | Meaning |
 |---|---|
-| `pending` | Queued, not executing |
-| `running` | Executing; inspect process identity as well as stored status |
-| `parked` | Paused for a decision or proven resumable interruption; not terminal |
-| `complete` | Successful terminal engineering completion |
-| `shipped` | Successful terminal research ship decision |
-| `ceiling_hit` | Successful process-level research ceiling; not a metric win |
-| `failed`, `reality_gate_failed` | Terminal execution/check failure |
-| `escalated` | Terminal unresolved or irreparable outcome |
-| `cancelled` | Terminal explicit stop; compatible settled work requires explicit resume |
-| `incomplete` | Terminal insufficient completion |
+| `preparing`, `refused` | Setup in progress or setup refused; inspect the preparation reason |
+| `pending`, `running` | Admitted but unstarted, or executing work |
+| `parked` | Retained work waiting for explicit continuation or recovery |
+| `complete` | Completed accepted delivery |
+| `accepted_blocked` | Independent gate accepted a brief-permitted blocked result |
+| `incomplete` | Required commands or output preservation did not establish completion |
+| `failed` | Irreparable gate, or frozen-input isolation failure that could not be restored |
+| `cancelled` | Explicit terminal cancellation |
 
-Archived `stopped` is read as `cancelled` without rewriting the archived record.
-Unknown archived status values remain unknown; consequential actions refuse inferred semantics.
-Stages separately use pending/running/complete/failed/skipped. A daemon task can be pending,
-deferred, running, cancelling, done, stuck, needs_summary, cancelled, failed or reality_gate_failed.
-Deferred does not mean rejected; cancelling does not prove that children have closed.
+Unresolved recovery ownership shows as `parked` with `stopReason: recovery_unknown`; this engine never writes the status `escalated`, though readers accept it. Public status can also show `interrupted` and `unknown`, which are availability overlays, not journal states.
 
-The daemon serializes tasks by canonical project guard and queues conflicts; different projects
-can run concurrently. A parked run releases its execution slot. A foreground quick run also
-uses the project lock. Do not edit an active run's project: scope restoration cannot distinguish
-an unrelated human edit from every stage-caused change.
+Inspect `stopReason`, `attention`, gate evidence and deliverables together. A lifecycle
+label does not prove a scientific conclusion or human acceptance. Do not edit an active
+run's workspace concurrently; unrelated edits cannot be attributed to its author.
 
-Sources: [lifecycle vocabulary](../src/lifecycle-status.ts), [task registry](../src/task-registry.ts),
-[orchestrator](../src/orchestrator.ts), [run lock](../src/run-lock.ts).
+## Preparation and command evidence
 
-## Setup validation
+`flowcrew setup <brief>` (syntax and printed fields: [CLI](cli.md#setup-and-start)) admits
+and records a run: it captures the brief, checks declarations, input identities, output
+dispositions, source/record separation and effective settings, pins the runtime and prepares
+the project copy. The copy includes everything except `.git`, including ignored files.
+Setup rechecks imported content facts before committing preparation evidence. It executes
+no provider or declared command, so success establishes neither command feasibility nor
+validation success. `flowcrew start <run-id>` launches exactly that admitted record.
+A prepared but unstarted run can be cancelled and landed; a failed setup that created a
+record also reports its id for inspection and cleanup. Before the first run record commits,
+mkdir, schema setup and existing-run conflicts report no run effects and do not say setup began.
+An uncertain creation reports the attempted id and store address as unconfirmed, retains
+the directory and exits 3. Inspect status when readable, then cancel and land a confirmed
+record; do not retry creation there or delete it as an empty attempt. A confirmed creation
+survives later setup failures. Failure exits preserve their cause: invalid 2, conflict 1,
+unavailable or unknown 3.
 
-`ship-preflight` gathers prior-run/campaign/input/output/build facts and discovers validation
-commands. It runs no project build, test or lint.
-Exit zero means collection completed, not that launch is ready.
+Command receipts record completed exits or explicit unfinished/not-started outcomes,
+streams, tree identities and elapsed time. If a declared output changes during post-command
+capture (`output_changed`), the command receipt keeps an `unpinned` result and the run parks
+with `command_unfinished`; stop the outside writer before resuming, or cancel to keep the
+evidence. Declarations and delivery obligations are in the
+[brief contract](brief-contract.md#inputs-outputs-and-validation).
 
-`ship-setup` requires the exact brief, source project, base, new branch and target. It checks
-source/base inputs, creates or proves the reusable managed worktree, materializes missing
-input descendants and compares target content. Target-owned copies of regular files/directories
-isolate target writes; internal
-links are relocated within the target tree. Existing target entries resolving outside it or
-content/type collisions refuse. Do not replace a refusal with manual source symlinks.
+## Platform boundaries
 
-Setup discovers validation from configuration or the brief's explicit argv declarations.
-It executes the target baseline under the configured command bound and writes a ready record
-bound to the exact brief digest and canonical target. A failed setup can leave a diagnostic
-worktree; it does not publish a ready record for a blocker.
+All authors, providers and commands run with the OS account's ordinary rights.
+FlowCrew no longer prevents writes outside the project, writes to frozen sources or
+engine records, access to provider homes or credentials, use of host sockets, devices
+or network, or interaction with other account processes. Invocation containment controls
+local descendant lifetime; it does not restrict these account rights. FlowCrew retains
+an accountable default workspace, cooperative ownership, observed
+content/effect evidence and independent review. These are not OS security confinement.
 
-Ordinary red checks can establish `no_regression_from_baseline`. Failure extraction uses
-complete joined output before bounding persisted text. Complete structural TAP and recognized
-FAIL/FAILED, cross-mark and compiler diagnostic lines can supply identities. Truncated recovered
-identities are partial lower bounds. Partial red-to-red comparisons stay unresolved;
-green-to-red needs a known complete failure inventory to establish regression; unknown/partial
-current failures stay unresolved. Red-to-green passes. If both baseline and current results
-cannot run or fail without identifiable failures, the delta passes and the gate judges its own
-checks. Missing/unlaunchable tools are environment problems; inspect the record's readiness and reasons rather than
-assuming every nonzero child exit has the same setup outcome.
+The default workspace is the per-run project copy.
+Absolute paths and copied symlinks can still lead outside it. Engine path checks prevent its own import, restore and reclaim operations
+from targeting overlapping source/record destinations. They cannot stop other programs
+running under the same account from changing source, records, runtime pins or credentials.
 
-Exit 127 is not universally a refusal: an unlaunchable brief-declared command or a project
-whose commands cannot launch blocks readiness. A discovered missing command can remain an
-environment gap when other commands launch; a runner inferred only from a legacy INI file
-can remain a gap even when nothing launches. Inspect provenance, not just the exit number.
+Frozen-input hashes and snapshots detect changes at observation boundaries, retain
+evidence, restore eligible in-copy content and quarantine unproven or external changes.
+External frozen inputs are not automatically rolled back. Changes made and restored
+between observations can go undetected. Gate (review) invocations are independent and
+receive no guidance. A plan or gate invocation never delivers bytes: at settlement the engine
+restores the project and declared exact outputs to the tree it reviewed, whatever its tools
+left behind, and the attempt's after-capture keeps those bytes on record. Their tools
+still have host rights, and out-of-project changes are not comprehensively audited.
+A same-account journal is not a tamper-proof security boundary.
 
-Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setup.ts),
-[validation and deltas](../src/project-validation.ts),
-[gate validation](../src/scheduler/sched_settlement/gate-validation.ts).
+On Linux with a systemd user manager, author invocations and engine commands use a
+delegated cgroup v2 scope, requiring `busctl`, `systemctl`, readable `cgroup.events` and
+writable `cgroup.kill`. Its `cgroup` receipt proves recursive descendant closure,
+including children that create their own group or session.
 
-### Storage ownership
+Elsewhere, including macOS and Linux containers without a user manager, every invocation
+inherits a unique `FLOWCREW_INVOCATION` environment marker. Closure kills its authenticated
+group, then repeatedly scans only current-user processes, killing exact marker matches
+until no readable match remains. The `marker` guarantee is best effort: a child that
+removed its marker is outside the guarantee. The owner retires after this close, so later
+runs can start. Linux reads `/proc/<pid>/environ`; macOS reads `KERN_PROCARGS2` with the
+existing Python native helper facility. No environment contents are printed. Permission
+denials and macOS SIP-hidden/absent environments are reported as unknown PIDs, left
+unsignalled, and do not hold ownership forever. If the entire scan is unavailable, the
+receipt says descendant fate is unknown and retires the marker owner after group closure.
+A genuine group drain or marked-process signal failure remains a failed close.
 
-Setup's independent input copies protect the source even when a subprocess writes its local
-input. A read-only declaration or a later hash check cannot provide that protection through a
-hardlink. Before creating a worktree or copying declared inputs, setup estimates the additional
-input bytes, deduplicated by destination, and calls `disk-guard need <bytes>` once for a nonempty
-copy budget. The executable is resolved from `~/bin/disk-guard`, then `PATH`; a missing tool,
-failed estimate or refused admission blocks setup before copying. Capacity policy belongs to
-disk-guard, with no FlowCrew threshold or bypass flag. Existing target files need no additional
-copy budget. Sparse files and reflinks count their full logical size.
+Normal ending, cancellation and controller recovery use the same recorded containment
+field. Receipts carry `guarantee`, `detail` and any `unknownPids`; status includes the
+latest closure detail in `host.interpretation`. Old records without containment keep
+group-only closure. Recovery retains unknown direct exit when no exit was recorded,
+while independently retiring successfully closed ownership.
 
-This admission covers setup's declared input copies. Git checkout growth and ordinary engine
-copies, archives and restores do not invoke disk-guard. Admission is a check, not a reservation;
-concurrent materializers must coordinate their budgets. An input-copy failure still refuses
-setup without publishing READY; inspect available space and the reported target before retrying.
-Failures after admission can leave partial copies.
+Effects outside the process tree, such as scheduled tasks, services and containers, are
+outside engine-managed closure; their cleanup duty is in the [brief contract](brief-contract.md#inputs-outputs-and-validation).
 
-Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures.
-Invocation scratch survives within an active run, then is retired at terminal publication,
-including failed, incomplete and cancelled outcomes. Resume uses retained unfinished stage
-work and allocates fresh invocation scratch. Daemon startup removes temporary aliases of
-deleted run folders without entering retained runs. It does not compact historical runs or
-recursively retire scratch. Use explicit `prune --apply` for interrupted retirement in
-recorded runs; `clean` also retires scratch of runs with missing `run.json`, while preserving
-their other files and leaving malformed records untouched. `clean` deletes old run history.
+Host OS permissions, device availability, service access and native trust settings
+still apply. Removing engine restrictions does not prove hardware or service availability.
+Container and root execution require their own validation; they are not certified here.
 
-Compiler output and caches belong in invocation `$TMPDIR`. Copy declared final products
-and evidence to their declared run-relative paths before the command ends. Historical
-`stages/<stage>/build/` and `stages/<stage>/scratch/` trees are durable history: the engine
-no longer scans citations or compacts these directories. Declared products remain readable
-after terminal settlement. Undeclared scratch content retires with the run.
-
-Interrupted scratch retirement does not require a surviving temporary alias: `prune --apply`
-uses the recorded run's physical scratch root, and `clean` retires it when deleting old
-history. This also handles a reboot that wipes temporary aliases. Retained runs can be
-pruned individually without deleting their history; daemon startup never walks the runs root.
-Park/deployment holds and uncertain process ownership still prevent pruning. Retention
-sends no signals and never reverts project changes.
-
-For existing runs, inspect the same policy before applying it:
-
-```bash
-flowcrew prune --dry-run
-flowcrew prune --run <run-id> --dry-run --json
-flowcrew prune --run <run-id> --apply
-```
-
-The default is a read-only dry-run: no lock, index, manifest, alias or store file is written.
-It reports per-run bytes and kept paths/reasons; JSON includes the candidate file list,
-refusals and total bytes. Counts are logical file lengths, not filesystem free-space
-promises (hardlinks, compression and metadata can differ). Bulk operation skips refused
-runs and uninitialized store entries; an explicitly selected refused run exits nonzero.
-Apply replans under the run-state lock shared with launch, resume and cancellation.
-Repeated application is safe. `clean` separately deletes old run history; `prune` keeps it.
-Retained artifacts intentionally continue to consume space; pruning only retires invocation scratch.
-
-Sources: [input materialization](../src/cli-ship-setup.ts),
-[retention policy and CLI](../src/run-retention.ts),
-[scratch owner](../src/invocation-scratch.ts), [terminal publisher](../src/store.ts).
+Declared command argv and environment values are retained as supplied. At launch,
+`FLOWCREW_INVOCATION` is reserved for ownership: marker-owned invocations receive the
+recorded marker, replacing any inherited value; cgroup-owned invocations carry none.
+PATH and TMPDIR defaults for commands are in the
+[brief contract](brief-contract.md#inputs-outputs-and-validation). FlowCrew does not infer
+permissions from environment paths, export a trust bundle or inject proxy/CA settings.
+Provider invocations retain caller context and selected native configuration. Explicit
+proxy/CA settings remain ordinary program inputs. Never put secrets in a brief's
+recorded environment.
 
 ## Inspect, guide and stop
 
-`status` selects the latest run for the current project; `--all` selects across projects.
-`task show` reads daemon detail. `state` reads admitted plan/attempt/artifact/evidence facts;
-`--summary` bounds the projection and `--prompts` includes retained immutable invocation inputs.
-An observation grants neither permission nor a pass. Older `input.md` aliases cannot reconstruct
-every historical retry or hidden provider instruction.
-
-`events` reads the canonical feed; `watch` gives a first heartbeat and edge-triggered stalls,
-drift and evidence gaps. Watch reports terminal indecision after its quiet grace and rejected
-gate plateau/regression using bound numeric history. It is an operator observer, separate from
-the deterministic stage watchdog described in [architecture](architecture.md#deadlines-and-idle-progress).
-No watcher opinion establishes that a model result is correct.
-
-`guide` writes to a named running run and optional stage. Without a run ID it refuses unless
-exactly one readable run is executing. Guidance targets the selected stage or explicit run-wide
-`*`; workers consume filtered envelopes at command boundaries. `interrupt` requests a stop of
-the exact active stage command and delivers its reason as guidance. Neither resets the attempt
-deadline. Changes to admitted criteria or authority need revised brief bytes and admission.
-
-Use daemon `task cancel` or the dashboard Cancel control to stop registered work. Cancellation
-records the operator decision and closes active control state before bounded worker cleanup.
-Unknown process evidence is retained in the cancellation result and task notes; it neither
-vetoes cancellation nor authorizes a signal. A retained running marker alone proves neither
-life nor death. Use `task resume` or the adjacent dashboard Resume control to continue a
-compatible cancelled, failed or incomplete registered run after settlement.
-Cancellation alone grants no automatic continuation. A task retry requests another launch attempt;
-after terminal settlement it starts a fresh run. Foreground operation stays attached to the
-caller; process supervision and hard-kill limits are in
-[architecture](architecture.md#process-supervision-and-recovery).
-
-Sources: [state](../src/run-state-access.ts), [status/guide/interrupt](../src/cli.ts),
-[events](../src/cli-events.ts), [watch](../src/watch.ts),
-[cancellation](../src/cancellation-policy.ts), [task CLI](../src/cli-task.ts).
-
-## Approvals
-
-Human approval supplies authority outside the run: other repositories, credentials,
-outward network effects, deletion of user data, shared devices, or git history outside
-the run branch. Admitted writes, private scratch, run-local tool environment setup and
-framework-owned isolated validation proceed under their existing execution owners.
-Contract errors receive engine decisions; approval cannot override engine ownership or frozen-input protections.
-
-A worker that needs external authorization writes one request to its injected stage slot
-`stages/<id>/approval_request.json` and stops before the action. Required fields are `id`
-(or alias `requestId`), nonblank `action`, and `risk: external`; `target`, `title`, `body`
-describe the external effect and exact authority needed. IDs match `[A-Za-z0-9._-]{1,64}`.
-The stage slot determines the requesting stage, even if its JSON names another stage.
-
-Legacy exec/write/unknown requests receive a deterministic answer without parking.
-A target physically inside the requesting stage's run subtree, excluding engine records,
-acknowledges existing scratch authority. Symlinks, traversal, another stage's work and
-engine records cannot expand it. Other non-external requests are denied: use the existing
-execution/scope mechanism, or explicitly describe an external effect with `risk: external`.
-Refusal of this grant leaves existing admitted capabilities unchanged. The answer grants
-no device, credential or network authority. Engine answers use the same
-append-only decision transport and identify their source as the scheduler.
-
-The scheduler watches active batches as well as inspecting completed ones. It persists the
-request, chooses the oldest unresolved external item, parks the run without `completedAt`, suspends
-workers and closes children before releasing ownership. Requests are idempotent by run and
-ID; resolutions are append-only, first-responder-wins. The decision is projected at
-`approvals/<id>.decision.json`; read it before acting. An external approval authorizes
-that effect; its denial forbids it. An engine answer changes no existing capabilities.
-
-CLI approve and deny both resume a parked run through daemon registration by default,
-preserving run/DAG/iteration identity. `--no-resume` records a decision without relaunch.
-Resume still checks brief admission. Standing rules, `--always`, `rules` and `revoke` are
-retired. Root request variants remain historical compatibility inputs. Full shell access
-means this request protocol is not a host-wide interception of arbitrary side effects.
-
-Exhausted research gates use their admitted escalation terminal owner. Without that owner,
-the run finishes incomplete with the failing criteria and missing-owner evidence. It does
-not ask a person to repeat the gate decision. Proven resumable host interruptions retain their
-orchestration checkpoints without requesting human approval.
-
-Cancellation closes active control state as `cancelled` and attempts to stop its owned
-workers. It acknowledges a terminal decision; task notes report any unresolved process
-evidence. Daemon restart, recovery and deployment release leave that cancellation cancelled.
-Explicit resume can continue safely settled work after ownership and compatibility checks.
-Use the deployment hold below to let current stage work settle normally before deployment.
-
-Explicitly continue a registered task's cancelled, failed or incomplete run by task ID:
-
-```bash
-flowcrew task resume <task-id>
+```text
+flowcrew status <run-id>
+flowcrew guide <run-id> "Keep the public API stable"
+flowcrew cancel <run-id>
+flowcrew resume <run-id>
 ```
 
-The daemon launches a scheduler for that run. Failed stages receive a new attempt,
-whether the earlier attempt executed or was refused before execution. Skipped
-stages become runnable again and their conditions are checked anew. Completed
-authoring and planning stages, attempt history, the admitted workflow and plan,
-and the remaining iteration budget are preserved. Pending stages continue when
-their dependencies are ready. An incomplete run with a completed nonpassing gate
-reopens that gate in the next iteration; further rejection uses the admitted repair
-route. Resume reports exhausted iteration budget before queuing work. Cancelled or
-failed work continues in its interrupted iteration without replenishing repair rounds.
-An unfinished repair continues its admitted gate round; the related gates review
-the new repair without restarting earlier authoring or planning work.
-The task registry supplies the run ID and project directory; the dashboard Resume
-control beside Cancel requests the same continuation. Resume still checks brief
-admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
-Only explicit continuation resumes cancelled work.
-Cancellation settles interrupted attempts and their stage ledgers. Resume requires settled execution records; it refuses unfinished attempts left by an older cancellation without rewriting them. Archived `stopped` records remain readable as `cancelled`.
-`flowcrew task retry <task-id>` requests another launch attempt:
-before terminal settlement it retains any existing run binding, and after settlement
-it starts a fresh run with a new plan, stage history and iteration budget. Retry does
-not resume cancelled work. Parked approval requests use the Inbox decision controls.
+Text guidance records the
+cursor and stage/attempt observed by the operator and never interrupts the author.
+On its five-second observation cadence, the controller offers pending guidance to a
+running Claude author's native stream-json queue. The Codex adapter streams live activity but
+refuses same-turn steering in this release, so guidance waits for its next author
+invocation. Refused or ended offers also remain pending for the next author input.
+Pending guides stay ordered and apply to author planning, repair or continuation.
+When only a gate remains, the affected author continues with the guide and dependent
+stages are reviewed again. Independent reviewers never receive guidance. Mid-turn
+messages remain within the brief and cannot widen its authority.
 
-For a run without a registered task, the existing continuation command remains
-`flowcrew quick --background --project <project-dir> --existing-run-id <run-id>`.
-Omit `--background` to continue that run in the foreground.
+Status lists each guide as `pending` or `delivered` with its invocation. A guide shows
+`pending` until the invocation that received it ends, and `delivered` after that: delivery is
+recorded in the receiving invocation's receipt, which is written when the invocation ends,
+so a Claude author can have read the guide hours before status says so. The receipt confirms
+initial and steered delivery. Claude acknowledges a steered
+guide by echoing it when it takes the guide into a turn; a write Claude has not echoed is
+not delivery, and the invocation does not end at a result while such a guide is waiting
+(Claude runs one more turn for it). At most one guide message is in flight per invocation:
+guides accepted while one waits for its acknowledgement are held and sent together as one
+message (separated by a blank line) once it is acknowledged, and the acknowledgement of that
+message delivers all of them. The guide remains pending until its receipt is recorded; if the invocation ends or dies first, the guide is delivered again. Delivery does not prove
+that the requested change occurred.
 
-Sources: [inbox](../src/inbox.ts), [request paths](../src/approval-artifacts.ts),
-[active monitoring](../src/scheduler/sched_policy/approvals.ts), [decision CLI](../src/cli-inbox.ts),
-[continuation admission](../src/scheduler/sched_loop/launch.ts), [daemon queue](../src/orchestrator.ts).
+Both provider adapters emit tool-start, tool-end, message and turn-end activity while
+the provider is running. Summaries are at most 200 characters and omit potentially
+secret command arguments, message bodies and environment values. Activity is provisional
+observation; final answers still require authenticated closure, content and schema. One reader
+consumes new raw-file bytes without filesystem watchers, so unavailable watch resources
+do not affect invocation completion. The reader reuses one 64 KiB buffer per invocation
+and polls every 100 ms for new bytes. Steering does not depend on that poll: the
+controller offers accepted guidance to a running Claude author about every five seconds
+(its observation cadence, which also refreshes the display), and Claude takes it into a turn
+when it can; the echo of the message is what counts as delivery. Live read errors are logged and retried from the unchanged offset;
+only the final authoritative read/decode can fail completion. Final decoding consumes the
+retained bytes and closes Claude input on the root result or native exit. The root result
+ends a Claude invocation: after it Claude has 2 s to exit by itself, then the invocation's
+owner is closed, which ends every process it started, even one still blocked on input. That
+receipt is `closed` with no exit code or signal and the answer stays delivered; an exit or
+signal observed before then still decides, as for any native exit.
 
-## Deploy while tasks are in flight
+Status JSON includes `stages` in current-plan order, followed by replaced definitions
+marked with `replacedBy`. A replaced definition keeps its own execution state,
+engine-attempt count, ending, verdict, summary and times. `attempts` counts distinct
+engine attempts; continuation invocations are separate `segments`, not extra attempts.
+Optional segments carry attempt outcomes and recorded attempt/pause times. Older projections
+can publish outcomes with a null start and measured gaps between controller intervals,
+without replaying the journal. Per-try times remain unavailable when never retained. Optional `summary`
+is the stage's own recorded work summary or review reason verbatim. A running gate's
+optional `commandProgress` carries the declared commands and their recorded execution
+states. Gates retain satisfied-command sources after settlement: stage, attempt, invocation and
+result tree. Earlier invocations include `reused from <stage/attempt>` as a display label. Optional `startedAt`, `lastActivityAt` and `endedAt` describe recorded run times.
+Optional `activity` shows current author tools, independent reviewer tools and engine commands before they end:
+source, last relevant event time, tool and summary. The dashboard displays those facts
+on the running stage; the session hook reads the same facts from the published v4 status file.
+Activity does not advance the decision journal, and failed activity writes are logged and ignored. A running tool or
+command with no observed progress for ten minutes creates one attention notice per
+quiet episode. Recorded command samples retain the episode across controller restarts. New relevant activity clears the notice; a later quiet episode can
+notify again. Silence never kills, fails or retries execution. Missing observations
+stay unknown. Controller polls, PID liveness and CPU use are not progress; unrelated
+provider chatter does not refresh an open tool. Engine commands use changes to their
+own captured streams. A silent intentional wait can produce the same advisory.
 
-**First upgrade across the RPC command/reply change (0.11.0):** use
-`daemon hold` (old CLI) → `daemon stop` (old CLI) → build → `daemon start`
-(new CLI) → `daemon continue` (new CLI). Run each as a separate invocation from
-the deployment checkout, using the same `FC_HOME` and socket throughout:
+The last-activity age fades without judging liveness. See [the status field table](cli.md#status-output)
+for the wire fields. Old files without these fields remain readable; missing facts stay absent.
 
-```bash
-flowcrew daemon hold       # old CLI: require exit 0 and ready: true
-flowcrew daemon stop       # old CLI: wait for old daemon/socket retirement
-npm run build              # daemon stopped; publishes the new CLI and daemon
-flowcrew daemon start      # new CLI: require verified startup
-flowcrew daemon continue   # new CLI: require released: true and no errors
-```
+Start the read-only dashboard with `flowcrew monitor` and open its printed URL
+(default `http://127.0.0.1:8795`). Without `--store-root` it reads the CLI's selected
+store; repeat `--store-root DIR` for multiple stores. `--port N` and `--host H`
+change the listener; the default host is `127.0.0.1`.
 
-Stop at any refusal or unknown outcome and inspect state before retrying. The old CLI's
-`daemon deploy` cannot read the new daemon's `{ok:true,result}` replies; renamed RPC
-commands have no compatibility aliases. New-client cancel requests to a still-running
-old daemon fail as not-found until restart. The durable hold remains active across the
-stop/build/start boundary. Once both CLI and daemon use the new protocol, use the regular
-`daemon deploy` procedure below.
+The header counts **Needs you**, **Running** and **Ended · 24h**. It shows one time track per run, a current-stage
+position, owning-session notification binding and collapsed evidence. An ended run that has
+not been landed also shows the space it holds, and the header adds a **held, not landed**
+total over those runs (see [held space](#held-space-of-ended-runs)). Expand details
+for tries, review results, saved checkpoints and the reason a run stopped. It only serves GET;
+act in the Claude Code or Codex session owning the run. Its single existing poll updates
+published facts while retaining details and theme. It shares the hook and publisher's
+read-only controller observation and single run/stage availability derivation; it never
+infers liveness from elapsed time or writes the status file. Unsupported status values
+make the file unavailable. Active totals sum recorded track time (with missing try times
+disclosed); ended rows show age only when an end time was recorded.
 
-Use an engine with `daemon deploy` support for this procedure. Upgrading an older engine
-that lacks the command still requires retiring its consumers first. Select the same
-`FC_HOME` and daemon socket for every command. The hold is durable in that state root,
-survives daemon restart, and fences both registered launches and foreground schedulers.
+To obtain a replacement using public output alone, save `flowcrew status <run-id>`
+as `status.json`, extract its `plan.pending` object into a plan JSON file, and edit that
+object. A human `guide --plan` cannot change the definition of an already-attempted
+stage, even if that stage remains in `plan.pending` or is parked: `admitPlan` refuses
+that change. Preserve attempted definitions and edit only unattempted work. For example, `node -e 'const fs=require("node:fs"); const s=JSON.parse(fs.readFileSync("status.json","utf8")); fs.writeFileSync("plan.json",JSON.stringify(s.plan.pending,null,2))'`.
+The pending object contains exact stage definitions (IDs, purposes, roles, `after`,
+full instructions, command IDs and repair/checkpoint fields), omitting settled/skipped
+stages; dependencies may still name retained executed stages. Keep the independent
+last gate and required verification obligations. Submit it with
+`flowcrew guide <run-id> "Explain the revised pending work" --plan plan.json`, then
+`flowcrew resume <run-id>`. `plan.revision` identifies the snapshot's admitted revision;
+guide binds the replacement to the current revision when submitted. Inspect a fresh
+status before submitting if the run has progressed.
 
-```bash
-flowcrew daemon deploy --timeout-ms 60000
-flowcrew task show <task-id>
-```
+Replacement plans via `guide <run-id> <text> --plan <file>` require no open attempt or
+unsettled command reservation. An active attempt yields an actionable refusal; wait
+for the current step to finish or for the run to park. There is no park command. Replacement plans
+retain executed history and declared obligations. Guidance cannot widen brief authority.
 
-Invoke the CLI from the authorised deployment checkout: its runtime location selects the
-build target, independently of the shell's current directory. Deployment requests a hold,
-waits for settlement, checks restart safety, stops the daemon, publishes a complete build
-and starts the new daemon. It proves the RPC identity, Unix socket owner, `daemon.json`
-and published generation agree before continuing held runs. `--timeout-ms` bounds the
-hold wait; it does not cancel stages or impose a build deadline.
+After a controller dies, use `flowcrew status <run-id>` and then
+`flowcrew resume <run-id>`. Resume authenticates and closes owned survivors, retains
+captured streams and marks interrupted accounting `closed-unmeasured`. That state
+means the command may have changed the project or external systems; it is never a
+successful command receipt. The interrupted request is spent and is never dispatched
+again. Continuation starts from the retained safe base, lets the author inspect and
+repair, and still requires independent review and current measured verification.
 
-Builds publish real `dist/` and `ui/dist/` directories, including the hidden build
-manifest. Ordinary tar archives and npm packages therefore contain portable files.
-Daemon startup snapshots the attested backend/UI and configuration into
-`runtime/.cache/build-generations/<generation>` beside its socket, then loads the
-physical runtime path. Rebuilds only replace the checkout outputs; the daemon and
-its later imports, including scheduler children, keep that runtime. Current and
-previous daemon generations are retained. Before migrating a daemon started by
-an older release directly from the checkout, stop it once before rebuilding.
+Inspect the retained streams and actual effects before resuming. Text guidance can
+explain what to repair; `guide <run-id> <text> --plan <file>` can replace pending work
+when a different graph is required. Supply your pending graph as plan JSON, retaining
+the independent delivery gate and the brief's verification obligations. A later stage
+can select a deliberate new verification request. Resume consumes the stop it ended;
+it preserves the old uncertain result without immediately re-deciding that ending.
+The old reservation and unknown result remain in history; they do not become
+successful or silently execute again. Historical parks
+do not fence a newly reserved invocation, while cancellation remains terminal.
 
-On failure the command reports its step and the durable hold state. Retry with the same
-`FC_HOME`, socket and checkout. If no daemon is listening, deploy starts the last published
-generation and settles the existing hold again before rebuilding. No transaction receipt or
-lock needs manual recovery. A lost continuation reply can mean the hold was already released;
-verify tasks before retrying. `deploy --force` refuses to bypass restart safety.
+Cancel records a fence without requiring the operator's cursor to match concurrent
+progress and interrupts work. An operation result of `not_confirmed_closed` retains
+cancelled lifecycle and publishes `closure_unconfirmed` attention until closure can
+be confirmed. Inspect the reported group and reaper, then repeat cancel to retry
+closure. Other refused, unknown or in-progress control results retain their own
+meaning and do not create closure attention. Unconfirmed claim cleanup adds
+`claim-unreleased`; interrupted accounting adds `accounting-unsettled`. Status lists
+open obligations (`closure-unconfirmed`, `accounting-unsettled`, `claim-unreleased`)
+as attention on any lifecycle, including final runs. The corresponding attention
+reasons are `closure_unconfirmed`, `accounting_unsettled`, and `claim_unreleased`;
+`attention.reason` names the earliest-recorded open obligation, in the same order as
+`attention.obligations` (the state row reader orders by recording cursor, then key).
+`stopReason` retains the conclusion's reason: when a blocking obligation parks a running run,
+it names the obligation that parked it, even if that obligation is later discharged.
+Obligations never replace a final conclusion or lift a cancellation fence. Only
+`closure-unconfirmed` and `claim-unreleased` block new work; `accounting-unsettled`
+records dead-activation bookkeeping and is discharged by reconcile.
+Parked work resumes as a continuation segment. Terminal and cancelled work refuse guide
+and resume; use retained evidence in a new brief when another run is needed. Unknown ownership/effects require inspection, never blind retry.
 
-Readiness observes active tasks and runs carrying this hold's id. Historical fixture tasks
-outside that set do not block deployment. Relevant units, schedulers and checkpoint-owned
-commands must be stopped; an unavailable manager or ambiguous owner refuses readiness.
-The daemon itself remains live until the stop step. `start` waits for its own child to
-become verifiably ready or exit, and reaps that child on failure. `serve` binds before
-reading the registry or running store maintenance, so a second serve exits immediately.
+C2 parks after three consecutive gate rejections, counting the one that last set the best
+pass count (so two rejections after the best that fail to beat it), or after four failures
+without an intervening completion, retaining work. Provider context exhaustion is a provider outcome; provider-internal loops need operator
+cancellation. There is no general iteration or stage deadline; a command may declare its own `durationMs`.
 
-A hold waits for the already admitted group to settle: ordinary disjoint peers finish
-together; a gate repair round includes its serialized repair waves, evidence settlement
-and gate re-evaluation. Scope continuations and technical retries already inside that group
-use their ordinary bounds. The scheduler then parks before admitting another group or
-iteration. Completed stages and their artifacts, attempt ledgers, admitted plan, rollback
-audits, gate rejection evidence and budgets are retained. This does not checkpoint a live
-process. No attempt is killed to obtain a deployment hold. A stage budget first requests
-wrap-up; its hard stop uses TERM/5-second grace/KILL and retains a continuation with work
-kept. Idle aborts, unsafe writes and unverified child closure keep their refusal semantics.
+## Runtime pin and restart
 
-There is no finite universal successful-hold bound: stage deadlines differ, groups may have
-several bounded attempts, and audit/validation cleanup may itself fail to settle. For a
-single running attempt, the wait includes its remaining immutable deadline, up to 5 seconds
-of termination grace, then owned command closure and settlement. Both `hold --timeout-ms N`
-and deploy's hold phase bound the settlement polling window (default 60 seconds), plus at
-most the initial 2-second RPC timeout. A missing response can report unknown delivery.
-Exit 1/2 or `ready: false` leaves the fence active: current work continues to its normal
-boundary, and no timeout fallback cancels it. Inspect `hold-status`, resolve any refusal,
-and retry deploy with the same target. If abandoning the deployment before stopping the
-daemon, wait for settlement and use `continue` on the existing build.
+Setup pins the built runtime and production dependency closure in a private copy. Its
+manifest identity is recorded. Supervisor, operation workers and resume use that pin;
+an ordinary package upgrade affects new runs only. External Node, providers and project
+tools remain external dependencies.
 
-After restart, the latch still blocks queued tasks. `continue` validates every eligible
-held run before releasing launch authority. Any incompatible run becomes `stuck` and keeps
-the global hold and compatible peers parked. Repair the refusal and retry: held runs are
-revalidated and their refusal is cleared only on successful admission. Explicit cancellation
-excludes that task without reviving it. Queue writes happen under the active latch; an
-interruption remains retryable. Repeated continuation does not grant attempts twice.
-Approval parks still require their own decisions; cancellation takes precedence. Task
-launch retry budgets are not charged for the hold.
-If a scheduler is lost while the hold is pending, existing restart recovery must first
-prove owner/command fate and reconcile its ledger. A proven resumable interruption joins
-the same hold without spending a task retry; its interrupted attempt remains in history
-and can restart after release. Unprovable recovery is reported and cannot launch work.
-Foreground runs without registered tasks also observe the fence. After `daemon continue`,
-continue those explicitly with `flowcrew quick --project <project-dir> --existing-run-id <run-id>`;
-the same compatibility and ownership checks apply before execution.
+Missing or changed pins refuse continuation with an actionable original-pin restore
+or new-run instruction. A host restart does not automatically resume work or install
+a login item. Status/monitor interpret a differing boot identity as **interrupted by
+restart** and show the exact `flowcrew resume <run-id>` command. Inspect and resume manually.
+Processes never survive a restart, so cancel, resume and land close an invocation owner
+recorded on an earlier boot as dead, whatever its closure facility, without probing or
+signalling anything; no `closure-unconfirmed` obligation is recorded for it.
 
-`task show` displays the scheduler generation at actual start and each actual resume,
-with timestamp and PID. `run.json` retains the same `engineHistory`. Legacy runs may lack
-their initial identity; the engine does not invent one. Daemon `status` separately proves
-the listener's loaded build. Different generations are allowed when their workflow,
-checkpoint, plan binding, stage ledgers and persisted formats are supported. Unsupported or
-inconsistent state fails closed before a new attempt or successful resume admission.
-A missing admitted-stage projection in a checkpointed run, or one with a retained ledger,
-is inconsistent: continuation reports it instead of recreating pending work. Attemptless
-legacy preparations without checkpoints or ledgers remain supported.
+Cancel first records durable cancellation, cooperatively wakes the recorded controller,
+then waits for its lifetime lock before reconciliation. Land waits before taking claims
+needed for final capture. The observation window is 30,758 ms (6,500 + 24,258 ms from recorded
+exit/capture observations); it is a refusal backstop, not a healthy-exit bound or kill timer.
+On timeout the unavailable refusal includes the run, controller identity and elapsed wait:
+“Controller exit is not confirmed. Evidence and work are retained. Inspect the controller
+and its capture/I/O; after it exits, repeat `flowcrew cancel <run-id>` to finish reconciliation,
+or `flowcrew land <run-id>` to preserve and land ended work.” Only cancel says
+“Cancellation intent is durable.” Lock-access errors ask for repair before retrying.
+Timeout retains work and evidence; it never kills the recorder or reclaims bytes.
 
-Sources: [hold](../src/deployment-hold.ts), [continuation validation](../src/engine-continuation.ts),
-[deployment control](../src/orchestrator.ts), [publication guard](../src/build-manifest.ts).
-
-## Campaigns
-
-Campaign selection is explicit `--campaign`, then the main-worktree
-basename slug; Git failure/non-repository selection falls back to the project directory.
-`--no-campaign` detaches. Explicit display name and canonical storage identity are distinct.
-Global campaign telemetry lives in flat `<key>.jsonl` ledgers under the state root's `campaigns`.
-
-`--campaign-context=inherit|skip` controls verbose planner history independently of grouping.
-Skip still permits the compact tried-direction ledger. The legacy `--no-inherit-campaign`
-alias selects skip. Without an explicit context flag, at least three adverse endings among
-the ten most recent completed tasks select skip; explicit choice wins and continuation
-retains its stored choice. A history instruction to avoid repeated directions does not
-mechanically guarantee model novelty.
-
-Campaign health can request research/pivots;
-research policy owns numeric keep/stop decisions. Current telemetry does not create a
-principal metric merely because a gate passes.
-
-Sources: [selection](../src/config.ts), [launch context](../src/cli.ts),
-[hygiene](../src/campaign-hygiene.ts), [ledger](../src/campaign-ledger.ts),
-[campaign policy](../src/scheduler/sched_policy/campaign.ts).
+If cancel or land finds a live controller from an earlier build without a lifetime lock, it refuses rather than
+controlling that run through the new build. Follow the refusal's guidance: use the earlier
+build to cancel the run, or wait for it to finish, then retry. Do not delete its
+records or workspace to bypass the refusal.
 
 ## Preserve and reclaim
 
-Read the report and durable rejected verdicts before accepting a result. `land --run` audits
-declared terminal products, tracked changes/deletions, untracked and ignored paths, unpushed
-commits and commits whose last surviving ref would be removed. Unknown/source/data/state/
-symlink items are named; proven regenerable outputs are counted. Audit mode is read-only.
+Preserve unique files outside the declared output inventory, failed or invalid evidence and
+any raw evidence you still need before reclaiming.
 
-For an accepted terminal run, `land --run <run-id> --archive --remove` archives the named
-unique worktree outputs, terminal products and complete run store before entering the same
-removal gate. `--archive` defaults to `H:\flowcrew-archive\fc-runs`; `--archive=<root>`
-selects another existing local archive root. The default requires H: to be mounted; a missing
-root, insufficient capacity or copy/hash failure blocks removal. Each invocation creates a
-separate directory with worktree and run-store copies and per-file SHA256 manifests. Both
-source and destination are checked again before removal. Run-store originals are retained.
-The opt-in flag keeps ordinary audits read-only; it replaces manual copy/diff steps without
-adding another removal mode. Review the inventory and sensitive evidence scope before archiving.
+`flowcrew land <run-id>` is the only way to keep and free a run. It is not a read-only
+audit and does not decide product acceptance: it preserves the declared outputs and then
+deletes the run's bytes (listed below) in one step. It prints
+`location`, `state` (`reclaimed`, or `partial` when preservation failed and nothing was
+deleted; `partial` exits 1), `outputs`, `executionBoundary`, `evidence` (the raw-evidence and
+output-artifact references observed; empty once reclaimed) and `delivery` (present once
+reclaimed), and `acceptedUnmet` (acceptance recorded or recovered during publication;
+empty on a cleanup-only repeat); a refusal prints `kind` and `detail` instead. A run that
+has not ended (`pending`, `running` or `parked`, including one shown as interrupted) is
+refused: run `flowcrew cancel <run-id>` first, then land it. Every ended run can retain its
+current declared outputs, including cancelled and failed work. No execution pin or safe
+checkpoint is needed. The receipt says **Reviewed accepted delivery** when its
+artifact identities match the accepted delivery, or **Unreviewed retained observation**
+otherwise. Capture records bytes; the accepted delivery record determines that label.
+Retention never accepts a delivery, resumes a cancelled run, restores frozen inputs or
+overwrites current work with a checkpoint. Output disposition checks remain publication
+obligations; a missing or unreadable output makes retention partial.
 
-Removal requires `--remove` and the exact `--acknowledge-regenerable` count when regenerable
-paths exist. It refuses nonterminal runs, incomplete inspection and unique ungraded ignored content.
-It proves a linked attached worktree, then uses non-force removal/prune/branch deletion;
-Git refuses tracked/untracked changes and unmerged branch deletion while preserving the branch.
-Archiving these files preserves their bytes but leaves those Git protections in place.
-Account for unique work elsewhere and rerun; acknowledgment is not permission to discard it.
-`land` does not decide whether the report answers the task.
+When a human accepts an unmet criterion, stop the run with cancel before land. Guidance
+cannot change frozen criteria. Record that decision with a reason:
 
-Optional exact ledger closure uses `--complete-fc-task` with `--fc-task-session` only during
-removal. The engine verifies the ledger/run/worktree binding, leaves the entry unchanged
-until all Git steps succeed, then atomically closes it. Omission leaves it open. A final
-ledger write failure remains nonzero with a guarded repair; see [ledger](fc_tasks.md).
+```text
+flowcrew cancel <run-id>
+flowcrew land <run-id> --accept-unmet 'C3=Accept plateau at 0.842'
+```
 
-Source: [landing audit](../src/cli-land.ts).
+Repeat `--accept-unmet` for more criteria. Land checks each id against the frozen brief
+and refuses unknown ids or criteria passed by the latest gate as invalid (exit 2), before
+preserving or deleting anything. It copies the latest gate's criterion status and evidence
+verbatim, or records status `not_assessed` and evidence `not assessed` if no gate judged it,
+alongside the human's reason and the recording time. The record belongs to the delivery;
+the run stays cancelled, failed or otherwise ended as before, with its gate verdict intact.
+It does not relabel the output receipt as reviewed.
+
+Land requires invocation owners retired under their recorded closure
+guarantee and settled claim obligations. Cgroup closure proves recursive descendant
+closure; marker closure is best effort after authenticated group drainage and a scan of
+same-user processes. Unreadable environments or an unavailable scan remain visible as
+unknown descendant fate, but do not prevent marker retirement or retention. This guarantee
+does not cover processes that cleared their marker or prove that an escaped writer cannot
+change bytes later; see [Platform boundaries](#platform-boundaries).
+
+Owners with a recorded `closed_owner` fact are not probed or signalled again. A dead or
+reused owner observation alone does not skip the probe; a reused PGID belongs to its new
+owner and cannot authorize signalling it. A closed time interval records accounting,
+not descendant closure. Reconciliation probes unresolved owners, closes them under their
+recorded guarantee and records `owner_closed` (stored as `closed_owner`) before output
+capture. Output capture requires that recorded retirement; a dead group alone does not
+retire its descendants. An unresolved closure obligation clears only after closure succeeds.
+
+An external capture failure keeps that extent held and opens `claim-unreleased` attention
+with the capture error. It never blocks retention of the other declared bytes. Ordinary
+refusals, including a live prior claim, answer the caller without opening an obligation.
+
+To reclaim an ended run, use:
+
+```text
+flowcrew cancel <run-id>   # if the run has not ended
+flowcrew land <run-id>
+```
+
+Preservation failure deletes nothing. On success land materializes
+outputs under `store/deliveries/<run-id>/` and deletes the project copy, the work root (which
+holds scratch), the runtime pin and the raw evidence (everything in `runs/<run-id>/` except
+`status.json` and the controller lock with its SQLite sidecars). It retains SQLite events,
+current rows and `status.json`; status shows reclamation time and delivery location.
+Every admitted-run delivery uses one layout, with `manifest.json` and `changes.patch`
+always present; a never-admitted preparation has no workload outputs:
+
+```text
+deliveries/<run-id>/
+  project/<path>   # relative declared outputs
+  external/<n>    # absolute declared outputs
+  manifest.json   # outputs and acceptedUnmet (human acceptance records)
+  changes.patch   # Git-representable relative output changes; empty without relative outputs
+```
+
+New manifests are objects: `outputs` lists each declared `path`, `archive` slot and
+retained artifact `ref`; `acceptedUnmet` lists `criterionId`, `status`, `evidence`, `reason`
+and ISO time `at`. Older manifests are output arrays and have no acceptance record.
+The complete manifest is published with the archive before reclaim. Once a delivery
+exists, land with acceptance records refuses without editing it. Repeat land without
+records to finish interrupted cleanup; this needs only the journal's delivery fact, even
+if the delivery directory was moved or removed. Read stored acceptance in the manifest.
+This keeps the delivery immutable, including after reclaim, without a separate amendment store.
+
+Land leaves absolute outputs in place; it never restores an absolute path from the archive.
+From the original source project, apply the patch with
+`git apply <delivery-dir>/changes.patch`, where `<delivery-dir>` is the reported delivery
+location. This reproduces only git-representable changes. The full output archive keeps
+content Git cannot represent, such as empty directories; restore that content from the
+archive as needed. The patch reuses the preserved output snapshots against setup's base;
+an unknown base produces an explicit comment instead of claiming an empty change.
+Land does not apply the patch or merge into the source project.
+Resume refuses reclaimed work. Archives are built privately and published without
+replacing a delivery directory. `run_reclaimed` is durable before raw bytes are removed.
+After an interrupted reclaim, repeating `land` authenticates the archive or
+finishes the remaining deletions, including when workspace, runtime or scratch directories
+are already gone. Deletion skips absent targets and creates no missing directories,
+including outside the store. The reclaim fact retires ownerless reservations matching
+the run's recorded admission and writer epochs in its own transaction; land then
+retires its held claims by their exact epochs. A later claimant keeps its row, and a later run can claim
+the reclaimed project and external paths. An existing different delivery refuses without being
+overwritten.
+An external output extent belongs to execution only while that run can still act on it.
+Terminal runs release these extents after confirmed execution closure and an authenticated
+snapshot of the external bytes during closure reconciliation, independently of land or reclaim.
+If cancel refuses because controller exit is unconfirmed, inspect capture/I/O and repeat
+cancel after exit to reconcile before reuse. Closure unknown or a
+failed capture keeps the extent held; a conflicting setup names the holding run and tells
+how to reconcile it. Reconciliation alone decides run closure from the unit observation, owner probes and
+settled accounting and claims. Retirement consumes that result and checks the journal
+cursor and exact resource epochs in its transaction; a changed cursor retires nothing
+and opens attention. Output quiescence for snapshots and publication only probes owners
+and can hold while the unit is active. There is no TTL. Replacing a dead operation owner deactivates its writer epoch in
+the same claim transaction. Private workspace and record extents stay protected for later maintenance.
+Once released, land uses the old run's retained refs, even if another run has overwritten
+the external directory. Reclaim does not delete that directory or the new run's bytes.
+Old stores use the same closure reconciliation and snapshots; no old pin is executed.
+
+Explicit status regenerates its stdout view from committed journal facts and applies a
+read-only controller observation; it never rewrites `status.json` or repairs measurements.
+The ending/control writer publishes `status.json`; the dashboard reads that publication.
+
+No automatic or age-based deletion runs. Land preserves declared outputs, not a full raw
+run archive, source merge, push or conversation-ledger closure.
+
+### Held space of ended runs
+
+An ended run that has not been landed still holds its project copy, runtime pin, work root and
+raw evidence. Status publishes `heldBytes` for it ([field](cli.md#status-output)), which is what land would free.
+Natural completion measures under the finishing writer after final capture, outside the SQLite
+write transaction; external cancellation leaves measurement to control/reconciliation after controller exit.
+Pending or failed measurement, including old ended unlanded runs, publishes `heldSpacePending: true`
+without `heldBytes`; the dashboard shows `held · incomplete` until all included runs are measured.
+Repeat cancel or land to recover. Failed or interrupted land retains the frozen
+measurement until cleanup completes. The controller lock identity survives land and is excluded from the measurement.
+The dashboard shows it ([monitor](#inspect-guide-and-stop)). Land the runs you have reviewed to free the space;
+nothing is deleted automatically.
+
+## Storage ownership
+
+Storage defaults and overrides are in [configuration](configuration.md#storage-and-runtime).
+One SQLite database owns events/current rows, writer epochs, command reservations
+and resource ownership. Use a local filesystem with SQLite WAL support. `status.json` is
+a derived atomic view, not a second authority. Missing/invalid views remain unknown until
+a later mutating operation republishes them. Status reads current SQLite state without writing or walking trees. Raw command/native evidence and
+checkpoint content live in the run's evidence repository until reclaim.

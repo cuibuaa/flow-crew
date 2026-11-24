@@ -1,0 +1,56 @@
+{
+ "engine": "3fbac06a",
+ "scenario": "matrix-dead-settlement-plan",
+ "run": "run_bd58226e-8af9-41ec-a3b8-094f00394c09",
+ "journalCursor": 91,
+ "status": "complete",
+ "stages": [
+  {
+   "id": "r_45e8cd69-70db-4076-9059-bec22184bda8",
+   "purpose": "plan",
+   "role": "plan",
+   "state": "settled",
+   "revision": "r_e7305c68-05f9-448b-b045-c9f98b18a470",
+   "goal": "Return a revision-bound pending delivery graph for the approved brief.",
+   "instruction": "Return a revision-bound pending delivery graph for the approved brief."
+  },
+  {
+   "id": "replacement",
+   "purpose": "work",
+   "role": "work",
+   "state": "settled",
+   "revision": "revision_e1f15914-6311-4d1b-be05-8f7951d17492",
+   "goal": "Use measured host feedback to repair.",
+   "instruction": "Use measured host feedback to repair."
+  },
+  {
+   "id": "review",
+   "purpose": "gate",
+   "role": "gate",
+   "state": "settled",
+   "revision": "revision_e1f15914-6311-4d1b-be05-8f7951d17492",
+   "goal": "Run independent verification and inspect all authenticated history.",
+   "instruction": "Run independent verification and inspect all authenticated history."
+  },
+  {
+   "id": "implementation",
+   "purpose": "work",
+   "role": "work",
+   "state": "running",
+   "revision": "revision_71c0a931-76c2-40ff-8e2d-140f06c0aff7",
+   "replacedBy": "revision_e1f15914-6311-4d1b-be05-8f7951d17492",
+   "goal": "Use measured host feedback to repair.",
+   "instruction": "Use measured host feedback to repair."
+  },
+  {
+   "id": "review",
+   "purpose": "gate",
+   "role": "gate",
+   "state": "pending",
+   "revision": "revision_71c0a931-76c2-40ff-8e2d-140f06c0aff7",
+   "replacedBy": "revision_e1f15914-6311-4d1b-be05-8f7951d17492",
+   "goal": "Run independent verification and inspect all authenticated history.",
+   "instruction": "Run independent verification and inspect all authenticated history."
+  }
+ ]
+}

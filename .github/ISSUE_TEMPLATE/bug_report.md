@@ -12,7 +12,7 @@ A clear description of the bug.
 
 ## Steps to Reproduce
 
-1. Run `flowcrew run ...`
+1. Write a brief and run `flowcrew setup <brief>` and `flowcrew start <run-id>` (attach the brief if you can)
 2. ...
 
 ## Expected Behavior
@@ -27,4 +27,5 @@ What actually happened.
 
 - Node.js version:
 - OS:
-- FlowCrew version:
+- FlowCrew version (`npm list -g flowcrew`, or the checkout's `package.json`):
+- Backend (`codex` or `claude`):

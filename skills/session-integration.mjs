@@ -1,104 +1,83 @@
-import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+// Registration only. The packaged standalone Claude hook owns session integration.
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 const [action, frontend, rootArg, packageArg] = process.argv.slice(2);
-if (!['install', 'remove', 'check'].includes(action) || !['claude', 'codex'].includes(frontend) || !rootArg || !packageArg) {
-  throw new Error('Usage: session-integration.mjs install|remove|check claude|codex <frontend-root> <package-root>');
-}
-const root = resolve(rootArg);
-const packageRoot = resolve(packageArg);
-const configPath = join(root, frontend === 'claude' ? 'settings.json' : 'hooks.json');
-const shimPath = join(root, 'hooks', 'flowcrew-session.mjs');
+if (!['install', 'remove', 'check'].includes(action) || frontend !== 'claude' || !rootArg || !packageArg)
+  throw new Error('Usage: session-integration.mjs install|remove|check claude <frontend-root> <package-root>');
+const root = resolve(rootArg), packageRoot = resolve(packageArg);
+const cli = join(packageRoot, 'dist-rewrite', 'cli.js');
+const hook = join(packageRoot, 'dist-rewrite', 'flowcrew-session.mjs');
+const configPath = join(root, 'settings.json');
+// The frontend owns persistent configuration; package replacement only replaces executable code.
+const hookConfig = join(root, 'flowcrew-session.json');
 const manifestPath = join(root, 'hooks', 'flowcrew-session.json');
-const template = readFileSync(join(packageRoot, 'skills', 'session-hook.mjs'), 'utf8');
-const sourceDigest = createHash('sha256').update(template).update(readFileSync(new URL(import.meta.url)))
-  .update(readFileSync(join(packageRoot, 'skills', 'codex-verify.mjs'))).digest('hex');
 const quote = value => `'${value.replaceAll("'", `'"'"'`)}'`;
-const command = `${quote(process.execPath)} ${quote(shimPath)}`;
-const parse = path => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
-const write = (path, text) => {
+const command = `nice -n 19 ${quote(process.execPath)} ${quote(hook)}`;
+const read = path => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+const write = (path, value) => {
   mkdirSync(dirname(path), { recursive: true });
   const temp = path + `.tmp.${process.pid}`;
-  writeFileSync(temp, text, { mode: 0o600 });
+  writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
   renameSync(temp, path);
 };
-const config = parse(configPath);
-const previous = parse(manifestPath);
-if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error(`Invalid hook configuration: ${configPath}`);
-if (config.hooks && (typeof config.hooks !== 'object' || Array.isArray(config.hooks))) throw new Error(`Invalid hooks: ${configPath}`);
-
-const owned = handler => handler?.type === 'command' && typeof handler.command === 'string'
-  && ['Stop', 'SessionStart', 'Wake'].some(event => handler.command === `${command} ${event}`
-    || (previous.command && handler.command === `${previous.command} ${event}`));
-const definition = event => ({ hooks: [{ type: 'command', command: `${command} ${event}`, timeout: 15 }] });
-// The worker rolls over at 3600s; its shim has a 3650s safety deadline, before
-// Claude's own 3660s deadline. Expiry therefore wakes instead of going silent.
-const wakeDefinition = { hooks: [{ type: 'command', command: `${command} Wake`, timeout: 3660, asyncRewake: true }] };
-const present = event => (config.hooks?.[event] || []).some(group => isDeepStrictEqual(group, definition(event)));
-const statusCommand = `${command} --statusline`;
-const settings = {
-  cli: join(packageRoot, 'dist', 'cli.js'), frontend,
-  ...(frontend === 'claude' ? { wakeConfigPath: configPath, wakeDefinition } : {}),
-  previousStatusLine: previous.previousStatusLine ?? (config.statusLine?.command === statusCommand ? undefined : config.statusLine),
-};
-const expectedShim = template.replace('FLOWCREW_SETTINGS', JSON.stringify(settings));
+const config = read(configPath);
+const previous = existsSync(manifestPath) ? read(manifestPath) : undefined;
+if (previous !== undefined && (!previous || typeof previous !== 'object' || Array.isArray(previous)
+  || typeof previous.command !== 'string')) throw new Error(`Invalid installation record: ${manifestPath}`);
+if (!config || typeof config !== 'object' || Array.isArray(config)
+  || config.hooks && (typeof config.hooks !== 'object' || Array.isArray(config.hooks)))
+  throw new Error(`Invalid hook configuration: ${configPath}`);
+const registered = event => `${command} ${event} ${quote(hookConfig)}`;
+// Closed historical grammar: 376be84 introduced the quoted shared shim;
+// 8448e99 replaced it with the nice-prefixed packaged hook, without a config argument.
+// The old installer recorded what it wrote, including the Node path at that time.
+// Reconstruct the closed historical list only when no installation record exists.
+const previousCommands = previous === undefined
+  ? [command, `${quote(process.execPath)} ${quote(join(root, 'hooks', 'flowcrew-session.mjs'))}`] : [previous.command];
+const ownedCommands = new Set(['Stop', 'SessionStart', 'Wake', '--statusline'].flatMap(event =>
+  [registered(event), ...previousCommands.map(base => `${base} ${event}`)]));
+const owned = handler => handler?.type === 'command' && ownedCommands.has(handler.command);
+const definition = event => ({ hooks: [{ type: 'command', command: registered(event) }] });
+const wake = { hooks: [{ type: 'command', command: registered('Wake'), asyncRewake: true }] };
+const status = { type: 'command', command: registered('--statusline') };
+const hooks = config.hooks ?? {};
+for (const event of ['Stop', 'SessionStart']) {
+  const groups = hooks[event] ?? [];
+  if (!Array.isArray(groups) || groups.some(group => !Array.isArray(group.hooks))) throw new Error(`Invalid ${event} hook groups`);
+}
 if (action === 'check') {
   const issues = [];
-  if (!existsSync(settings.cli)) issues.push('engine CLI is missing; run npm run build');
-  if (previous.sourceDigest !== sourceDigest || previous.cli !== settings.cli) issues.push('missing or outdated installation manifest');
-  if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== expectedShim) issues.push('missing or outdated shared hook');
-  for (const event of ['Stop', 'SessionStart']) if (!present(event)) issues.push(`missing ${event} hook`);
-  if (frontend === 'claude') {
-    for (const event of ['Stop', 'SessionStart']) if (!(config.hooks?.[event] || []).some(group => isDeepStrictEqual(group, wakeDefinition))) issues.push(`missing or outdated asyncRewake hook (${event})`);
-    if (config.disableAllHooks === true) issues.push('Claude hooks are disabled; enable hooks in Claude Code if desired');
-    if (existsSync(settings.cli)) {
-      const capability = spawnSync(process.execPath, [settings.cli, 'session-push', 'wake-check'], {
-        encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      if (capability.status !== 0) issues.push(capability.stdout?.trim() || 'Claude wake capability unavailable; upgrade Claude Code');
-    }
-  }
-  if (frontend === 'claude' && config.statusLine?.command !== statusCommand) issues.push('missing status line integration');
-  if (frontend === 'codex') {
-    // Native keys depend on the effective configuration (including neighboring
-    // hook positions). Saved trust records alone cannot establish current trust.
-    const result = spawnSync(process.execPath, [join(packageRoot, 'skills', 'codex-verify.mjs'),
-      'check', 'codex', process.cwd(), '', '', root, '3000'], {
-      encoding: 'utf8', timeout: 6500, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (result.status !== 0) issues.push(result.stderr?.trim() || 'Codex hook trust could not be verified');
-  }
-  process.stdout.write(issues.join('; ') || 'shared Stop/SessionStart hooks and progress integration are current');
+  if (!existsSync(cli) || !existsSync(hook)) issues.push('rewritten package entry is missing; run npm run build');
+  if (!existsSync(hookConfig)) issues.push('standalone hook configuration is missing');
+  for (const event of ['Stop', 'SessionStart']) for (const expected of [definition(event), wake])
+    if (!(hooks[event] ?? []).some(group => isDeepStrictEqual(group, expected))) issues.push(`missing ${event} hook`);
+  if (config.disableAllHooks === true) issues.push('Claude hooks are disabled');
+  process.stdout.write(`${issues.length ? 'unavailable' : 'verified'}: ${issues.join('; ') || 'standalone Claude session integration is current'}\n`);
   process.exitCode = issues.length ? 1 : 0;
 } else {
-  const hooks = config.hooks ?? {};
+  if (action === 'install' && (!existsSync(cli) || !existsSync(hook))) throw new Error('Run npm run build before installing session integration');
   for (const event of ['Stop', 'SessionStart']) {
-    const groups = hooks[event] ?? [];
-    if (!Array.isArray(groups) || groups.some(group => !Array.isArray(group.hooks))) throw new Error(`Invalid ${event} hook groups`);
-    hooks[event] = groups.map(group => ({ ...group, hooks: group.hooks.filter(handler => !owned(handler)) }))
-      .filter(group => group.hooks.length > 0);
-    if (action === 'install') hooks[event].push(definition(event));
-    if (action === 'install' && frontend === 'claude') hooks[event].push(wakeDefinition);
+    hooks[event] = (hooks[event] ?? []).map(group => ({ ...group, hooks: group.hooks.filter(handler => !owned(handler)) }))
+      .filter(group => group.hooks.length);
+    if (action === 'install') hooks[event].push(definition(event), wake);
     if (!hooks[event].length) delete hooks[event];
   }
   config.hooks = hooks;
-  if (frontend === 'claude') {
-    if (action === 'install') config.statusLine = { type: 'command', command: statusCommand };
-    else if (config.statusLine?.command === statusCommand) {
-      if (previous.previousStatusLine) config.statusLine = previous.previousStatusLine;
-      else delete config.statusLine;
-    }
+  // Preserve a user status line; only fill an unclaimed slot or remove our own definition.
+  if (action === 'install' && (!config.statusLine || owned(config.statusLine))) config.statusLine = status;
+  if (action === 'remove' && owned(config.statusLine)) {
+    if (Object.hasOwn(previous ?? {}, 'previousStatusLine')) config.statusLine = previous.previousStatusLine;
+    else delete config.statusLine;
   }
-  if (action === 'install') {
-    write(shimPath, expectedShim);
-    write(manifestPath, JSON.stringify({ sourceDigest, command, ...settings, ...(previous.codexTrust ? { codexTrust: previous.codexTrust } : {}) }, null, 2) + '\n');
-  }
-  write(configPath, JSON.stringify(config, null, 2) + '\n');
-  if (action === 'remove') {
-    for (const path of [shimPath, manifestPath]) if (existsSync(path)) unlinkSync(path);
-  }
-  process.stdout.write(`FlowCrew ${frontend} session integration ${action === 'install' ? 'installed' : 'removed'}.\n`);
+  if (action === 'install' && !existsSync(hookConfig)) write(hookConfig, {
+    storeRoots: [resolve(process.env.FLOWCREW_STORE_ROOT ?? join(process.env.FC_HOME
+      ?? join(process.env.XDG_STATE_HOME ?? join(process.env.HOME, '.local', 'state'), 'flowcrew'), 'store'))],
+    tasksRoot: join(root, 'tasks'),
+  });
+  write(configPath, config);
+  // Reinstalls retain the original backup; consumption follows successful settings publication.
+  if (action === 'remove' && previous !== undefined) unlinkSync(manifestPath);
+  process.stdout.write(`FlowCrew Claude session integration ${action === 'install' ? 'installed' : 'removed'}.\n`);
 }

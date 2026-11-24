@@ -3,8 +3,7 @@ name: CI
 on:
   push:
   pull_request:
-  # Lets the distribution jobs below be run on demand against any ref, without
-  # having to push to `tests` first.
+  # Run source validation on demand against any ref.
   workflow_dispatch:
 
 permissions:
@@ -15,386 +14,98 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
+  portable:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 6f final2: build 138.005 + lint 36.312 + typecheck 17.752 + portable 51.444 s.
+    # Three times the recorded validation commands, rounded up to minutes.
+    timeout-minutes: 13
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22.22.2'
           cache: npm
-
-      # Validation-replay specs run real pytest recipes, and the linked-input
-      # replay isolates its child with an unprivileged user+mount namespace,
-      # which Ubuntu 24.04 runners forbid through AppArmor by default.
-      - name: Provide pytest and unprivileged user namespaces
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q python3-pytest
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      - run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - run: npm run build
-      - run: npm run lint
-      - run: npm test
-      - name: Archive the combined runtime, preserving modes and hidden manifest
-        run: tar -czf runtime.tgz dist ui/dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: runtime
-          path: runtime.tgz
-
-  public-spec-isolation:
-    needs: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
-
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run lint
+      - run: nice -n 19 npm run typecheck
       - name: Pull isolated test image
-        run: docker pull node:22-bookworm
+        run: nice -n 19 docker pull node:22.22.2-bookworm
+      - name: Portable suite once, with network none and empty HOME
+        run: nice -n 19 npm run test:isolation
 
-      - name: Run public spec without network, agent CLIs, or existing state
-        run: npm run test:isolation
-
-  # Supervision is a two-axis matrix: whether a service manager is present, and
-  # whether procfs is. Varying only one axis silently pins the other at its
-  # Linux value, so each axis needs its own job.
-  #
-  #   systemctl / procfs | job
-  #   ------------------ | ---------------------------------------------
-  #   present  / present | quality (control)
-  #   absent   / present | no-service-manager (below) + public-spec-isolation
-  #   absent   / absent  | macos (below) — the only axis that can prove a
-  #                        signal actually reached the agent off Linux
-  no-service-manager:
-    needs: quality
+  native-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 6f final2: build 138.005 + native 1952.043 s; ceil(3 * sum / 60).
+    timeout-minutes: 105
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22.22.2'
           cache: npm
+      - name: Linux native prerequisites
+        run: nice -n 19 sudo apt-get install -y git rsync python3
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run test:native
 
-      - run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
-
-      # Symlink-farm a PATH without the systemd tools rather than deleting
-      # /usr/bin/systemctl: reproducible, reversible, and it cannot leave the
-      # runner in a state that confuses a later step.
-      - name: Run the public spec suite with no systemd tooling on PATH
-        run: |
-          FARM="$RUNNER_TEMP/nosystemd-bin"
-          mkdir -p "$FARM"
-          # Resolve the toolchain BEFORE overriding PATH. setup-node installs
-          # into the hosted tool cache, not /usr/bin, so farming the system
-          # directories alone would leave the job without a node at all.
-          NODE_BIN=$(command -v node); NPM_BIN=$(command -v npm)
-          for d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
-            [ -d "$d" ] || continue
-            for f in "$d"/*; do
-              b=$(basename "$f")
-              case "$b" in systemctl|systemd-run|journalctl) continue ;; esac
-              [ -e "$FARM/$b" ] || ln -s "$f" "$FARM/$b" 2>/dev/null || true
-            done
-          done
-          ln -sf "$NODE_BIN" "$FARM/node"
-          ln -sf "$NPM_BIN" "$FARM/npm"
-          export PATH="$FARM"
-          command -v node >/dev/null || { echo "node missing from the farmed PATH"; exit 1; }
-          command -v systemctl   && { echo "systemctl leaked into PATH"; exit 1; } || echo "systemctl: absent (expected)"
-          command -v systemd-run && { echo "systemd-run leaked into PATH"; exit 1; } || echo "systemd-run: absent (expected)"
-          command -v journalctl  && { echo "journalctl leaked into PATH"; exit 1; } || echo "journalctl: absent (expected)"
-          test -d /proc && echo "/proc: present (expected on this axis)"
-          node ./node_modules/vitest/vitest.mjs run \
-            spec/supervise-shim.test.ts \
-            spec/supervised-lifecycle.test.ts \
-            spec/supervision-cli-surfaces.test.ts \
-            spec/portable-supervision-safety.test.ts \
-            spec/durable-supervision-backend.test.ts
-
-  # macOS is a supported platform, so it gets a blocking job. Without this the
-  # port would rot the first time someone reaches for /proc or a GNU-only flag.
-  # macOS runners have no Docker, so the network-isolated job is not replicated
-  # here; that job doubles as the systemd-less Linux guard, since its container
-  # has procfs but no systemctl, systemd-run or /run/systemd/system.
-  #
-  # Pinned rather than `macos-latest`: GitHub's docs page and the runner-images
-  # README currently disagree about which release `macos-latest` points at, and
-  # the rotation is live, so the OS could change between merges.
-  macos:
-    needs: quality
+  native-macos:
     runs-on: macos-15
-    timeout-minutes: 20
+    # 6f final2: build 138.005 + native 1952.043 s; ceil(3 * sum / 60).
+    timeout-minutes: 105
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22.22.2'
           cache: npm
-
-      - name: Report the platform under test
+      - name: Native tool prerequisites
         run: |
-          uname -a
-          node -e "console.log('platform', process.platform, 'arch', process.arch)"
-          command -v systemctl || echo "systemctl: absent (expected)"
-          test -d /proc && echo "/proc: present (unexpected)" || echo "/proc: absent (expected)"
+          nice -n 19 brew install python
+          nice -n 19 node --version
+          nice -n 19 python3 --version
+          nice -n 19 git --version
+          nice -n 19 python3 -c "import os, shutil; assert os.path.samefile(shutil.which('rsync'), '/usr/bin/rsync')"
+          nice -n 19 rsync --version
+          nice -n 19 sw_vers
+          nice -n 19 uname -a
+      - name: Install exact dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Build source runtime
+        run: nice -n 19 npm run build
+      - run: nice -n 19 npm run test:native
 
-      - run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
-
-      # JavaScript/declarations and browser assets are platform-independent;
-      # dependencies install natively here and lifecycle tests run on macOS.
-      # Blocking lifecycle and Darwin contracts cover process identity, signals
-      # and supervision fate; separate best-effort probes duplicated them and
-      # could hide a missing runtime export.
-      # No pipe and no `|| true`: a masked exit code here would make the job
-      # green while macOS is broken, which is the failure this job exists to catch.
-      - name: Run the portable lifecycle and process-identity contracts
-        run: >-
-          node ./node_modules/vitest/vitest.mjs run
-          spec/supervise-shim.test.ts
-          spec/supervised-lifecycle.test.ts
-          spec/supervision-cli-surfaces.test.ts
-          spec/portable-supervision-safety.test.ts
-          spec/run-lock-portability.test.ts
-          spec/darwin-branch-simulation.test.ts
-
-  # ---------------------------------------------------------------------------
-  # Distribution jobs. These answer a question the rest of CI structurally
-  # cannot: does a NEWCOMER, starting from nothing, end up with a working
-  # install? Every other job runs inside a repo that npm ci has already
-  # prepared, so it can never notice a missing entry in the `files` allowlist
-  # or a documented step that does not work off a fresh machine.
-  #
-  # They are slow, so they run on the `tests` branch (a throwaway mirror you
-  # force-push to) and on manual dispatch, not on every commit to main.
-  # ---------------------------------------------------------------------------
-
-  cold-install-tarball:
-    # Push-only, and only to a branch that exists in this repository:
-    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
-    # branch is not. Running on main as well as tests is deliberate — a missing
-    # entry in the `files` allowlist is release-blocking and invisible to every
-    # in-repo test, since those all run inside a tree npm ci already prepared.
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
-    needs: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-
-      - run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
-
-      # Packing consumes the same tested artifact; source compilation belongs to install.
-      # Installing the tarball
-      # is the only way to exercise the `files` allowlist: a directory missing
-      # from it is invisible to every in-repo test.
-      - name: Pack and install globally, as a published release would be
-        run: |
-          set -euo pipefail
-          # Source installation uses postinstall; there is no prepare hook for
-          # npm pack to rebuild the artifact, even on npm versions whose directory
-          # prepare ignores --ignore-scripts. Keep other pack hooks disabled.
-          TGZ=$(npm pack --silent --ignore-scripts | tail -n 1)
-          echo "packed: $TGZ"
-          test -f "$TGZ" || { echo "npm pack did not produce a readable tarball"; exit 1; }
-          npm i -g "./$TGZ"
-          which flowcrew
-          flowcrew --version || true
-
-      - name: The documented first steps must work off the global install
-        run: |
-          set -euo pipefail
-          ROOT=$(npm root -g)/flowcrew
-          echo "installed at: $ROOT"
-          # Each of these is a `files` entry the docs depend on. Assert them
-          # by name so a dropped entry fails here and not in a user's terminal.
-          for required in dist/cli.js config skills examples guide README.md; do
-            test -e "$ROOT/$required" || { echo "missing from the published package: $required"; exit 1; }
-          done
-          test -x "$ROOT/skills/install.sh" || { echo "skills/install.sh is not executable"; exit 1; }
-
-      - name: Zero-token rehearsal from the packaged examples
-        run: |
-          set -euo pipefail
-          ROOT=$(npm root -g)/flowcrew
-          cd "$(mktemp -d)"
-          git init -q .
-          git config user.email ci@example.com
-          git config user.name CI
-          flowcrew rehearse "$ROOT/examples/hello-research.brief.md"
-
-  cold-install-clone:
-    # Push-only, and only to a branch that exists in this repository:
-    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
-    # branch is not. Running on main as well as tests is deliberate — a missing
-    # entry in the `files` allowlist is release-blocking and invisible to every
-    # in-repo test, since those all run inside a tree npm ci already prepared.
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      # Deliberately NOT actions/checkout: this job exists to walk README step 1
-      # over HTTPS, into an empty directory, with a cold npm
-      # cache. Cloning the ref under test rather than the default branch.
-      - name: Clone over HTTPS and follow README step 1
-        run: |
-          set -euo pipefail
-          cd "$(mktemp -d)"
-          git clone --depth 1 --branch "$GITHUB_REF_NAME" "https://github.com/$GITHUB_REPOSITORY.git" checkout
-          cd checkout
-          npm install
-          test -f dist/cli.js      || { echo "npm install did not build dist/"; exit 1; }
-          test -f ui/dist/index.html || { echo "npm install did not build ui/dist/"; exit 1; }
-          # Installation already built the generation; linking must only link.
-          npm link --ignore-scripts
-          which flowcrew
-          flowcrew doctor || echo "doctor reported attention items (non-fatal here; the install itself is what this job proves)"
-
-  adapter-matrix:
-    # Push-only, and only to a branch that exists in this repository:
-    # cold-install-clone fetches $GITHUB_REF_NAME over HTTPS, which a fork's PR
-    # branch is not. Running on main as well as tests is deliberate — a missing
-    # entry in the `files` allowlist is release-blocking and invisible to every
-    # in-repo test, since those all run inside a tree npm ci already prepared.
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'push'
-          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tests'))
-    needs: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  package-install:
+    runs-on: ${{ matrix.os }}
+    # Full comparable jobs, CI 44078278863: native Linux 316.707s, macOS 1155.750s
+    # (setup-node, prerequisites, npm ci, build and native acceptance included).
+    # ceil(3 * max / 60) = 58; lead recomputes from this job's first real full run.
+    timeout-minutes: 58
     strategy:
       fail-fast: false
       matrix:
-        setup: [none, codex-only, claude-only, both]
+        os: [ubuntu-latest, macos-15]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22.22.2'
           cache: npm
-
-      - run: npm ci --ignore-scripts
-      - run: npm ci --ignore-scripts --prefix ui
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime
-      - name: Restore the tested combined runtime
-        run: tar -xzf runtime.tgz
-
-      # Stand-in CLIs rather than the real ones: adapter DETECTION only asks
-      # whether the name resolves on PATH, and the real CLIs would need
-      # credentials this job must never have.
-      - name: Report what this axis looks like, and prove the shims took effect
+      - name: Linux native prerequisites
+        if: runner.os == 'Linux'
+        run: nice -n 19 sudo apt-get install -y git rsync python3
+      - name: macOS native prerequisites
+        if: runner.os == 'macOS'
         run: |
-          set -euo pipefail
-          BIN="$RUNNER_TEMP/adapter-bin"
-          mkdir -p "$BIN"
-          case "${{ matrix.setup }}" in
-            codex-only)  printf '#!/bin/sh\nexit 0\n' > "$BIN/codex" ;;
-            claude-only) printf '#!/bin/sh\nexit 0\n' > "$BIN/claude" ;;
-            both)        printf '#!/bin/sh\nexit 0\n' > "$BIN/codex"
-                         printf '#!/bin/sh\nexit 0\n' > "$BIN/claude" ;;
-            none)        : ;;
-          esac
-          chmod +x "$BIN"/* 2>/dev/null || true
-          echo "$BIN" >> "$GITHUB_PATH"
-
-      - name: doctor and adapter selection must be honest about this axis
-        run: |
-          set -euo pipefail
-          echo "--- what is actually reachable ---"
-          command -v codex  && echo "codex: present"  || echo "codex: absent"
-          command -v claude && echo "claude: present" || echo "claude: absent"
-          echo "--- doctor ---"
-          node dist/cli.js doctor 2>&1 | tee doctor.out || true
-          case "${{ matrix.setup }}" in
-            none)
-              grep -qi "npm i -g" doctor.out \
-                || { echo "with no agent CLI installed, doctor must name the install command"; exit 1; } ;;
-            codex-only|claude-only|both)
-              grep -qiE "codex|claude" doctor.out \
-                || { echo "doctor did not mention the installed adapter"; exit 1; } ;;
-          esac
-
-      - name: A background submit must refuse when nothing can execute it
-        if: matrix.setup == 'none'
-        run: |
-          set -euo pipefail
-          WORK=$(mktemp -d); cd "$WORK"; git init -q .
-          set +e
-          printf '# Goal\nProbe.\n' | node "$GITHUB_WORKSPACE/dist/cli.js" quick --background \
-            --acknowledge-brief-warnings --project . - > submit.out 2>&1
-          RC=$?
-          set -e
-          cat submit.out
-          test "$RC" -ne 0 || { echo "submit succeeded with no adapter installed"; exit 1; }
-          grep -q "npm i -g" submit.out || { echo "refusal did not name the install command"; exit 1; }
+          nice -n 19 brew install python
+          nice -n 19 python3 -c "import os, shutil; assert os.path.samefile(shutil.which('rsync'), '/usr/bin/rsync')"
+          nice -n 19 rsync --version
+      - name: Install exact producer dependency graph
+        run: nice -n 19 npm ci --ignore-scripts --audit=false --fund=false
+      - name: Tarball and source consumers with producer unavailable
+        run: nice -n 19 npm run test:package

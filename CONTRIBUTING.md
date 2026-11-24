@@ -7,55 +7,64 @@ restructuring a mechanism over adding a parallel exception. Explain any new mech
 cost and verify the behavior it changes. [Architecture](guide/architecture.md) names the
 boundaries; [agent protocol](guide/agent-protocol.md) describes submitted results.
 
-## Build and validation
+## Build and validate
 
-Node.js 22.5 or newer is required. In a development checkout, install lockfile dependencies:
+Node.js 22.22.2 or newer, Git, Python 3 and rsync are required (`engines` in
+[package.json](package.json); the system rsync on macOS is enough). In a development checkout,
+install the lockfile dependencies, then build:
 
 ```bash
 npm ci --ignore-scripts
-npm ci --ignore-scripts --prefix ui
-```
-
-The CI quality job runs the combined engine/UI build, lint and full test suite:
-
-```bash
 npm run build
-npm run lint
-npm test
 ```
 
-Build includes backend TypeScript, both UI type checks and Vite. `build:ui` delegates to the
-same combined builder. `npm run build -- "$BUILD_ROOT"` sends `dist`, `ui/dist` and `.cache`
-to a chosen output root; set `BUILD_ROOT` to a directory you own. Staging uses the temporary
-root. Vite may write its bootstrap cache in UI dependencies, so use an isolated source and
-dependency copy when those dependencies are shared or a checkout serves other work.
-Build publishes real `dist` and `ui/dist` directories. Daemon startup pins an immutable
-runtime beside its socket, so rebuilds cannot change that daemon's later imports. Tests use the checkout's
-`dist` and its manifest: a private build alone does not redirect them. Validate an isolated
-copy with identical source/configuration and its freshly built distribution.
+The build compiles `rewrite-src/` to `dist-rewrite/`, `rewrite-monitor/` to `dist-monitor/` and
+bundles the session hook. Tests need that output: the test runner's global setup stops with
+"Build is missing or stale" if any source is newer than `dist-rewrite/.built`, so rebuild after
+every source change. `npm run build:clean` deletes both output directories first.
 
-The full suite's global setup allocates command-owned temporary storage through the
-existing invocation scratch owner and retires it after workers close. It does not inherit
-an author invocation's aliased `.tmp-*` namespace: fixtures need physical paths for
-no-follow adapter homes, Unix sockets and engine-carrier integrity checks. Per-file private
-homes and stores remain separate, and the author's scratch evidence keeps its run lifetime.
+The test commands, all from [package.json](package.json):
 
-The root Vitest configuration includes `spec/**/*.test.ts`, `.test.tsx` and the recorded
-UX performance replays. `test:baseline-identities` excludes those replay files for an explicit
-population comparison; it is not the full suite. `test:ux-perf` selects a focused replay
-configuration. `build:clean` removes `dist` before building; it is unsuitable for a live root.
+| Command | What it runs |
+|---|---|
+| `npm run lint` | ESLint over `rewrite-src/`, `rewrite-monitor/`, the Claude hook, the hook spec, `scripts/package-install.mjs` and two native test files |
+| `npm run typecheck` | `tsc --noEmit` for `tsconfig.rewrite.json` and `rewrite-monitor/tsconfig.json` |
+| `npm run test:portable` | The `portable` Vitest project: every `spec/**/*.test.ts` except `spec/native/`, `spec/private/` and `spec/benchmark/`. No network, no agent CLIs, synthetic fixtures |
+| `npm run test:native` | The `native` project: `spec/native/**/*.test.ts`, which start real child processes, Git, rsync and Unix sockets |
+| `npm test` | `test:portable`, then `test:native` |
+| `npm run test:isolation` | The portable suite in a `node:22.22.2-bookworm` container with no network, a clean home and no agent CLIs (needs Docker; fetches the image if absent) |
+| `npm run test:package` | Exports the Git index (stage new files first), builds it, installs the packed tarball and the source tree into private prefixes and runs the public CLI against both (uses the public npm registry) |
+| `npm run test:private` | The `private` project, `spec/private/`: fixtures supplied through `FLOWCREW_PRIVATE_FIXTURES`, read-only; for maintainers |
+| `npm run test:benchmark` | The content-measurement baseline in `spec/benchmark/` (no provider or network); takes an optional absolute directory for its evidence files |
 
-On Linux with Docker, the separate public-spec isolation acceptance condition is:
+Before sending a change run at least `npm run build`, `npm run lint`, `npm run typecheck` and
+`npm run test:portable`. Run `npm run test:native` too when you touch process handling, records,
+the CLI or the monitor; it is much slower than the portable suite.
+
+### Short temporary directory
+
+Native tests bind Unix domain sockets under `$TMPDIR`. A socket path is limited to 108 bytes on
+Linux and 104 on macOS, and the test setup adds its own directory below `$TMPDIR`, so a long
+`TMPDIR` (such as a deep per-user directory) makes the bind fail. Run the
+tests with a short one:
 
 ```bash
-npm run test:isolation
+TMPDIR=/tmp npm run test:native
 ```
 
-The script uses `node:22-bookworm`, no container network, a clean home, no agent CLIs and an
-empty passwd file for the caller UID. Docker may fetch the image if absent. It inherits the
-caller's CPU affinity. A passing build/lint/test set does not establish this separate check.
-CI also tests portable process supervision without a service manager and on macOS. Report
-missing environment prerequisites and failed checks rather than selecting a smaller suite.
+### What CI runs
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push, pull request and manual
+dispatch, using Node.js 22.22.2 and `npm ci --ignore-scripts`:
+
+- **portable** (Linux): `npm run build`, `npm run lint`, `npm run typecheck`, then
+  `npm run test:isolation` (the portable suite inside the container above).
+- **native-linux** and **native-macos** (`macos-15`): `npm run build`, then `npm run test:native`.
+- **package-install** (Linux and macOS): `npm run test:package`.
+
+A change is not validated by a passing build, lint and portable run alone: native and package
+results come from CI or from running those commands yourself. Report missing prerequisites and
+failed checks rather than choosing a smaller suite.
 
 Sources: [package scripts](package.json), [builder](scripts/build.ts),
 [test config](vitest.config.ts), [CI](.github/workflows/ci.yml),
@@ -66,9 +75,12 @@ Sources: [package scripts](package.json), [builder](scripts/build.ts),
 Public specs use deterministic fixtures and explicit state isolation. They must not depend
 on personal files, agent CLIs, live network, private run history or installation-specific
 paths. [The purity check](spec/spec-purity.test.ts) enforces that boundary and names the
-file, line and rule. Keep environment-specific harnesses outside the public repository.
-Use immutable injected research evidence or the framework manifest for round checks;
-[brief contract](guide/brief-contract.md#research-rounds) explains mutable slots.
+file, line and rule. The test runner's global setup also fails on tracked text that contains
+a path under a user's home directory (Linux, macOS, WSL drive mounts or a Windows user
+profile) or a run identifier, and on tracked files that match Git ignore rules. Keep
+environment-specific harnesses outside the public repository.
+Research review checks candidate properties. Engine-owned measurements and structured guards judge numbers;
+[brief contract](guide/brief-contract.md#research-briefs) describes the single contract.
 
 Keep public ignores generic. Clone-local private exclusions belong in `.git/info/exclude`;
 forced staging can bypass ignore rules, so review staged bytes too. Never publish credentials,
@@ -85,11 +97,13 @@ branch. Review it and explicitly push `release-v<version>:tests` (using
 annotated tag and creates the latest GitHub release from that changelog section.
 
 Add meaningful regression coverage for observable behavior changes. For documentation changes,
-check source truth, recipe syntax and local links. Do not weaken a test to obtain a green result.
-For a dashboard change, exercise actual routes and controls in a rendered browser at realistic
-scale; the routes are in [App.tsx](ui/src/App.tsx). Assess labels, duplication, readability,
-purpose and the primary reading flow using the [reviewer role](config/agents/doc_reviewer.yaml).
-Tests and payload checks do not establish visual usability.
+check every statement against the code, check the command syntax, and run
+`npm run test:portable`: it resolves relative links and heading anchors in the README, guides,
+examples and skill sources, and checks the README badge and changelog against `package.json`.
+Do not weaken a test to obtain a green result. For a dashboard change, open the page
+(`flowcrew monitor`) in a browser with realistic run data and assess labels, duplication,
+readability and the primary reading flow; the tests check the rendered text, not whether the
+page is usable.
 
 Use a short imperative commit subject, stage only related paths and omit `Co-Authored-By`
 trailers. Follow the [PR template](.github/PULL_REQUEST_TEMPLATE.md): explain the problem and

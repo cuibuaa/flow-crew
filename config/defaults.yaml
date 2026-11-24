@@ -1,44 +1,24 @@
-# Normal authoring budget per execution. A live wrap-up warning arrives before
-# the finishing interval (10% of the budget, capped at 5 minutes), reserving a
-# further 5.5 seconds for child retirement. Hard stop = max(budget, 5.5s + interval).
-# Wrapped work continues in the next finite workflow iteration, without growth.
-default_timeout_ms: 10800000
 # Minimum observed silence before deterministic idle abort, including local commands.
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
 stage_idle_timeout_ms: 600000
 
-# Wall clock a single validation command (build/test/lint) may take before it is
-# killed. ship-setup runs the suite twice -- source baseline and target baseline
-# -- so this must exceed the slowest of them under whatever else the machine is
-# doing. Raised from a hardcoded 15 minutes on 2026-08-23: a project whose gate
-# had grown to 366 tests and ~11.5 minutes could not establish a baseline while
-# two other jobs were running, and the refusal named the timeout rather than the
-# load.
-validation_timeout_ms: 2700000
+# Only project/brief declarations bound validation time.
+# Unfinished executions retry this many times unless the project declares attempts.
+# Gates consume recorded results and never rerun the configured suite.
+validation_attempts: 3
+validation_concurrency: 1
+validation_priority: 19
 
 # Scheduler progress is published on its own loop; an independent process
 # warns when a live, identity-bound scheduler stops advancing it.
 scheduler_heartbeat_interval_ms: 2000
 scheduler_stall_threshold_ms: 120000
 scheduler_stall_observer_poll_ms: 5000
-# Large worktrees on slow filesystems need a checkout-specific bound. Ordinary
-# Git probes retain their smaller command-local bounds.
-git_worktree_add_timeout_ms: 1800000
-max_iterations: 5
-gate_retry_loops: 3
-stage_technical_retries: 1
-# Bounded re-plan budget for a dynamic_dispatch (plan) stage that exits 0 but
-# emits ZERO valid injected stages (truncated/empty/invalid dispatch.yaml — a
-# transient LLM flake). Each retry deletes the bad dispatch.yaml, re-runs the
-# plan stage with a specific re-prompt, until exhausted (then escalate with the
-# parse/unknown-role specifics). Generic engine mechanism, not task logic.
-plan_stage_retries: 2
 # Runtime resolution is read-only: one installed CLI wins; with both installed,
 # Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
 adapter: auto
-# Resume only an explicitly captured per-stage UUID along one proven dependency
-# edge. Reuse is opt-in. This settlement establishes compatible routing, not
-# a measured wall-clock benefit that would justify enabling it by default.
+# Legacy input retained for configuration compatibility. Conversation reuse is
+# disabled, including opt-in paths: the ledger and diff carry retained facts.
 session_reuse: false
 # Model/effort: explicit role or engine value > adapter user settings read at
 # invocation time > CLI built-in default. Codex reads config.toml; Claude reads

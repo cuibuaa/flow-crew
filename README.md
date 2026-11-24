@@ -1,217 +1,153 @@
+<p align="center"><b>FlowCrew</b></p>
+
+<h1 align="center">Give it a destination.<br>Not a flight plan.</h1>
+
+<p align="center">Run your AI agents like a long-haul flight crew: they plan the route, reroute, and cross-check, for days if needed, with every move on the recorder.</p>
+
 <p align="center">
-  <img src="assets/flowcrew_mascot.svg" width="260" alt="FlowCrew crew mascot" />
+  <img src="assets/flowcrew-engineering.svg" align="top" width="49%" alt="Engineering: the crew's track goes around a storm, circles once after review says try again, and lines up with the runway next to a board of three ticked checks marked Done. No route is drawn ahead.">
+  <img src="assets/flowcrew-research.svg" align="top" width="49%" alt="Research: past the edge of the known map, marked Today's best, the crew plants flags on two new islands, turns back from dead ends, and crosses the coast of new land. A snowflake marks the compass that measures, labelled Judge frozen.">
 </p>
 
-# FlowCrew
+<p align="center"><b>Stay in your flow. Let the crew fly.</b></p>
 
-<p align="center"><strong>Give it a brief. Get reviewed work and an honest outcome.</strong></p>
-<p align="center"><em>A multi-agent engine for long-running AI work.</em></p>
+<p align="center"><a href="#take-off">Take off</a> · <a href="#the-destination-is-a-brief">Write a brief</a> · <a href="#how-the-crew-flies">How it flies</a> · <a href="#why-trust-the-landing">Why trust it</a></p>
+
+<p align="center"><b>FlowCrew runs Claude Code or Codex on long coding and research tasks, for hours or days, while you get on with your own work.</b></p>
+
+<p align="center"><b>Left, engineering:</b> land on the runway, every criterion passed by an independent review and every required check run by the engine.<br><b>Right, research:</b> find new land, a result that beats today's best on a frozen evaluator, or a record that nothing did.</p>
+
+---
+
+Run directly, a long task needs a babysitter: someone keeps the session going, pushes the agent on when it stops, and checks its claim that it is done.
+FlowCrew starts the agent from a written goal, has a separate reviewer judge the result against it, runs your checks itself, repairs rejected work, pauses to ask you when progress stalls, and records every step.
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg" alt="Node >= 22.5" />
-  <img src="https://img.shields.io/badge/release-v0.11.0-2563eb.svg" alt="FlowCrew v0.11.0" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22.22.2-brightgreen.svg" alt="Node >= 22.22.2" />
+  <img src="https://img.shields.io/badge/release-v0.12.0-2563eb.svg" alt="FlowCrew v0.12.0" />
   <img src="https://img.shields.io/badge/default_backend-Codex-111827.svg" alt="Codex default backend" />
 </p>
 
-An illustrative conversation:
+## Take off
 
-```text
-> Split token validation from session management. Keep the public API
-> compatible, add regression tests, and report the checks and their results.
-> /ship
-```
+1. **Install.** You need Node.js 22.22.2+, Git, Python 3 and rsync, plus an authenticated Codex CLI or Claude Code for live work:
 
-Use `/ship` in Claude Code or `$ship` in Codex. FlowCrew turns a written brief into planning, workers,
-independent reviews and retained evidence. **You probably don't need FlowCrew** for one bounded task;
-[choose your path](#choose-your-path) when the work needs a persistent run with checks and repair loops.
+   ```bash
+   git clone https://github.com/cuibuaa/flow-crew.git
+   cd flow-crew
+   npm ci --ignore-scripts
+   npm run build
+   npm link
+   ./skills/install.sh
+   ```
 
-## You bring the problem. It brings the rigor.
-
-- **Checks before opinions.** For runs with a setup baseline, engine-owned configured validation settles against it
-  before every gate review. Recorded regressions go straight to admitted repair; reviewers cannot approve them.
-  Unresolved validation stops review.
-- **Independent gates, bounded repairs.** Authors have downstream independent gates. Rejected work returns through
-  admitted repairs to the same gates within a configured budget. Exhaustion stops work instead of repeating the whole plan.
-- **Distinct, honest outcomes.** `complete` is engineering completion; `shipped` is research or declared-terminal delivery;
-  `ceiling_hit` ends research without a metric win; `incomplete` means insufficient completion. `failed` and
-  `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
-  `cancelled` records an explicit stop.
-- **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
-  `daemon continue` resumes compatible runs with completed stages, plan, history and remaining budget.
-  `task cancel` stops work. Explicit `task resume` continues compatible cancelled, failed or incomplete work after settlement.
-  `task retry` requests another launch attempt,
-  starting a fresh run after terminal settlement.
-
-See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
-[task commands](guide/cli.md#services-and-tasks), including paused and queued states.
-
-| Point it at… | Kind | What comes back |
-|---|---|---|
-| Improve a measured baseline | Research | Journaled measurements and a ship, ceiling, incomplete or failure outcome; confirmation when declared |
-| Implement a module to a spec | Engineering | Implementation, independent verdicts and configured validation results |
-| Refactor while preserving behavior | Engineering | Reviewed changes checked against the brief's criteria and configured tests |
-| Investigate an intermittent defect | Engineering / campaign | Related run history and evidence for the reproducer, diagnosis and fix required by the brief |
-
-<p align="center">
-  <img src="assets/screenshot_run_page.png" width="900" alt="Completed FlowCrew run page for a small engineering task: plan → implement → review, with no repair stage" />
-</p>
-
-## From brief to verified run
-
-<img src="assets/architecture.png" width="900" alt="FlowCrew architecture: the ship procedure and quick or daemon launch lead to scheduler planning, authors, engine validation, independent gates and bounded repair; declared reality checks guard successful outcomes, with adapters, roles, dashboard, campaigns and persistent evidence alongside." />
-
-Each authoring stage has one author. Independent gates receive their own stage budgets,
-including configured validation. Declared reality checks govern terminal success, with advisory
-exceptions. Research also has measured rounds and a stopping policy. See
-[stage budgets](guide/agent-protocol.md#stage-budgets-and-retained-continuation) and
-[deterministic checks](guide/brief-contract.md#deterministic-checks).
-
-## Get started
-
-### 1. Clone, install and link the CLI
-
-You need Node.js 22.5+ and Git for worktree setup. From a checkout you own:
-
-```bash
-git clone https://github.com/cuibuaa/flow-crew.git
-cd flow-crew
-npm ci --ignore-scripts
-npm ci --ignore-scripts --prefix ui
-npm run build
-node dist/cli.js --help
-npm link
-which flowcrew
-```
-
-The build produces the engine and dashboard. `npm link` changes the global command link;
-check which checkout it selects. [Getting started](guide/getting-started.md) covers local CLI use.
-
-### 2. Install the coding-agent skills
-
-```bash
-./skills/install.sh
-```
-
-The installer skips absent agent executables. Live runs need an installed, authenticated Codex CLI or Claude Code.
-Both adapters run complete live tasks end to end; the Claude adapter takes its default model from
-`~/.config/flowcrew/claude.json` when present, otherwise the Claude Code user settings.
-**Recommendation: plan in Claude Code, execute in Codex.** The default `auto` backend selects Codex when both
-CLIs are installed, or the only installed CLI. [Adapter configuration](guide/configuration.md#precedence-and-adapters).
-
-### 3. Rehearse without model tokens
-
-```bash
-flowcrew rehearse examples/hello-research.brief.md
-```
-
-Rehearsal calls no model and exercises scripted research settlement in a disposable project.
-It runs the brief's declared shell confirmation; inspect unfamiliar commands first, or use
-`--static-only`. A ready verdict checks wiring, not research quality. [Example recipe](examples/README.md#rehearse-a-research-contract).
-
-### 4. Hand off with `/ship`
-
-Describe the goal and evidence, then invoke `/ship` in Claude Code or `$ship` in Codex.
-The [ship procedure](skills/ship.md) calls for exact-byte rehearsal and digest confirmation before setup
-and launch into an isolated worktree with a measured validation baseline. Skills are instructions to
-the coding agent; the engine does not guarantee that it follows them.
-
-### 5. Watch and control tasks
-
-```bash
-flowcrew start
-flowcrew watch
-flowcrew status
-flowcrew task show <numeric-id>
-```
-
-`start` runs the dashboard at `http://localhost:3000/` by default; use another terminal for `watch` and `status`.
-Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
-`task resume` (and Dashboard Resume) explicitly continues compatible cancelled, failed or incomplete work,
-preserving completed work and remaining budget. Cancellation stays cancelled until explicit continuation; retry starts fresh after settlement.
-Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
-
-When launch records a supported frontend and session, session-push queues terminal and attention
-events for delivery to the launcher. Keep the daemon running for delivery retries. ACK each
-handled event; terminal wrap-up still requires independent verification, preservation of unique
-work and explicit ledger closure. [Launch-side delivery](guide/session-push.md).
-
-## What you can run
-
-These prompts are illustrative; only [`examples/hello-research.brief.md`](examples/hello-research.brief.md)
-is a complete example that runs as written, through rehearsal.
-
-### Research — beat a baseline
-
-```text
-> Improve docs-search relevance over the measured baseline. Declare a fresh-split
-> confirmation and a search budget. An honest ceiling or incomplete outcome is fine.
-> /ship
-```
-
-The numeric policy computes keep/drop and continue/ship/ceiling from recorded rounds.
-A declared confirmation runs on a ship decision; failure rejects that candidate.
-[Research contract](guide/brief-contract.md#research-rounds).
-
-### Engineering — satisfy a contract
-
-```text
-> Refactor the parser while preserving the public API. Require the configured
-> build, full tests and lint, and report evidence for each acceptance criterion.
-> /ship
-```
-
-Engineering checks the brief's contract through independent gates and configured validation.
-[Engineering contract](guide/brief-contract.md#engineering-and-workflow-selection).
-
-### Unknown-bug hunt — build on a campaign
-
-```text
-> Investigate the intermittent checkout failure. Require an unfixed reproducer,
-> a diagnosis, and recurrence evidence after the fix. Group related attempts.
-> /ship
-```
-
-A campaign groups run history. Later planners receive a compact ledger of tried research directions
-and recorded results, even when verbose campaign context is skipped. Prior measurements inform planning;
-they do not guarantee novel proposals.
-[Campaign operations](guide/operations.md#campaigns).
-
-## What makes it work
-
-- **Roles with limited authority.** The planner proposes a graph; admission checks roles,
-  topology and criterion coverage. Authors produce work; independent gates judge it.
-  Their verdicts cannot override engine validation, frozen-input protection or check thresholds.
-- **Every hand-off is a checkable artifact.** Typed stage answers, gate verdicts and declared
-  output/input locations make results inspectable. Location checks establish required paths
-  and producer bindings; content quality still needs criteria and review.
-- **Stopping is a rule.** Research policy owns numeric keep/stop decisions. Live wrap-up
-  guidance retains over-budget work for the next bounded iteration; repair limits,
-  independent gate budgets and a deterministic idle watchdog bound execution.
-
-The [architecture](guide/architecture.md) and [artifact protocol](guide/agent-protocol.md) explain these boundaries.
-
-## When this is the wrong tool
-
-For a short task you can supervise in one session, start with your coding agent. If you cannot state acceptance
-evidence or provide a suitable workspace for unattended shell access, refine the brief and environment first.
-A successful status is evidence about the admitted contract, not a guarantee that a model's claims are true.
-Checks and their inputs need to express the outcome you actually want.
+   [Installation details](guide/getting-started.md).
+2. In Claude Code or Codex, describe where you want to end up and type `/ship` (Claude Code) or `$ship` (Codex). It writes the brief with you, checks it, and asks you to confirm the exact saved brief before anything starts.
+3. Go back to your own work. Check in any time with `/fc-status` (Codex `$fc-status`), which can also open the dashboard. To steer, stop or keep the results, ask the session that launched the run.
 
 > [!WARNING]
-> **Live runs receive unattended shell access.** The adapters select bypass modes for normal
-> approval and sandbox prompts. Input protection and approval requests govern the engine's protocol;
-> they are not an operating-system sandbox. Use a dedicated workspace, read the brief and review
-> its evidence before accepting the result. To stop an intentionally selected registered task,
-> use `flowcrew task cancel <id>` and inspect settlement as explained in [operations](guide/operations.md#inspect-guide-and-stop).
+> **Everything a run starts uses your OS account's ordinary rights.** FlowCrew keeps work in a separate project copy and records evidence, but it does not confine files, credentials, network or other processes. Read the [full execution boundary](guide/operations.md#platform-boundaries) and approve the exact saved brief digest before you start.
 
-## Choose your path
+## The destination is a brief
 
-| You are… | Start here | Next reference |
-|---|---|---|
-| A new user | [Getting started](guide/getting-started.md) | [Runnable examples](examples/README.md) |
-| An operator or brief author | [Brief contract](guide/brief-contract.md) | [Operations](guide/operations.md), [CLI](guide/cli.md), [configuration](guide/configuration.md) |
-| A contributor | [Contributing](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) | [Architecture](guide/architecture.md), [agent protocol](guide/agent-protocol.md) |
+A brief says what "arrived" looks like. It never says how to get there. It settles three things: what done means (criteria in plain sentences), what must not change (tests, evaluators or data marked frozen), and which checks the engine runs itself on the final code (commands such as your test suite). It also names the files the run must produce.
+
+`/ship` turns your conversation into a brief, checks it, and shows you the whole saved brief before anything starts. For example, say "reject header values that contain newlines, and keep every existing test passing". `/ship` drafts a brief with that as its criterion, `src` as the output the run may change, the `tests` folder frozen and `npm test` as a required command. Setup records the run; `/ship` shows its id, saved brief, digest, command ids and execution boundary, then waits for your yes before starting it. When the run ends, `/fc-status` shows how it ended (`complete`, or blocked, failed or paused with the reason), and landing puts the new `src` in `deliveries/<run-id>/project/src`.
+
+A research brief works the same way: freeze the evaluator, and name the possible results, such as "a candidate beat today's best" and "nothing beat it; every attempt is recorded". Two runnable [research example briefs](examples/README.md#research-briefs) show both outcomes. For the exact format, read the [brief contract](guide/brief-contract.md) and the [minimal example](examples/README.md#check-a-brief).
+
+## How the crew flies
+
+```mermaid
+flowchart LR
+  B[Brief: the destination] --> W[Crew works]
+  B -. decompose .-> P[Plan the route] --> W
+  W --> G{Independent check}
+  G -- try again --> R[Repair] --> G
+  G -- landed --> D[Result + recorder]
+  W -. no progress .-> H[Holding: pause and ask you]
+  G -. no progress .-> H
+  H -- resume --> W
+```
+
+| On a flight deck | In FlowCrew |
+| --- | --- |
+| No flight plan from the passenger | The brief states the destination. By default one author works toward it and a reviewer checks it; with `decompose: true` a planner draws the stages first. |
+| Pilot flying | Your existing agent CLIs, Codex or Claude Code, do the work. |
+| Pilot monitoring | A separate review judges the result against your criteria. Nobody grades their own work. |
+| Go-around | Rejected work is repaired and returns to the same review. |
+| Frozen instruments | Frozen tests, evaluators and data are checked against their original bytes at the end of every attempt. Changes are put back; if the original can't be proven back, the run stops and keeps the evidence. |
+| Holding pattern | When two more rejections fail to beat the best attempt so far, or after four failures without a completion, the crew pauses and asks you. Nothing is thrown away. |
+
+## Permissions the agents run with
+
+Agents run with approval prompts turned off: Claude Code with `--permission-mode bypassPermissions`, Codex with `--sandbox danger-full-access`.
+FlowCrew does not load your own Claude Code or Codex settings, allow/deny rules or hooks for these calls and offers no setting to restrict them, so the agent never stops to ask for approval.
+What guards your work is the project copy, the frozen-input check and the review, not a sandbox.
+
+## Cost and what limits a run
+
+FlowCrew has no billing of its own: every model call goes through your own Codex or Claude Code CLI and its login, so it counts against that subscription or API account.
+There is no cap on total spend, tokens or time, and FlowCrew cannot predict what a run will cost.
+The hard limit is on unproductive tries: after four failed tries without a completed one, or two more rejected reviews that fail to beat the best attempt, the run pauses and makes no more model calls until you resume it.
+When a command passes its declared `durationMs`, FlowCrew records a notice and asks for attention while the command keeps running; you can let it finish or cancel the run.
+Each call's token counts are recorded in the run's status and shown on the dashboard; when Claude Code reports a dollar cost, that is recorded too.
+
+## Stopping a run and getting results back
+
+To stop a run, or resume one the crew paused, ask the session that launched it. Stopping closes every process an author or command started: on Linux with a systemd user session a cgroup guarantees this; elsewhere FlowCrew kills processes carrying FlowCrew's environment marker, and processes that clear their environment can escape. Effects outside the machine, such as remote jobs, are yours to clean up.
+The agent works in the run's own project copy, not in your repository, and FlowCrew does not merge, commit or push to your repository.
+The copy, its saved checkpoints and the evidence stay until you land the run.
+Landing preserves declared outputs and `changes.patch` under `deliveries/<run-id>/` in FlowCrew’s store, labelled as a reviewed, accepted delivery or not, then deletes the copy. Relative outputs go under `project/<path>` and absolute outputs under `external/<n>`; `manifest.json` lists each path and archive slot. The patch uses the preserved outputs against setup's base; an unknown base is stated explicitly. Review the delivery and use `git apply` for Git-representable changes; the full archive keeps everything else. See [preservation](guide/operations.md#preserve-and-reclaim).
+
+Ended runs report `heldBytes`, or `heldSpacePending` with an incomplete dashboard total until
+reconciliation measures them. Status only reads. Cancel and land wait up to 30,758 ms for
+controller exit, then refuse with work retained and repeat-command advice if exit is unconfirmed.
+
+## Watching a run: the dashboard
+
+Ask `/fc-status` (Codex `$fc-status`) to open the dashboard; it gives you the URL, normally **http://127.0.0.1:8795**.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/dashboard-dark.png" />
+  <img src="assets/dashboard-light.png" width="1100" alt="FlowCrew dashboard: a run paused at its limit, an engineering author using a tool during repair, and an ended research run, with stage timelines and evidence details" />
+</picture>
+
+The page groups attention into **Needs you**, **Running** and **Ended** (the header counts endings in the last 24 hours).
+Each run has one time track showing where time went and the current stage.
+Expand a run to see tries, review results, saved checkpoints and why it stopped.
+It shows each author's live tool activity and flags a tool or command with no observed progress for 10 minutes.
+In Claude Code, if the run was started bound to your session, the installed session hook wakes that session when the run ends or needs you; Codex has no such hook, so check with `$fc-status`.
+
+The dashboard is **read-only**; act in the session that launched the run.
+[Operations and controls](guide/operations.md#inspect-guide-and-stop).
+
+## Why trust the landing?
+
+- **The engine runs the checks, not the agent.** Required commands run on the final code, supervised by the engine.
+- **The instruments are frozen.** The engine compares frozen inputs with their original bytes at the end of every attempt and puts changed ones back. This is detection and restore, not a lock: see [platform boundaries](guide/operations.md#platform-boundaries).
+- **Someone else signs off.** An independent review judges every result against your criteria, in its own invocation, without your guidance. Any change a reviewer makes to the project is rejected. Rejected work goes around.
+- **The recorder keeps everything.** Command output, verdicts and file history stay in a private Git repository for each run until you land it. Run events stay in SQLite.
+- **Trust, then read.** A successful run means its declared checks and review passed; read the actual work and evidence before accepting it. Skills are instructions to the coding agent, whose compliance the engine cannot guarantee.
+
+## Runs on
+
+- Linux and macOS (both run in CI) with Node.js 22.22.2 or later, Git, Python 3 and rsync.
+- systemd is optional. Containers are not certified.
+- Agents: your existing Codex and/or Claude Code CLIs, with their own logins. Codex is the default backend; ask `/ship` to use Claude instead for a run.
+
+## When not to use FlowCrew
+
+- A small edit you would watch anyway: run your agent directly.
+- You can't yet say what "arrived" looks like: settle that first. Nobody can land on a destination that hasn't been named.
+- You need the answer in minutes: the crew is built for long trips, and cross-checking takes time.
+
+## Learn more
+
+[Getting started](guide/getting-started.md) · [Example briefs](examples/README.md) ·
+[Brief contract](guide/brief-contract.md) · [CLI reference (for scripts and CI)](guide/cli.md) ·
+[Configuration](guide/configuration.md) · [Design and guarantees](guide/architecture.md) · [Contributing](CONTRIBUTING.md)
 
 ## License
 

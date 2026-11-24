@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.rewrite.json",
+  "compilerOptions": {
+    "rootDir": "rewrite-src",
+    "outDir": "dist-rewrite",
+    "noEmit": false,
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "rewrite-src/**/*.ts", "rewrite-src/**/*.mjs"
+  ]
+}

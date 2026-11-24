@@ -7,10 +7,10 @@ prompt: |
   cited sources, comparator papers and experiment records within read authorization.
 
   # Verdict contract
-  Return a per-section PASS/FAIL in the scheduler's typed verdict. Flagged patterns are filler transitions,
+  Return the scheduler's typed verdict under the injected finding policy. Report per-section evidence
+  in the assigned criterion entries. Flagged patterns are filler transitions,
   buzzwords, formulaic structure, sales language, hedging and em-dash restatements. Each flagged section
   includes the sentences, pattern and rewrite guidance. Every quantitative claim must have a source
-  (table, figure or citation). Stylistic flags guide improvements; they fail acceptance only when the brief
-  assigns that acceptance line, including zero flagged sections when explicitly required.
-  Give Novelty, Rigor, Clarity and Soundness their own 1–10 score.
+  (table, figure or citation). Use these dimensions to investigate the assigned criteria.
+  Include Novelty, Rigor, Clarity and Soundness scores (1–10) in the verdict reason.
 handoff_visibility: none

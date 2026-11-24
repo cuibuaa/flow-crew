@@ -1,24 +1,24 @@
 {
   "name": "flowcrew",
-  "version": "0.11.0",
-  "description": "FlowCrew is a Codex agent workflow dashboard and control plane with QA gates, retries, and run memory for long-running agent workflows.",
-  "main": "dist/index.js",
+  "version": "0.12.0",
+  "description": "FlowCrew turns a written goal into isolated work with independent verification and an honest report.",
+  "main": "dist-rewrite/cli.js",
   "bin": {
-    "flowcrew": "dist/cli.js"
+    "flowcrew": "dist-rewrite/cli.js"
   },
   "scripts": {
-    "postinstall": "node -e \"const fs=require('node:fs'), cp=require('node:child_process'); if(fs.existsSync('scripts/build.ts')) { if(fs.existsSync('ui/package.json')) cp.execSync('npm install --prefix ui', {stdio:'inherit'}); cp.execSync('npm run build', {stdio:'inherit'}); }\"",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --import tsx scripts/build.ts",
-    "build:clean": "npm run clean && npm run build",
-    "start": "node dist/index.js",
-    "dev": "cd ui && npm run build && cd .. && tsx src/index.ts",
-    "build:ui": "cd ui && npm run build",
-    "lint": "eslint \"src/**/*.ts\"",
-    "test": "vitest run",
-    "test:isolation": "sh scripts/test-isolation.sh",
-    "test:baseline-identities": "vitest run --exclude \"spec/ux-perf-*.replay.ts\" --exclude \"spec/ux-perf-*.replay.tsx\"",
-    "test:ux-perf": "vitest run --config vitest.ux-perf.config.ts"
+    "clean": "nice -n 19 node -e \"for (const path of ['dist-rewrite', 'dist-monitor']) require('node:fs').rmSync(path,{recursive:true,force:true})\"",
+    "build": "nice -n 19 node --import tsx scripts/build.ts",
+    "build:clean": "nice -n 19 npm run clean && nice -n 19 npm run build",
+    "start": "nice -n 19 node dist-rewrite/cli.js",
+    "lint": "nice -n 19 eslint \"rewrite-src/**/*.ts\" \"rewrite-monitor/**/*.ts\" \"integrations/claude/*.mjs\" \"spec/rewrite-hooks-*.test.ts\" \"scripts/package-install.mjs\" \"spec/native/rewrite-integration-engine.test.ts\" \"spec/native/fixtures/public-cli.mjs\"",
+    "typecheck": "nice -n 19 tsc --noEmit -p tsconfig.rewrite.json && nice -n 19 tsc --noEmit -p rewrite-monitor/tsconfig.json",
+    "test": "nice -n 19 npm run test:portable && nice -n 19 npm run test:native",
+    "test:portable": "nice -n 19 vitest run --project portable",
+    "test:native": "nice -n 19 vitest run --project native",
+    "test:benchmark": "nice -n 19 node --import tsx spec/benchmark/fixtures/rewrite-acceptance/baseline.mts",
+    "test:isolation": "nice -n 19 sh scripts/test-isolation.sh",
+    "test:package": "nice -n 19 node scripts/package-install.mjs"
   },
   "keywords": [
     "flowcrew",
@@ -41,37 +41,38 @@
   "license": "MIT",
   "type": "module",
   "files": [
-    "dist",
-    "ui/dist",
+    "dist-monitor",
     "config",
     "skills",
     "examples",
     "guide",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "dist-rewrite",
+    "integrations/claude/flowcrew-session.mjs",
+    "rewrite-src/contract/status.mjs",
+    "rewrite-src/host/identity.mjs",
+    "rewrite-src/contract/lifecycle.mjs",
+    "rewrite-src/contract/retirement.mjs"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.22.2"
   },
   "dependencies": {
-    "@fastify/static": "^10.1.2",
-    "fastify": "^5.8.4",
-    "pino": "^10.3.1",
-    "string-width": "7.2.0",
     "yaml": "^2.8.1",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "smol-toml": "^1.9.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
     "@types/node": "^25.5.0",
     "eslint": "^10.1.0",
     "jsdom": "^29.1.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.4",
+    "esbuild": "^0.28.1"
   },
   "overrides": {
     "vite": "7.3.6",
