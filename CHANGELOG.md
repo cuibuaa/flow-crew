@@ -8,7 +8,7 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
-## [0.12.0] - 2026-11-20
+## [0.12.0] - 2026-11-23
 
 ### Added
 
@@ -17,6 +17,7 @@ retained as reported release history, not current guarantees or benchmark eviden
 - Optional brief field `decompose: true` starts the run with a planner stage; without it every run uses a fixed author, gate and repair graph.
 - Two runnable research example briefs, a positive case and a negative control, checked by the test suite. See [examples](examples/README.md#research-briefs).
 - Brief-contract lessons: prove each claimed visual difference with paired crops of the product and the mock, and keep the data that decides whether a research result is adopted out of the run's reach.
+- `flowcrew land <run-id> --accept-unmet 'C3=reason'` records a human's acceptance of an unmet criterion in the delivery's `manifest.json`: the criterion, the latest gate's status and evidence for it, the reason and the time. Judges and the run's status are unchanged; guidance cannot change a frozen criterion, so stop the run and record the acceptance at land. See [Preservation](guide/operations.md#preserve-and-reclaim).
 
 ### Changed
 
@@ -37,7 +38,9 @@ retained as reported release history, not current guarantees or benchmark eviden
   stage segments and summaries, command progress, checkpoints and resume-refusal causes
   are retained when available. Historical v2/v3 displayed snapshots remain readable;
   unsupported development journal-only v3 files are not a migration format. Missing
-  historical facts remain absent. A dead controller is interrupted, not silently resumed.
+  historical facts remain absent. Older stores use their recorded end and completed-reclaim
+  facts; reading status does not measure retained bytes or rewrite the published file. A dead
+  controller is interrupted, not silently resumed.
 - **Independent runtime copies and explicit recovery.** Each new run keeps its own built
   runtime and production dependencies; upgrades affect new runs. After a host restart,
   inspect status and explicitly resume using the original copy. Recorded process-group
@@ -58,7 +61,10 @@ retained as reported release history, not current guarantees or benchmark eviden
   (counting the one that last set the best pass count), or four failures without a
   completion, pause while retaining work. The former engine iteration,
   stage/idle and retry budgets are retired. Provider context exhaustion remains native;
-  optional `commands[].durationMs` limits that command alone. See [configuration](guide/configuration.md).
+  optional `commands[].durationMs` records a journal notice and sets run attention when that
+  command passes its declared time; it keeps running and ends with its own receipt. If the notice
+  cannot be recorded, the command is stopped with process receipt cause `duration` and the
+  operation fails as unknown. See [configuration](guide/configuration.md).
 - **State moves to the platform state directory.** Default: `$XDG_STATE_HOME/flowcrew`
   or `$HOME/.local/state/flowcrew`, containing `state.sqlite` and `store/`. `FC_HOME`
   overrides the state directory and default store; `FLOWCREW_STORE_ROOT` overrides the
@@ -77,24 +83,24 @@ literal directory selection, so choose a fresh directory for the new engine.
 Rebuild and relink the CLI, reinstall skills with `./skills/install.sh`, and check
 `which flowcrew` and `flowcrew --help`. The installer copies linked guides from their
 single source into skill references. Review the host-rights boundary and approve the
-exact brief digest, source and start options before new work. Rewrite old briefs using
+exact brief digest, source and setup options before new work. Rewrite old briefs using
 the [current contract](guide/brief-contract.md), and replace YAML workflow/defaults
 configuration with `config/runtime.json` roles (or `--config <file>`).
 
 | Previous interface or retired rewrite mechanism | Replacement in 0.12.0 |
 |---|---|
-| `init`, `adapter` | Build/link the package, install skills; select roles in runtime JSON or use `start --backend` |
-| `quick`, `ship-preflight`, `rehearse`, `ship-setup` | Author with `/ship` (`$ship` in Codex), check `setup <brief>`, then `start <brief>`; setup executes no commands |
+| `init`, `adapter` | Build/link the package, install skills; select roles in runtime JSON or use `setup --backend` |
+| `quick`, `ship-preflight`, `rehearse`, `ship-setup` | Author with `/ship` (`$ship` in Codex), prepare `setup <brief>`, then launch its returned id with `start <run-id>`; setup executes no commands |
 | `plan-check` and YAML dynamic workflow dispatch | Typed plans checked by the engine; pending-plan changes through `guide <run-id> <text> --plan <file>` |
-| `start` as a dashboard server, `dashboard status`, `watch` | `monitor`; `start <brief>` now starts a run |
+| `start` as a dashboard server, `dashboard status`, `watch` | `monitor`; `start <run-id>` launches the run recorded by setup |
 | `list`, `state`, `events` | `status [<run-id>]`, monitor details and retained evidence; no public event-follow command |
 | `interrupt`, `task cancel`, `task resume`, `task retry` | `cancel <run-id>`, `resume <run-id>`; terminal work requires a new brief/run |
-| `task list`, `task show`, `task tail` and numeric task registry | Run IDs from `start`, `status [<run-id>]` and retained command streams |
+| `task list`, `task show`, `task tail` and numeric task registry | Run IDs from `setup`, `status [<run-id>]` and retained command streams |
 | `daemon start/serve/stop/restart/status/logs/deploy/hold/hold-status/continue` and RPC deployment holds | Per-run supervisor/runtime copy; manage installation upgrades outside the engine, inspect and explicitly resume after restart |
 | `inbox list/show/approve/deny` and execution approval requests | Approve the saved brief before launch in the coding-agent session; use `guide`, `cancel` or `resume` during work |
 | `doctor` and registry repair/compaction | `setup` for declarations/settings; actual launches report process failures; no registry maintenance substitute |
 | `audit-reality` and research-specific engine policy | Declare evaluator inputs, commands, criteria and result labels; independent review judges their evidence |
-| `export`, `prune`, `clean`, old `land --run ... --remove` | `land <run-id>` preserves the declared outputs and then deletes the run's project copy, runtime pin, work root and raw evidence; it takes no options. Archive any additional raw evidence yourself first |
+| `export`, `prune`, `clean`, old `land --run ... --remove` | `land <run-id>` preserves the declared outputs and then deletes the run's project copy, runtime pin, work root and raw evidence; its only option, `--accept-unmet`, records a human's acceptance of unmet criteria. Archive any additional raw evidence yourself first |
 | `fc_tasks render/list/reconcile/create/update` and `session-push wake-check/wake/ack/list/bind-display/hook/statusline` | Optional packaged Claude session hook reads status files; CLI status works without a bound session; no promise of live delivery or equivalent ledger-edit API |
 | `version`, `--version` | Installed package metadata (for example `npm list -g flowcrew`); `--help` owns current syntax |
 | Campaign grouping/history registry | Operator-owned grouping and prior evidence declared as brief inputs |
@@ -107,6 +113,12 @@ and `commands[].unconfined` values are ignored with a parse advisory where docum
 they grant no limit or permission. Remove them from new declarations. Other unknown
 keys still refuse. Recheck automation against current [exit codes](guide/cli.md#exits-and-storage):
 0 success, 1 conflict/refusal, 2 invalid input, 3 unavailable/unknown/in-progress.
+Automation must pass setup's returned run id to start, read `heldSpacePending` when `heldBytes`
+is absent, and use the delivery's `project/<path>`, `external/<n>`, `manifest.json` and
+`changes.patch` layout. A missing or mistyped required run id exits 2; an unexpected exception
+inside an operation is unknown (3), while one escaping the CLI entry exits 2. Setup failure
+exits depend on `kind`, not on whether creation had effects; failures report `effects: none`,
+`setup` or `maybe`, with the attempted id and `confirmed: false` when creation is uncertain.
 
 ### Fixed before release
 
@@ -118,8 +130,10 @@ keys still refuse. Recheck automation against current [exit codes](guide/cli.md#
 - **Land preserves and reclaims in one step.** `flowcrew land <run-id>` preserves the declared
   outputs under `deliveries/<run-id>/` and then deletes the project copy, runtime pin, work root
   and raw evidence. It is not a read-only audit, and the former `--reclaim` flag is gone: `land`
-  takes no options. Status (`heldBytes`) and the dashboard show the space each ended run still
-  holds until it is landed, and the dashboard totals it as "held, not landed".
+  takes no options. The ending or control writer measures retained file sizes as `heldBytes`,
+  counting hard links once; the measurement stays until cleanup completes. Pending or failed
+  measurements report `heldSpacePending` without `heldBytes`, and the dashboard marks its
+  held total incomplete; status only reads.
 - **Release resources after a terminal run.** Confirmed closure and capture release
   external output paths so a new run in the same store can use them without land or
   reclaim. Unknown closure or failed capture keeps the affected path held for inspection.
@@ -149,8 +163,30 @@ keys still refuse. Recheck automation against current [exit codes](guide/cli.md#
   bytecode from a test run), the engine restores the tree they reviewed, keeps the
   verdict, and the run completes with exactly that tree. Previously such a run ended
   `failed` / `isolation_refused`.
-- **`setup` previews what `start` runs.** `setup` accepts `--backend`, like `start`, so
-  its role lines show the backend the same arguments would start.
+- **`setup` records what `start` runs.** Setup admits the run, pins its runtime and prepares
+  its project copy without launching work; `start <run-id>` launches only that saved record.
+  Status includes its brief digest and source project, and `status <run-id> --brief` prints the
+  original stored bytes until land removes raw evidence. A recorded preparation can be
+  inspected, cancelled and landed even if setup failed or work never started.
+- **Creation failures keep one typed outcome.** The failure kind decides the exit; the
+  recorded creation outcome decides effects, the reported run id and cleanup advice.
+  Unconfirmed creation is unknown (3), reports the attempted address and retains its directory.
+- **Cancel and land wait for the controller.** Cancel records its intent and requests
+  cooperative exit; cancel and land wait up to about 31 seconds for the live controller before
+  reconciliation or final capture. Unconfirmed exit refuses with work retained and advice
+  to inspect the controller and repeat the command; the wait never kills the recorder.
+- **One delivery layout.** `land` writes `deliveries/<run-id>/` with relative outputs under
+  `project/<path>`, absolute outputs under `external/<n>`, `manifest.json` listing every
+  declared path and its archive slot, and `changes.patch` with the Git-representable changes
+  to relative outputs (apply it with `git apply` from the original source project). See
+  [operations](guide/operations.md#preserve-and-reclaim).
+- **Changed outputs belong to the command.** A declared output changed during capture
+  after its command is `output_changed`, retained as the command receipt's `unpinned` result;
+  the run parks with its receipt and streams kept. Other capture failures retain their own kind.
+- **Brief files and command environments follow recorded inputs.** UTF-8 BOM and CRLF
+  frontmatter are accepted, and path characters `* ? [ ] { } :` are literal. Commands use
+  the operator's PATH recorded at setup unless overridden; a declared TMPDIR is used
+  unchanged, otherwise each execution gets its own scratch directory.
 - **Native execution on macOS.** Native tools are looked up on the operator's `PATH` and then in
   `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`, so a narrowed `PATH` no longer hides macOS's
   `/usr/sbin/sysctl` from process identity. Importing a project copies socket entries under a run
@@ -166,6 +202,9 @@ keys still refuse. Recheck automation against current [exit codes](guide/cli.md#
 - On macOS and on Linux without a systemd user session, child-process cleanup uses the
   invocation's environment marker and remains best effort: processes that clear their
   environment can escape it.
+- On macOS, when the process group cannot be inspected (`EPERM`), closure is reported as
+  unknown, even if the only member is FlowCrew's own exited but not yet reaped child. The
+  run keeps its work and attention; repeat `cancel` once the child is reaped.
 
 ## [0.11.0] - 2026-10-23
 
