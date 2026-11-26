@@ -87,6 +87,8 @@ const planSchema = z.preprocess(value => ignoreRetired(value, 'plan'), z.strictO
   ])).min(1)
 }));
 const admittedPlanSchema = z.strictObject({ revision: idSchema, plan: planSchema, digest: hash, executed: z.array(refSchema) });
+// Historical replay is structural, not current admission: retain optional quote metadata even
+// on passing criteria and advisory findings. Settlement alone validates newly delivered answers.
 const attemptSchema = z.preprocess(value => ignoreRetired(value, 'attempt'), z.strictObject({
   address: addressSchema, ending: z.enum(['delivered', 'invalid_answer', 'invalid_plan', 'work_failed',
     'technical_failure', 'auth', 'refused', 'input_too_large', 'quota', 'duration', 'cancelled', 'isolation_failure', 'closure_unknown',
@@ -103,12 +105,12 @@ const attemptSchema = z.preprocess(value => ignoreRetired(value, 'attempt'), z.s
       kind: z.literal('gate'), answer: z.strictObject({
         outcome: z.enum(['accepted', 'accepted_blocked', 'rejected_repairable', 'rejected_irreparable']), reason: z.string().min(1),
         criteria: z.record(idSchema, z.union([
-          z.strictObject({ status: z.enum(['pass', 'fail']), evidence: z.string().min(1) }),
+          z.strictObject({ status: z.enum(['pass', 'fail']), evidence: z.string().min(1), briefQuote: z.string().min(1).optional() }),
           z.strictObject({ status: z.literal('not_assessed'), evidence: z.string().min(1), reason: z.literal('pending_work') }),
         ])),
         findings: z.array(z.strictObject({
           id: idSchema, paths: z.array(declaredPathSchema), reason: z.string().min(1),
-          criterionIds: z.array(idSchema), class: z.enum(['criterion_unmet', 'regression', 'advisory']), commandEvidence: refSchema.optional()
+          criterionIds: z.array(idSchema), class: z.enum(['criterion_unmet', 'regression', 'advisory']), briefQuote: z.string().min(1).optional(), commandEvidence: refSchema.optional()
         })),
         commandEvidence: z.array(z.strictObject({ command: idSchema, context: z.string(), executions: z.array(z.string()) })).optional(),
         remainingWork: z.array(z.string()), result: idSchema.optional(),

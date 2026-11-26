@@ -17,7 +17,7 @@ export const progressContext = {
 } as const satisfies PlanContext;
 export const progressAnswerContext = {
   ...progressContext, purpose: 'gate', criterionIds: ['present', 'later'], resultIds: ['delivered'],
-  allowBlocked: false, final: false, revision: 'revision_a',
+  allowBlocked: false, final: false, revision: 'revision_a', briefTexts: ['Complete the delivery.'],
 } as const satisfies AnswerContext;
 export const progressAnswer = {
   kind: 'gate', answer: {

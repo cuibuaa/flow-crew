@@ -163,7 +163,7 @@ it('repair-planner revision can schedule commands without relations', async () =
     if (request.stage.id === 'gate' && !rejected) {
       rejected = true;
       return {ok:true,value:await answerReceipt(receipt,{kind:'gate',answer:{outcome:'rejected_repairable',reason:'Repair required',
-        criteria:{correct:{status:'fail',evidence:'Independent defect'}},findings:[],remainingWork:['Repair']}})};
+        criteria:{correct:{status:'fail',evidence:'Independent defect', briefQuote: 'Deliver reviewed work'}},findings:[],remainingWork:['Repair']}})};
     }
     return {ok:true,value:receipt};
   };
@@ -245,4 +245,89 @@ it('asks for a base run only in the final gate command phase', async () => {
   expect(asked[0]).toEqual(['later', undefined]);
   expect(asked.slice(1).length).toBeGreaterThan(0);
   expect(asked.slice(1).every(([stageId, base]) => stageId === 'gate' && base === true)).toBe(true);
+});
+
+// These are pre-quote-contract journal facts, not newly submitted answers.
+it.each([
+  ['accepted', 'criterion_unmet'], ['accepted', 'regression'], ['accepted_blocked', 'fail'],
+].flatMap(([outcome, item]) => [false, true].flatMap(final => [false, true].map(applied => ({outcome, item, final, applied})))))
+('routes historical authenticated $outcome with $item after upgrade: final=$final applied=$applied', async ({outcome, item, final, applied}) => {
+  await resetFixture({allowBlocked:true}, {stages: final ? [stage('gate','gate')] : [
+    stage('progress','gate'), stage('later','work',['progress']), stage('gate','gate',['later'])]});
+  const id = final ? 'gate' : 'progress';
+  const address = {run:'Run',stage:id,attempt:'Historical',invocation:1};
+  const historical = JSON.parse(JSON.stringify({kind:'gate',answer:{outcome,reason:'Valid under the previous contract',
+    criteria:{correct:{status:item === 'fail' ? 'fail' : 'pass',evidence:'Historical evidence'}},
+    findings:item === 'fail' ? [] : [{id:'historical',paths:[],reason:'Historical finding',criterionIds:['correct'],class:item}],
+    remainingWork:[]}}));
+  const frontier = get(decideNext(await f.projection()));
+  if (frontier.kind !== 'stage') throw new Error('Expected historical gate frontier');
+  expect(answerSchema(frontier.context).parse(historical).ok).toBe(false);
+  const tree = await f.tree();
+  const receipt = await answerReceipt({address,before:tree,after:tree,ending:'delivered',closure:'dead',audit:f.ref,
+    evidence:[],usage:{state:'unknown',raw:[]},inputChars:1},historical);
+  await f.append(f.execution,[{type:'invocation_reserved',invocation:{charge:'work',address:{kind:'stage',...address}}},
+    {type:'attempt_settled',receipt}, {type:'stage_settled',stage:id,state:'settled',evidence:[receipt.answerRef]}]);
+  // Give final historical review the same safe checkpoint a settled old run retained.
+  if (final) await f.append(f.execution,[{type:'checkpoint',checkpoint:{id:'HistoricalCheckpoint',address,parent:null,state:'safe',
+    manifest:f.ref,tree,brief:f.brief.digest,inputHashes:[],evidence:[receipt.answerRef]}}]);
+  const p = await f.projection();
+  const transition = {type:'gate_transition' as const,stage:id,attempt:address.attempt,
+    outcome:historical.answer.outcome,next:null,evidence:[receipt.answerRef]};
+  if (applied) await f.append(f.execution,[transition]);
+  else expect(get(decideNext(p))).toEqual({kind:'transition',transition});
+  const {ports,seen} = workflowFixture(f);
+  const result = get(await runWorkflow({writer:f.execution,scope:f.scope,ports,abort:new AbortController().signal}));
+  expect(result.status).toBe(final && outcome === 'accepted_blocked' ? 'accepted_blocked' : 'complete');
+  expect(seen.map(request=>request.stage.id)).toEqual(final ? [] : ['later','gate']);
+  expect((await f.projection()).attempts.find(item=>item.address.attempt === 'Historical')?.answer).toEqual(historical);
+});
+
+it('settlement checks engine-owned brief quotes and admits a corrected answer', async () => {
+  await resetFixture({title:'A reviewed delivery',body:'Reject trailing input.'});
+  const {ports,seen} = workflowFixture(f), native = ports.attempt;
+  let visits = 0;
+  ports.attempt = async request => {
+    const receipt = get(await native(request));
+    if (request.stage.purpose !== 'gate') return {ok:true,value:receipt};
+    expect(request.context.briefTexts).toEqual(['Reject trailing input.','A reviewed delivery','Deliver reviewed work']);
+    const briefQuote = ++visits === 1 ? 'Invented requirement.' : 'Reject  trailing\ninput.';
+    return {ok:true,value:await answerReceipt(receipt,{kind:'gate',answer:{outcome:'rejected_irreparable',reason:'Cannot repair',
+      criteria:{correct:{status:'fail',evidence:'Independent observation',briefQuote}},findings:[],remainingWork:[]}})};
+  };
+  expect(get(await runWorkflow({writer:f.execution,scope:f.scope,ports,abort:new AbortController().signal})))
+    .toMatchObject({status:'failed',reason:'gate_irreparable'});
+  expect(seen.map(request=>request.stage.id)).toEqual(['work','gate','gate']);
+  const p = await f.projection(), invalid = p.attempts.find(receipt=>receipt.ending === 'invalid_answer')!;
+  expect(invalid.answer).toBeUndefined();
+  const diagnostics = await Promise.all(invalid.evidence.map(async ref=>Buffer.from(get(await readEvidence(f.journal,ref))).toString()));
+  expect(diagnostics.some(text=>text.includes('briefQuote must occur verbatim in the brief'))).toBe(true);
+  expect(seen[2].evidence).toEqual(expect.arrayContaining(invalid.evidence));
+  expect(p.attempts.at(-1)).toMatchObject({ending:'delivered',answer:{kind:'gate',answer:{
+    outcome:'rejected_irreparable',criteria:{correct:{briefQuote:'Reject  trailing\ninput.'}}}}});
+});
+
+it.each(['accepted', 'rejected_repairable'] as const)
+('dispatches repair after a refused %s is corrected to rejected_repairable', async initialOutcome => {
+  await resetFixture({body:'Reject trailing input.'});
+  const {ports,seen} = workflowFixture(f), native = ports.attempt;
+  let visits = 0;
+  ports.attempt = async request => {
+    const receipt = get(await native(request));
+    if (request.stage.purpose !== 'gate' || ++visits > 2) return {ok:true,value:receipt};
+    return {ok:true,value:await answerReceipt(receipt,{kind:'gate',answer:{
+      outcome:visits === 1 ? initialOutcome : 'rejected_repairable', reason:'Trailing input needs repair',
+      criteria:{correct:{status:'fail',evidence:'Trailing input was accepted',
+        briefQuote:visits === 1 && initialOutcome === 'rejected_repairable' ? 'Invented requirement.' : 'Reject trailing input.'}},
+      findings:[],remainingWork:['Reject trailing input']}})};
+  };
+  const result = get(await runWorkflow({writer:f.execution,scope:f.scope,ports,abort:new AbortController().signal}));
+  expect(seen.map(request=>request.stage.id)).toEqual(['work','gate','gate','repair','gate']);
+  expect(result).toMatchObject({status:'complete',reason:'completed'});
+  expect(seen[2].address).toEqual({...seen[1].address,invocation:seen[1].address.invocation + 1});
+  const p = await f.projection();
+  expect(p.attempts.map(receipt=>receipt.ending)).toEqual(['delivered','invalid_answer','delivered','delivered','delivered']);
+  expect(p.attempts[2].answer).toMatchObject({kind:'gate',answer:{outcome:'rejected_repairable'}});
+  expect(p.transitions).toEqual(expect.arrayContaining([expect.objectContaining({stage:'gate',
+    attempt:seen[2].address.attempt,outcome:'rejected_repairable',next:'repair'})]));
 });

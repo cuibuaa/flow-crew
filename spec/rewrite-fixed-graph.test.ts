@@ -26,8 +26,8 @@ async function answerReceipt(receipt: AttemptReceipt, answer: StageAnswer) {
 const onAuthor = (plan: Plan): Plan => ({ stages: plan.stages.map(stage => ({ ...stage, role: 'author' })) });
 const commands = ['Verify', 'Optional'].map(id => ({ id, argv: [process.execPath, '-e', ''], env: {}, inputs: [], required: id === 'Verify' }));
 const rejection = (finding: string): StageAnswer => ({ kind: 'gate', answer: { outcome: 'rejected_repairable', reason: 'Rejected: ' + finding,
-  criteria: { correct: { status: 'fail', evidence: 'Observed independently.' } }, remainingWork: ['Repair'],
-  findings: [{ id: 'finding', paths: [], reason: finding, criterionIds: ['correct'], class: 'criterion_unmet' }] } });
+  criteria: { correct: { status: 'fail', evidence: 'Observed independently.', briefQuote: 'Deliver reviewed work' } }, remainingWork: ['Repair'],
+  findings: [{ id: 'finding', paths: [], reason: finding, criterionIds: ['correct'], class: 'criterion_unmet', briefQuote: 'Deliver reviewed work' }] } });
 /** Run the fixed graph with a gate that rejects `rejections` times and then accepts. */
 async function run(rejections: number) {
   await resetFixture();

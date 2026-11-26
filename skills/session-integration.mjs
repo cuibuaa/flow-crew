@@ -40,7 +40,9 @@ const ownedCommands = new Set(['Stop', 'SessionStart', 'Wake', '--statusline'].f
   [registered(event), ...previousCommands.map(base => `${base} ${event}`)]));
 const owned = handler => handler?.type === 'command' && ownedCommands.has(handler.command);
 const definition = event => ({ hooks: [{ type: 'command', command: registered(event) }] });
-const wake = { hooks: [{ type: 'command', command: registered('Wake'), asyncRewake: true }] };
+// asyncRewake obeys Claude's timeout: allow 24 h for runs that can exceed 12 h,
+// using the largest probe-accepted window instead of the 600 s command default.
+const wake = { hooks: [{ type: 'command', command: registered('Wake'), asyncRewake: true, timeout: 86400 }] };
 const status = { type: 'command', command: registered('--statusline') };
 const hooks = config.hooks ?? {};
 for (const event of ['Stop', 'SessionStart']) {

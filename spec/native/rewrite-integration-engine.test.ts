@@ -82,7 +82,8 @@ it.each(['valid', 'candidate-edit'] as const)('P6 fresh final receipts and indep
     const accepted = truthful;
     const answer: StageAnswer = { kind: 'gate', answer: { outcome: accepted ? 'accepted' : 'rejected_irreparable',
      reason: truthful ? 'Full source/result/report relation verified' : 'Actual evidence mismatch', criteria: { correct: {
-     status: accepted ? 'pass' : 'fail', evidence: 'Actual native result, every execution, report and source bytes' } }, findings: [],
+     status: accepted ? 'pass' : 'fail', evidence: 'Actual native result, every execution, report and source bytes',
+     ...(accepted ? {} : { briefQuote: f.brief.declaration.criteria[0].text }) } }, findings: [],
      remainingWork: [], result: measured.label } };
     return { ok: true, value: await receipt(request, before, answer) };
   };

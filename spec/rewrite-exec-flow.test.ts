@@ -108,7 +108,7 @@ beforeEach(async () => {
      description: '' },
     invocation: { charge: 'work', address: { kind: 'stage', ...address } }, evidence: [],
     context: { purpose: 'work', criterionIds: ['criterion'], resultIds: [], roleIds: ['role'], commandIds: ['check'], checkpointIds: [],
-     allowBlocked: false, final: false, revision: 'revision' } };
+     allowBlocked: false, final: false, revision: 'revision', briefTexts: [brief.declaration.body, ...brief.declaration.criteria.map(item => item.text)] } };
   ports = { putEvidence: value => putEvidence(scope.journal, value), readEvidence: ref => readEvidence(scope.journal, ref),
    recordProcess: async () => ({ ok: true, value: 1 }) };
   writer = { journal: scope.journal, owner, epoch: 'epoch', kind: 'execution', cursor: 0 };

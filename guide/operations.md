@@ -124,6 +124,13 @@ flowcrew cancel <run-id>
 flowcrew resume <run-id>
 ```
 
+The installed Claude session integration gives the Wake command under Stop and
+SessionStart an explicit 86,400-second (24-hour) timeout. This window covers runs
+lasting minutes to more than 12 hours; Claude still enforces a timeout on
+`asyncRewake` hooks. Re-run the installer to upgrade older registrations.
+If a run ends after that window while the session stays idle, the session wakes
+for the result only at its next Stop or SessionStart.
+
 Text guidance records the
 cursor and stage/attempt observed by the operator and never interrupts the author.
 On its five-second observation cadence, the controller offers pending guidance to a

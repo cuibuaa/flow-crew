@@ -53,7 +53,18 @@ The generated schema is authoritative. Answers carry `kind` and `answer`:
 Each criterion has pass/fail evidence. Intermediate gates may use `not_assessed` with
 `reason: pending_work`; final gates may not. Findings have IDs, literal paths, reasons,
 criterion IDs and class `criterion_unmet`, `regression` or `advisory`, with optional
-command evidence. Advisory prose does not create another repair/routing channel.
+command evidence. Every failing criterion and every `criterion_unmet` or `regression`
+finding requires `briefQuote`: the complete violated sentence copied verbatim from the
+brief. The receiving schema checks substring membership in the engine-owned brief body,
+title or one criterion text, collapsing whitespace and trimming edges while preserving
+case and punctuation. It does not split sentences or enforce sentence boundaries; the
+gate is responsible for copying the whole sentence and judging whether it applies.
+Quotes cannot span separate declarations. Passing criteria and advisory findings omit
+`briefQuote` in new answers.
+
+Both `accepted` and `accepted_blocked` refuse any `fail` criterion or `criterion_unmet`
+or `regression` finding. Advisory findings are allowed with acceptance and do not create
+another repair/routing channel.
 `accepted_blocked` requires brief `allowBlocked`. A final accepting gate must select a
 declared result if finite result labels exist; their text/IDs are opaque to code.
 
@@ -63,6 +74,16 @@ exception is engine-measured: a required command that already fails the same way
 base tree is recorded with basis `pre-existing` and does not block
 ([brief contract](brief-contract.md#required-commands-that-already-fail-on-the-base)).
 Author gaps remain evidence for review, not permission to waive a criterion.
+
+A settled, authenticated gate answer keeps the validity it had at settlement. Routing
+consumes that recorded disposition without applying today's answer grammar again. Old
+stored answers without `briefQuote`, including acceptances the current schema would
+refuse, remain readable and keep routing. The stored-answer reader deliberately uses a
+looser structural grammar: optional `briefQuote` metadata is readable even on passing
+criteria and advisory findings. It preserves historical records, including old answers
+without quotes, without retroactively imposing today's field or verdict restrictions.
+This reader does not admit new answers; answers awaiting settlement use the current
+receiving schema. Authentication and transition consistency still apply.
 
 ## Scope and plan revisions
 

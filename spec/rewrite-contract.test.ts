@@ -31,7 +31,7 @@ function plan() {
 }
 const gateContext: AnswerContext = {
   ...planContext, purpose: 'gate', criterionIds: ['c1'], resultIds: ['delivered'],
-  allowBlocked: false, final: true, revision: 'revision_a',
+  allowBlocked: false, final: true, revision: 'revision_a', briefTexts: ['Deliver independently reviewed evidence.'],
 };
 function gate() {
   return { kind: 'gate', answer: {
@@ -267,7 +267,7 @@ describe('rewrite contract: executable graph and repair references', () => {
 });
 describe('rewrite contract: one typed answer owner', () => {
   const pending = { status: 'not_assessed', reason: 'pending_work', evidence: 'The declared later work has not run.' };
-  const failed = { status: 'fail', evidence: 'A declared criterion remains unsatisfied.' };
+  const failed = { status: 'fail', evidence: 'A declared criterion remains unsatisfied.', briefQuote: 'Deliver independently reviewed evidence.' };
   const gateCases: [
     string,
     AnswerContext,
@@ -285,7 +285,7 @@ describe('rewrite contract: one typed answer owner', () => {
     ['unpermitted blocked acceptance', gateContext, { ...gate(), answer: { ...gate().answer, outcome: 'accepted_blocked', criteria: {
      c1: failed } } }, false],
     ['permitted blocked acceptance', { ...gateContext, allowBlocked: true }, { ...gate(), answer: { ...gate().answer,
-     outcome: 'accepted_blocked', criteria: { c1: failed } } }, true],
+     outcome: 'accepted_blocked' } }, true],
     ['unknown result label', gateContext, { ...gate(), answer: { ...gate().answer, result: 'undeclared' } }, false],
     ['required final result', gateContext, { ...gate(), answer: { ...gate().answer, result: undefined } }, false],
     ['intermediate result label', { ...gateContext, final: false }, gate(), false],

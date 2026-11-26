@@ -235,8 +235,8 @@ export async function provider() {
       const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter,'utf8')) : 0;
       fs.writeFileSync(counter,String(count+1));
       if (count === 0) answer = { outcome: 'rejected_repairable', reason: 'Synthetic first rejection.',
-        criteria: { correct: { status: 'fail', evidence: 'Synthetic failing evidence.' } },
-        findings: [{ id: 'finding_one', paths: [], reason: 'Synthetic finding to repair', criterionIds: ['correct'], class: 'criterion_unmet' }], remainingWork: ['Repair'] };
+        criteria: { correct: { status: 'fail', evidence: 'Synthetic failing evidence.', briefQuote: 'Match the host measurement.' } },
+        findings: [{ id: 'finding_one', paths: [], reason: 'Synthetic finding to repair', criterionIds: ['correct'], class: 'criterion_unmet', briefQuote: 'Match the host measurement.' }], remainingWork: ['Repair'] };
     }
     if (fixture.scenario === 'dependency-reuse') {
       const counter = join(fixture.root,'reviews');

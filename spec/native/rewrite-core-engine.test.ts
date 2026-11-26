@@ -31,8 +31,8 @@ it('returns retained rejection to its repair stage and then the same gate', asyn
       return { ok: true, value: r };
     first = false;
     const answer = { kind: 'gate' as const, answer: { outcome: 'rejected_repairable' as const, reason: 'Repair the delivery',
-     criteria: { correct: { status: 'fail' as const, evidence: 'Needs repair' } }, findings: [{ id: 'finding', paths: [], reason: 'Correctness',
-     criterionIds: ['correct'], class: 'criterion_unmet' as const }], remainingWork: ['Repair'] } };
+     criteria: { correct: { status: 'fail' as const, evidence: 'Needs repair', briefQuote: 'Deliver reviewed work' } }, findings: [{ id: 'finding', paths: [], reason: 'Correctness',
+     criterionIds: ['correct'], class: 'criterion_unmet' as const, briefQuote: 'Deliver reviewed work' }], remainingWork: ['Repair'] } };
     return { ok: true, value: { ...r, answer, answerRef: get(await putEvidence(f.journal, Buffer.from(JSON.stringify(answer)))) } };
   };
   expect(get(await runWorkflow({ writer: f.execution, scope: f.scope, ports, abort: new AbortController().signal })).status).toBe('complete');
@@ -105,7 +105,7 @@ it.each(['provider_unknown'] as const)('an unaccepted %s ending retains a reject
   ports.attempt = async (request) => { const r = get(await native(request)); if (request.stage.purpose !== 'gate')
     return { ok: true, value: r }; return { ok: true, value: { ...await answerReceipt(r, { kind: 'gate', answer: {
      outcome: 'rejected_irreparable', reason: 'Unaccepted terminal envelope', criteria: { correct: { status: 'fail',
-     evidence: 'Retained answer' } }, findings: [], remainingWork: [] } }), ending } }; };
+     evidence: 'Retained answer', briefQuote: 'Deliver reviewed work' } }, findings: [], remainingWork: [] } }), ending } }; };
   expect(get(await runWorkflow({ writer: f.execution, scope: f.scope, ports, abort: new AbortController().signal })).status).toBe('parked');
   expect((await f.projection()).backstop).toMatchObject({ gateSuffix: 0, failureSuffix: 0, bestPassCount: null });
   expect(seen.filter(r => r.stage.purpose === 'gate')).toHaveLength(1);

@@ -269,14 +269,23 @@ export async function observe(config, session, event) {
 
 /** @param {Config} config @param {string} session @param {() => Promise<unknown>} pause */
 export async function waitForWake(config, session, pause = () => sleep(1000)) {
-  for (;;) {
+  const directory = join(config.tasksRoot, session);
+  durableDirectory(directory);
+  const owner = join(directory, '.flowcrew-wake-owner'), token = randomUUID();
+  // Atomic rename hands polling authority to this invocation, even after a crash.
+  // Retain the marker: checking then unlinking could delete a newer owner's file.
+  publish(owner, token);
+  const isCurrent = () => read(owner) === token;
+  while (isCurrent()) {
     const snapshot = await observe(config, session, 'Wake');
+    // A claimed report must be returned even if ownership changes afterwards.
     if (snapshot.kind !== 'wait') return {
       code: snapshot.kind === 'report' ? 2 : 0,
       stderr: snapshot.reports.length ? `${snapshot.reports.map(({ run, status }) => `FlowCrew ${run}: ${details(/** @type {RunStatusFile} */ (status))}`).join('\n')}\nHandle these FlowCrew results or requests for attention in this session.\n` : '',
     };
     await pause(); // Cadence only; never an age, duration or deadline verdict.
   }
+  return { code: 0, stderr: '' };
 }
 
 /** @param {any} payload @param {any} config @param {string} event */

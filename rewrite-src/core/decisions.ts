@@ -4,7 +4,7 @@ import { readEvents } from '../records/state.js';
 import { changedTreePaths, frozenInputsMatch } from '../records/content.js';
 import { nextLifecycle, reservationOpen, attemptOpen, pendingGuidance } from '../records/state.js';
 import { isDeepStrictEqual } from 'node:util';
-import { answerSchema, type AnswerContext } from '../contract/answers.js';
+import type { AnswerContext } from '../contract/answers.js';
 import type { DeclaredCommand, Hash, Result } from '../contract/brief.js';
 import type { Stage } from '../contract/plan.js';
 import { commandBasis, commandEvidenceLabel, currentCommandReceipts, type AttemptReceipt, type BaseRun, type Checkpoint, type CommandReceipt, type CommandReuse, type Journal, type Conclusion, type GateTransition, type OutputReceipt, type RunProjection } from '../contract/runtime.js';
@@ -154,7 +154,8 @@ function decideUnguidedNext(projection: RunProjection): Result<Next> {
     const gate = byId.get(transition.stage);
     if (!gate || gate.purpose !== 'gate' || !gate.repair || transition.next !== gate.repair.stage) return invalid('Missing explicit repair return');
     if (!latest(gate.id)) continue;
-    const rejectedIndex = projection.attempts.findIndex(receipt => receipt.address.stage === gate.id && receipt.address.attempt === transition.attempt);
+    const rejectedIndex = projection.attempts.findLastIndex(receipt => receipt.address.stage === gate.id
+      && receipt.address.attempt === transition.attempt && delivered(receipt));
     if (rejectedIndex < 0) return invalid('Transition has no gate receipt');
     const newerGate = projection.attempts.slice(rejectedIndex + 1).some(receipt => receipt.address.stage === gate.id && delivered(receipt));
     if (newerGate) continue;
@@ -177,8 +178,8 @@ function decideUnguidedNext(projection: RunProjection): Result<Next> {
     const receipt = latest(gate.id);
     if (!receipt || !delivered(receipt)) continue;
     if (receipt.answer?.kind !== 'gate' || !receipt.answerRef) return invalid('Delivered gate lacks authenticated answer');
-    const parsed = answerSchema(context(gate)).parse(receipt.answer);
-    if (!parsed.ok) return parsed;
+    // Settlement authenticated and validated this answer under its receiving contract.
+    // Replay consumes that fact without applying today's answer grammar.
     const outcome = receipt.answer.answer.outcome;
     const applied = projection.transitions.find(item => item.stage === gate.id && item.attempt === receipt.address.attempt);
     if (applied && applied.outcome !== outcome) return invalid('Transition contradicts gate answer');
@@ -212,6 +213,8 @@ function stageContext(projection: RunProjection, stage: Stage, final: boolean,
   settled: (id: string) => boolean): AnswerContext {
   return {purpose:stage.purpose,final,revision:projection.plan.revision,roleIds:projection.launch.roles.map(role=>role.id),
     commandIds:projection.brief.declaration.commands.map(command=>command.id),checkpointIds:projection.checkpoints.filter(item=>item.state === 'safe').map(item=>item.id),
+    briefTexts:[projection.brief.declaration.body, ...(projection.brief.declaration.title ? [projection.brief.declaration.title] : []),
+      ...projection.brief.declaration.criteria.map(item=>item.text)],
     criterionIds:projection.brief.declaration.criteria.map(item=>item.id),resultIds:projection.brief.declaration.results.map(item=>item.id),
     allowBlocked:projection.brief.declaration.allowBlocked,settledStageIds:[...new Set([...projection.stageStates.filter(item=>settled(item.stage)).map(item=>item.stage),
       ...(stage.purpose === 'plan' ? [stage.id] : [])])]};

@@ -72,7 +72,7 @@ it('finite repair admission preserves the unvisited gate and return identity', a
     if (request.stage.id === 'progress' && !rejected) {
       rejected = true;
       return { ok: true, value: await answerReceipt(r, { kind: 'gate', answer: { outcome: 'rejected_repairable',
-       reason: 'Finite repair required', criteria: { correct: { status: 'fail', evidence: 'Needs repair' } }, findings: [],
+       reason: 'Finite repair required', criteria: { correct: { status: 'fail', evidence: 'Needs repair', briefQuote: 'Deliver reviewed work' } }, findings: [],
        remainingWork: ['Repair'] } }) };
     }
     return { ok: true, value: r };

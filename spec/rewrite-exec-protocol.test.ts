@@ -57,7 +57,7 @@ beforeEach(async () => {
     recordProcess: async () => ({ ok: true, value: 1 }) };
   context = { journal, process: ports, privateEnvironment: { PATH: '/explicit/tools', PRIVATE_MARKER: 'synthetic-only' } };
   const schema = answerSchema({ purpose: 'work', criterionIds: ['criterion'], resultIds: [], commandIds: [], checkpointIds: [],
-   roleIds: ['role'], allowBlocked: false, final: false, revision: 'revision' });
+   roleIds: ['role'], allowBlocked: false, final: false, revision: 'revision', briefTexts: ['Deliver the requested work.'] });
   request = { attempt: { run: 'run', stage: 'stage', attempt: 'attempt', invocation: 1 },
     role: { id: 'role', backend: 'codex', model: 'operator-model', effort: 'operator-effort', prompt: 'exact role', description: '' },
     preferences: { model: 'operator-model', effort: 'operator-effort', source: { model: 'role', effort: 'role' } },
@@ -328,7 +328,7 @@ it('both wire translators enforce literal progress/final result boundaries', asy
   ] as const;
   for (const [final, resultIds, outcome, result, expected] of rows) {
     const live = answerSchema({ purpose: 'gate', criterionIds: ['criterion'], resultIds: [...resultIds], commandIds: [],
-      checkpointIds: [], roleIds: ['role'], allowBlocked: true, final, revision: 'revision' });
+      checkpointIds: [], roleIds: ['role'], allowBlocked: true, final, revision: 'revision', briefTexts: ['Deliver the requested work.'] });
     request = { ...request, schema: live.json };
     const value = { kind: 'gate', answer: { outcome, reason: 'observed', criteria: {
       criterion: { status: 'pass', evidence: 'observed' } }, findings: [], remainingWork: [],
@@ -357,16 +357,16 @@ it('native schema translations preserve optional checkpoint, repair and commandE
   const ajv = new Ajv();
   for (const purpose of ['plan', 'work', 'gate'] as const) {
     const live = answerSchema({ purpose, criterionIds: ['criterion'], resultIds: ['label'], commandIds: ['command'],
-     checkpointIds: ['checkpoint'], roleIds: ['role'], allowBlocked: true, final: true, revision: 'revision' });
+     checkpointIds: ['checkpoint'], roleIds: ['role'], allowBlocked: true, final: true, revision: 'revision', briefTexts: ['Deliver the requested work.'] });
     request = { ...request, schema: live.json };
     const work = { id: 'work', purpose: 'work', role: 'role', after: [], instruction: 'goal', baseCheckpoint: 'checkpoint' };
     const gate = { id: 'gate', purpose: 'gate', role: 'role', after: ['work'], commands: ['command'],
      repair: { stage: 'work', returnsTo: 'gate' } };
     const plan = { kind: 'plan', answer: { baseRevision: 'revision', plan: { stages: [work, gate] } } };
-    const finding = { id: 'finding', paths: ['literal.txt'], reason: 'observed', criterionIds: ['criterion'], class: 'criterion_unmet',
+    const finding = { id: 'finding', paths: ['literal.txt'], reason: 'observed', criterionIds: ['criterion'], class: 'criterion_unmet', briefQuote: 'Deliver the requested work.',
      commandEvidence: request.input };
     const gateAnswer = { kind: 'gate', answer: { outcome: 'rejected_repairable', reason: 'observed', criteria: { criterion: {
-     status: 'fail', evidence: 'observed' } }, findings: [finding], remainingWork: [], result: 'label' } };
+     status: 'fail', evidence: 'observed', briefQuote: 'Deliver the requested work.' } }, findings: [finding], remainingWork: [], result: 'label' } };
     for (const backend of ['codex', 'claude'] as const) {
       await stream(success(backend));
       get(await adapter(backend).invoke(request));
@@ -387,7 +387,7 @@ it('native schema translations preserve optional checkpoint, repair and commandE
 });
 it('Codex wire schema obeys strict native object syntax without weakening optional-field grammar', async () => {
   request = { ...request, schema: answerSchema({ purpose: 'plan', criterionIds: ['criterion'], commandIds: ['check'], checkpointIds: ['base'],
-      resultIds: ['result'], roleIds: ['role'], allowBlocked: true, final: false, revision: 'revision' }).json };
+      resultIds: ['result'], roleIds: ['role'], allowBlocked: true, final: false, revision: 'revision', briefTexts: ['Deliver the requested work.'] }).json };
   await stream(success('codex'));
   await adapter('codex').invoke(request);
   const argv = vi.mocked(launchInvocation).mock.calls[0][1].argv;

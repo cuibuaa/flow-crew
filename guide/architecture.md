@@ -25,7 +25,10 @@ to. A brief with `decompose: true` starts with a planner stage whose proposed gr
 it. Pure admission checks role/command membership, dependencies and
 independent delivery topology for any graph, including an operator's `guide --plan`. The core selects and settles one mutable frontier at a time; DAG dependencies do not
 promise parallel execution. Authors produce work; independent gates judge all criteria
-in separate invocations without author guidance. Declared command
+in separate invocations without author guidance. The [answer schema](agent-protocol.md#answers-and-gate-verdicts)
+refuses acceptance alongside a declared violation and checks each violation's literal
+brief quote. Settlement owns answer validity; routing consumes settled facts without
+revalidating them against a newer grammar. Declared command
 receipts and output preservation constrain delivery beyond a model's verdict.
 
 Provider adapters decode their native stdout incrementally. One decoder supplies live

@@ -109,7 +109,11 @@ containers) must clean them up on every exit path, including failure and cancell
 
 Result IDs are opaque labels. A final accepting gate selects a declared result when labels
 exist. Set `allowBlocked` explicitly; a missing capability is evidence to judge, not
-automatic permission to waive required products.
+automatic permission to waive required products. Both accepting outcomes refuse a gate's
+own failing criteria or `criterion_unmet`/`regression` findings. Every such violation in
+a new answer quotes its brief sentence in `briefQuote`; the engine checks literal
+membership with whitespace normalised. Final gates still assess every criterion. See
+[gate answers and historical compatibility](agent-protocol.md#answers-and-gate-verdicts).
 
 ### Required commands that already fail on the base
 

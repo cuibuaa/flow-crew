@@ -86,7 +86,7 @@ describe('installer configuration ownership', () => {
 
 });
 
-it('registers the packaged standalone Claude hook, checks without launching a provider, and preserves user settings', () => {
+it('registers and upgrades the standalone Claude Wake timeout without duplicating hooks or changing user settings', () => {
   const f = fixture(), copy = join(f.root, 'package');
   mkdirSync(join(copy, 'dist-rewrite'), { recursive: true });
   writeFileSync(join(copy, 'dist-rewrite', 'cli.js'), 'throw Error("check must not invoke the CLI")');
@@ -98,6 +98,22 @@ it('registers the packaged standalone Claude hook, checks without launching a pr
   const config = JSON.parse(readFileSync(join(f.home, 'settings.json'), 'utf8'));
   expect(config.statusLine).toEqual(settings.statusLine);
   expect(config.hooks.Stop).toHaveLength(3);
+  for (const event of ['Stop', 'SessionStart']) {
+    const wakes = config.hooks[event].flatMap(group => group.hooks).filter(handler => handler.asyncRewake);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].timeout).toBe(86400);
+  }
+  // Reproduce v0.12.0 registrations: same owned command, no explicit timeout.
+  const legacy = JSON.parse(JSON.stringify(config));
+  for (const event of ['Stop', 'SessionStart'])
+    for (const group of legacy.hooks[event]) for (const handler of group.hooks)
+      if (handler.asyncRewake) delete handler.timeout;
+  writeFileSync(join(f.home, 'settings.json'), JSON.stringify(legacy));
+  expect(run('check').status).toBe(1);
+  for (const action of ['install', 'install', 'check']) {
+    const result = run(action); expect(result.status, result.stderr).toBe(0);
+  }
+  expect(JSON.parse(readFileSync(join(f.home, 'settings.json'), 'utf8'))).toEqual(config);
   expect(JSON.stringify(config)).toContain('dist-rewrite');
   expect(JSON.stringify(config)).not.toContain('session-push');
   expect(existsSync(join(f.home, 'hooks'))).toBe(false);
