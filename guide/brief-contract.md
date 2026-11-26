@@ -204,6 +204,22 @@ data it was chosen on. Keep the data that decides adoption outside the run and s
 finalist there once, in a step the run cannot influence. For a runnable positive case and
 a negative control, see `examples/README.md` (research briefs) in the FlowCrew checkout.
 
+Gains measured on the data a run searched on are often overfitting or extra inference
+compute, and a validation split drawn from the same source does not prevent that. When a
+research brief can end in a claimed improvement, its criteria ask the report to state each
+of these, or to say plainly which is missing:
+
+- **Production baseline:** the incumbent is measured as production runs it. Compare how its
+  inputs are built (prompt format, options, settings) with what production sends.
+- **Separate decision data:** the data that decides adoption shares no items and no
+  construction (source, generator, prompt format) with the data searched on.
+- **Compute-matched control:** the incumbent given the candidate's average inference budget,
+  for example more samples or retries.
+- **Executor:** the model or backend the result was measured on; a result from one executor
+  is untested on others.
+- **Search size:** how many variants were scored, with the interval on the search data.
+- **Cost:** what the change costs to produce and to use.
+
 ## Evidence authoring policy
 
 Apply these when the task makes the claim; ordinary engineering does not inherit research
