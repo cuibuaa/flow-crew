@@ -25,7 +25,7 @@ FlowCrew starts the agent from a written goal, has a separate reviewer judge the
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.22.2-brightgreen.svg" alt="Node >= 22.22.2" />
-  <img src="https://img.shields.io/badge/release-v0.12.0-2563eb.svg" alt="FlowCrew v0.12.0" />
+  <img src="https://img.shields.io/badge/release-v0.12.1-2563eb.svg" alt="FlowCrew v0.12.1" />
   <img src="https://img.shields.io/badge/default_backend-Codex-111827.svg" alt="Codex default backend" />
 </p>
 

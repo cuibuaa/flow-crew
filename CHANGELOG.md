@@ -8,6 +8,26 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
+## [0.12.1] - 2026-11-25
+
+### Upgrade notes
+
+- Re-run the installer after upgrading. It re-registers the Claude Code Wake hook with a 24-hour timeout, replacing older registrations that Claude Code ended after ten minutes.
+
+### Fixed
+
+- **Claude Code Wake hook timeout.** Claude Code enforces its 600-second command default on asyncRewake hooks, so an idle session stopped hearing about runs after ten minutes. Wake is now registered with a timeout of 86400 seconds.
+- **One Wake waiter per Claude Code session.** Claude Code keeps earlier asyncRewake instances alive within a process, so each Stop and SessionStart added another waiter that kept polling. Each Wake now records an owner token, and a waiter that has been superseded exits at its next poll. Claims still decide which process reports a transition.
+- **Repair after a corrected gate rejection.** When the engine refuses a gate answer and the gate then sends a corrected `rejected_repairable`, both receipts share one attempt id. The engine now dispatches repair from the delivered receipt, so the corrected rejection no longer cancels its own repair.
+
+### Changed
+
+- **Gate answers are checked when they are admitted.** An answer is refused, and the gate is asked again, in two cases:
+  - it accepts while it reports a failed criterion or a `criterion_unmet` or `regression` finding;
+  - it quotes the brief with a sentence that does not appear in the brief (whitespace is normalised).
+
+  Answers that were already settled are not re-validated, so runs in flight keep their recorded verdicts.
+
 ## [0.12.0] - 2026-11-23
 
 ### Added

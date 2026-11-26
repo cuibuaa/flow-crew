@@ -1,6 +1,6 @@
 {
   "name": "flowcrew",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "FlowCrew turns a written goal into isolated work with independent verification and an honest report.",
   "main": "dist-rewrite/cli.js",
   "bin": {
